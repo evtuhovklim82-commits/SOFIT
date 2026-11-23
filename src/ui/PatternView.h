@@ -19,7 +19,7 @@ public:
     void setSnapToObjects(bool enabled);
     void cancelDrawing();
     void replaceEntity(qsizetype index, const opc::Entity& entity);
-    void selectEntity(qsizetype index);
+    void selectEntities(const QVector<qsizetype>& indices);
     bool entityVisible(qsizetype index) const;
     void setEntityVisible(qsizetype index, bool visible);
     void applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances,
@@ -30,7 +30,7 @@ public:
     void removeEntity(qsizetype index);
     void fitDrawing();
     void zoomAtCenter(qreal factor);
-    qsizetype selectedIndex() const;
+    QVector<qsizetype> selectedIndices() const;
 
 signals:
     void entityDrawn(const opc::Entity& entity);

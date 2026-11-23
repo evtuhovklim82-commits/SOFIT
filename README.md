@@ -1,4 +1,4 @@
-# SOFIT 2.2 Professional
+# SOFIT 2.3 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -51,7 +51,7 @@ Use `macdeployqt` when packaging the app for distribution.
 - SOFIT opens `.sofit` formats 1–13 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Silhouette-only history uses format 11 (SOFIT 1.7+). Contour history uses format 12 (SOFIT 1.8+). Saved seam links use format 13 (SOFIT 2.1+). SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
 
-## Workspace in 2.2
+## Workspace
 
 Use the menus or the Workflow toolbar to move among the five stages. Commands remain available
 as the project evolves, so you can return to construction or modeling after checking graded pieces.
@@ -65,6 +65,14 @@ as the project evolves, so you can return to construction or modeling after chec
 **View → Keyboard Shortcuts** saves personal bindings for selected workflow commands.
 **View → Workflow** controls the toolbar. Both settings are separate from the pattern file.
 **Help → GRAFIS ⇄ SOFIT** links to the publisher's documentation for corresponding tasks.
+
+## Rotating formula construction objects
+
+1. Show **View → Layers → Construction Lines**. Select construction points, lines or curves in the Objects dock or Ctrl-click them on the canvas. Use **Construction → Move Selection to Construction Layer** for formula edges that are currently on the Main layer.
+2. Open **Modeling → Rotate Construction…**. Choose a named formula point outside the selection. Enter an angle in degrees. Positive angles turn clockwise on the drawing.
+3. Open **Modeling → Construction Tree** to see the inputs and pivot. Double-click the step to change its angle. SOFIT replays the history with each size's measurements and checks dependent operations before committing the edit. Undo and Redo restore the geometry and history together.
+
+SOFIT rotates the selected objects as recorded. Include any separate construction points that need to move with an edge. The operation is limited to construction geometry and uses the same angle in each size.
 
 ## Checking linked seams
 

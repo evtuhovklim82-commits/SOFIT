@@ -278,6 +278,81 @@ void checkLinkedTrouserBlock() {
     roundTripAndExport(*trousers, "L");
 }
 
+void checkRotationHistory() {
+    ParametricDraft draft;
+    draft.measurements = {{"width", 100}, {"pivot_offset", 0}};
+    draft.points = {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "width"},
+                    {"D", "0", "width"}, {"P", "width / 2", "width / 2 + pivot_offset"},
+                    {"E", "width / 2", "0"}, {"F", "width / 2", "width"},
+                    {"Q", "width * 0.7", "width / 2"}};
+    draft.edges = {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}},
+                   {"left", "D", "A", {}}, {"guide", "E", "F", {}}, {"curve", "E", "F", "Q"}};
+    auto pattern = formulaPanel(draft, {"guide"});
+    const auto curve = namedEdge(pattern, "curve");
+    auto edge = pattern.entities()[curve];
+    edge.layer = Layer::Construction;
+    pattern.replace(curve, edge);
+    pattern.production().sizes.append({"L", {{"width", 140}}});
+    const auto guide = namedEdge(pattern, "guide");
+    const auto pivot = namedEdge(pattern, "P");
+    const auto point = namedEdge(pattern, "Q");
+    const auto selection = QVector<qsizetype>{guide, point, curve};
+    QString error;
+
+    check(!pattern.appendRotation({guide, guide}, pivot, 90, &error)
+          && !pattern.appendRotation({guide, pivot}, pivot, 90, &error)
+          && !pattern.appendRotation({namedEdge(pattern, "top")}, pivot, 90, &error)
+          && !pattern.appendRotation(selection, guide, 90, &error)
+          && pattern.modelingHistory().isEmpty() && pattern.entities()[guide].a == QPointF(50, 0),
+          "Reject invalid or ambiguous selections atomically");
+    check(pattern.appendRotation(selection, pivot, 90, &error), error);
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        QVector<qsizetype> sources;
+        const auto grade = gradedPattern(pattern, size, &sources);
+        const double width = size.isEmpty() ? 100 : 140;
+        check(sources.contains(guide) && sources.contains(curve) && sources.contains(point),
+              "Keep all transformed geometry in the graded output");
+        const auto& line = grade.entities()[sources.indexOf(guide)];
+        const auto& quadratic = grade.entities()[sources.indexOf(curve)];
+        const auto& control = grade.entities()[sources.indexOf(point)];
+        check(QLineF(line.a, {width, width / 2}).length() < 0.001
+              && QLineF(line.b, {0, width / 2}).length() < 0.001
+              && quadratic.a == line.a && quadratic.b == line.b && quadratic.control == control.a
+              && near(control.a.x(), width / 2) && near(control.a.y(), width * 0.7)
+              && near(analyzePiece(grade, 0).bounds.width(), width),
+              "Rigidly rotate points, lines and curve controls around each size's pivot");
+    }
+    roundTripAndExport(pattern, "L");
+    auto edited = pattern;
+    auto settings = pattern.modelingHistory().first();
+    settings.rotationDegrees = -90;
+    check(edited.editModelingStep(0, settings, &error)
+          && edited.entities()[guide].a == pattern.entities()[guide].b, "Replay edited angle from formulas");
+    check(edited.removeLastModelingStep(&error) && edited.entities()[guide].a == QPointF(50, 0),
+          "Removing rotation restores formula geometry");
+
+    check(pattern.appendContour(0, ContourOperation::Cut, {guide}, 0, &error), error);
+    const auto original = pattern.modelingHistory();
+    const auto stableName = QStringLiteral("@2:seam-A");
+    const auto seam = pattern.entities()[namedEdge(pattern, stableName)];
+    settings.rotationDegrees = 22.5;
+    check(!pattern.editModelingStep(0, settings, &error) && error.contains("Modeling step 2")
+          && pattern.modelingHistory() == original
+          && pattern.entities()[namedEdge(pattern, stableName)].a == seam.a,
+          "An invalid downstream cut rolls back the edited angle, contour and generated references");
+    auto incompatibleSizes = pattern.production();
+    incompatibleSizes.sizes[0].measurements.insert("pivot_offset", 5);
+    check(!pattern.validateParametricSizes(incompatibleSizes, &error) && error.contains("Size 'L'")
+          && error.contains("Modeling step 2") && pattern.modelingHistory() == original,
+          "A rotated guide that misses the contour in one size rejects the proposed size table");
+    auto renamedPivot = draft;
+    renamedPivot.points[4].name = "OtherPivot";
+    check(!pattern.setParametricDraft(renamedPivot, &error) && error.contains("Rotation pivot")
+          && pattern.parametricDraft() == draft && pattern.modelingHistory() == original,
+          "A missing pivot leaves the active draft and all history intact");
+    roundTripAndExport(pattern, "L");
+}
+
 void checkContourHistory() {
     ParametricDraft draft;
     draft.measurements = {{"width", 100}, {"height", 80}, {"cut_y", 30}};
@@ -592,6 +667,7 @@ int main(int argc, char** argv) {
     QGuiApplication app(argc, argv);
     checkModeling();
     checkContourHistory();
+    checkRotationHistory();
     checkSeamLinks();
     checkLinkedTrouserBlock();
     checkTemplates();
