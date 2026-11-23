@@ -1,4 +1,4 @@
-# SOFIT 0.5 — independent CAD prototype
+# SOFIT 0.6 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -41,7 +41,7 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
 - Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
-- Save patterns in `.sofit` version 5. SOFIT opens versions 1–4 and legacy version 1 `.opcad` drawings. SVG export includes enabled layers and uses millimeters.
+- Save patterns in `.sofit` version 6. SOFIT opens versions 1–5 and legacy version 1 `.opcad` drawings. SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
 
 ## Pattern pieces
@@ -56,6 +56,16 @@ Each piece can have one simple outer contour. The checker accepts unordered edge
 A piece has a single allowance width. Straight sections are offset by that distance, with mitered joins. Quadratics use an adaptive polygonal approximation with a chord deviation of at most 0.01 mm. Perimeter estimation uses a total error budget of 0.01 mm for the quadratic segments. The allowance of a curved section is approximate. Ambiguous close curve approaches, overlong miters and offsets that would overlap or collapse are rejected. Holes, several contours in one piece and per-edge allowances are outside this release. When an edit invalidates an existing allowance, the document retains the entered width and the allowance disappears until geometry supports it again.
 
 SOFIT 5 saves piece names, membership, layer assignments, layer visibility and allowance widths. Contours, measurements and allowance geometry are rebuilt on load. Individual object visibility is a session setting.
+
+## Grading sizes and fabric layout
+
+1. Open **Pattern → Sizes, Measurements and Grade Rules…**. On **Measurements**, enter the size and one measurement in mm per row. Repeat the size name for more measurements. A size can also have an empty measurement list.
+2. On **Grade Rules**, add a rule for each point that moves in a target size. Select the piece and the point in base coordinates, then enter ΔX and ΔY in mm. Coincident points of the same piece share the offset. Rectangle corners and quadratic control points are available. Measurements are recorded for reference and the offsets are entered explicitly for each size.
+3. Enable the sizes to compare in **Pattern → Size Overlays**. The menu swatches match the canvas colors. **File → Export DXF…** and **Export PDF for Printing…** offer the base pattern or a single target size.
+4. Open **Pattern → Fabric Layout…**, set the width in mm, choose a piece and size, and click **Add copy**. Add each required copy, drag the copies inside the fabric, and use **Turn 180°** where the fabric allows it. The declared grainline is aligned with the fabric length. Without a grainline the original orientation is used. The outline includes the seam allowance when defined.
+5. Read the length from the fabric start to the furthest cut edge. Resolve reported overlaps and pieces outside the fabric before using the estimate. Click **OK** and save the pattern to retain the width and positions.
+
+Grade rules reference the piece and exact base point coordinates. After moving base geometry, review rules labelled **Missing point**. If a contour joins endpoints with slightly different coordinates, give both points the same offset to keep the join. Fabric layout uses existing contour validation and flattened cut polygons. Layout is manual and is saved with the project. The PDF and DXF actions export patterns.
 
 ## Full-scale printing
 

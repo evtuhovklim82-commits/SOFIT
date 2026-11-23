@@ -1,4 +1,5 @@
 #include "PatternDocument.h"
+#include "Production.h"
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -56,8 +57,14 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     QJsonArray layerVisibility;
     for (bool visible : layerVisibility_)
         layerVisibility.append(visible);
-    const QJsonObject root{{"format", "SOFIT"}, {"version", 5}, {"objects", objects},
-                           {"pieces", pieces}, {"layerVisibility", layerVisibility}};
+    const QJsonObject root{{"format", "SOFIT"}, {"version", 6}, {"objects", objects},
+                           {"pieces", pieces}, {"layerVisibility", layerVisibility},
+                           {"production", saveProduction(production_)}};
+    ProductionData validated;
+    if (!loadProduction(root.value("production").toObject(), pieces_.size(), validated)) {
+        if (error) *error = QStringLiteral("Invalid grading or fabric layout data");
+        return false;
+    }
     const auto data = QJsonDocument(root).toJson();
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
@@ -83,7 +90,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto format = root.value("format").toString();
     const auto version = root.value("version").toDouble();
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
-    const bool current = (version == 2 || version == 3 || version == 4 || version == 5) && format == "SOFIT";
+    const bool current = (version == 2 || version == 3 || version == 4 || version == 5 || version == 6) && format == "SOFIT";
     const auto objects = root.value(legacy ? "segments" : "objects");
     if ((!legacy && !current) || !objects.isArray())
         return fail(QStringLiteral("Unsupported document format"));
@@ -174,6 +181,11 @@ bool PatternDocument::load(const QString& path, QString* error) {
         }
         parsed.append(entity);
     }
+    ProductionData production;
+    if (version >= 6 && !loadProduction(root.value("production").toObject(), pieces.size(), production))
+        return fail(QStringLiteral("Invalid grading or fabric layout data"));
+
+    production_ = std::move(production);
     entities_ = std::move(parsed);
     pieces_ = std::move(pieces);
     layerVisibility_ = layerVisibility;

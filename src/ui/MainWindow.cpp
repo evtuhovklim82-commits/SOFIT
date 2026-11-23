@@ -3,6 +3,10 @@
 #include "PatternPdf.h"
 #include "PatternDxf.h"
 #include "PieceMarkings.h"
+#include "Production.h"
+#include "ProductionDialogs.h"
+#include "EntityPath.h"
+#include <QPixmap>
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QAction>
@@ -34,6 +38,16 @@
 #include <numbers>
 
 namespace {
+QColor sizeColor(qsizetype index) {
+    return QColor::fromHsv((265 + 137 * index) % 360, 205, 188);
+}
+
+void fillExportSizes(QComboBox& box, const opc::PatternDocument& document) {
+    box.addItem(QCoreApplication::translate("MainWindow", "Base pattern"), QString{});
+    for (const auto& size : document.production().sizes)
+        box.addItem(size.name, size.name);
+}
+
 class PatternCommand : public QUndoCommand {
 public:
     PatternCommand(opc::PatternDocument& document, opc::PatternDocument after, const QString& text)
@@ -109,7 +123,7 @@ private:
 }
 
 MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
-    setWindowTitle(QStringLiteral("SOFIT 0.5[*]"));
+    setWindowTitle(QStringLiteral("SOFIT 0.6[*]"));
     resize(1100, 750);
     setCentralWidget(view_);
     setStyleSheet(QStringLiteral(
@@ -203,6 +217,46 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Remove Objects from Piece"));
     });
     pattern->addAction(tr("Piece, Contour and Allowance…"), this, &MainWindow::managePiece);
+    pattern->addAction(tr("Sizes, Measurements and Grade Rules…"), this, [this] {
+        if (auto production = editGrading(this, doc_)) {
+            if (opc::saveProduction(*production) == opc::saveProduction(doc_.production()))
+                return;
+            auto updated = doc_;
+            updated.production() = std::move(*production);
+            applyPatternEdit(std::move(updated), tr("Edit Sizes and Grade Rules"));
+        }
+    });
+    pattern->addAction(tr("Fabric Layout…"), this, [this] {
+        if (auto production = editFabricLayout(this, doc_)) {
+            if (opc::saveProduction(*production) == opc::saveProduction(doc_.production()))
+                return;
+            auto updated = doc_;
+            updated.production() = std::move(*production);
+            applyPatternEdit(std::move(updated), tr("Edit Fabric Layout"));
+        }
+    });
+    auto* overlay = pattern->addMenu(tr("Size Overlays"));
+    connect(overlay, &QMenu::aboutToShow, this, [this, overlay] {
+        overlay->clear();
+        const auto& sizes = doc_.production().sizes;
+        if (sizes.isEmpty())
+            overlay->addAction(tr("No sizes defined"))->setEnabled(false);
+        for (qsizetype i = 0; i < sizes.size(); ++i) {
+            const auto name = sizes[i].name;
+            QPixmap swatch(14, 14);
+            swatch.fill(sizeColor(i));
+            auto* action = overlay->addAction(QIcon(swatch), name);
+            action->setCheckable(true);
+            action->setChecked(overlaySizes_.contains(name));
+            connect(action, &QAction::toggled, this, [this, name](bool visible) {
+                if (visible)
+                    overlaySizes_.insert(name);
+                else
+                    overlaySizes_.remove(name);
+                refreshPieceDisplay();
+            });
+        }
+    });
     pattern->addSeparator();
     pattern->addAction(tr("Move Selection to Main Layer"), this,
                        [this] { setSelectedLayer(opc::Layer::Main); });
@@ -336,6 +390,24 @@ void MainWindow::refreshPieceDisplay() {
         }
     }
     view_->applyLayers(doc_, allowances, markings);
+
+    QVector<QPair<QPainterPath, QColor>> overlays;
+    for (qsizetype i = 0; i < doc_.production().sizes.size(); ++i) {
+        const auto& size = doc_.production().sizes[i].name;
+        if (!overlaySizes_.contains(size))
+            continue;
+        QVector<qsizetype> sources;
+        const auto graded = opc::gradedPattern(doc_, size, &sources);
+        QPainterPath path;
+        for (qsizetype j = 0; j < graded.entities().size(); ++j) {
+            const auto& entity = graded.entities()[j];
+            if (entity.piece >= 0 && doc_.layerVisible(entity.layer) && view_->entityVisible(sources[j]))
+                path.addPath(opc::entityPath(entity));
+        }
+        if (!path.isEmpty())
+            overlays.append({std::move(path), sizeColor(i)});
+    }
+    view_->setSizeOverlays(overlays);
 }
 
 void MainWindow::refreshObjects() {
@@ -592,6 +664,7 @@ void MainWindow::managePiece() {
     auto updated = doc_;
     if (result == 2) {
         updated.pieces().removeAt(piece);
+        updated.production().removePiece(piece);
         for (qsizetype index = 0; index < updated.entities().size(); ++index) {
             auto entity = updated.entities()[index];
             if (entity.piece < piece)
@@ -739,6 +812,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::replaceDocument(opc::PatternDocument document, const QString& path) {
+    overlaySizes_.clear();
     undo_.clear();
     doc_ = std::move(document);
     currentPath_ = path;
@@ -789,18 +863,48 @@ bool MainWindow::saveDocument() {
     return true;
 }
 
+opc::PatternDocument MainWindow::exportPattern(const QString& size, QVector<bool>& visibility,
+                                                QVector<opc::PieceGeometry>& geometry) const {
+    QVector<qsizetype> sourceIndices;
+    auto pattern = opc::gradedPattern(doc_, size, &sourceIndices);
+    for (const auto index : sourceIndices)
+        visibility.append(view_->entityVisible(index));
+    if (size.isEmpty())
+        geometry = pieces_;
+    else {
+        for (qsizetype i = 0; i < pattern.pieces().size(); ++i)
+            geometry.append(opc::analyzePiece(pattern, i));
+    }
+    return pattern;
+}
+
 void MainWindow::exportDxf() {
+    QString targetSize;
+    if (!doc_.production().sizes.isEmpty()) {
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Export DXF"));
+        QFormLayout form(&dialog);
+        QComboBox sizes;
+        fillExportSizes(sizes, doc_);
+        form.addRow(tr("Size"), &sizes);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        targetSize = sizes.currentData().toString();
+    }
     auto path = QFileDialog::getSaveFileName(this, tr("Export DXF"), {}, tr("DXF (*.dxf)"));
     if (path.isEmpty())
         return;
     if (!path.endsWith(".dxf", Qt::CaseInsensitive))
         path += ".dxf";
     QVector<bool> visibility;
-    visibility.reserve(doc_.entities().size());
-    for (qsizetype i = 0; i < doc_.entities().size(); ++i)
-        visibility.append(view_->entityVisible(i));
+    QVector<opc::PieceGeometry> geometry;
+    const auto pattern = exportPattern(targetSize, visibility, geometry);
     QString error;
-    if (!opc::exportPatternDxf(path, doc_, visibility, pieces_, error))
+    if (!opc::exportPatternDxf(path, pattern, visibility, geometry, error))
         QMessageBox::warning(this, tr("Export failed"), error);
     else
         statusBar()->showMessage(tr("DXF exported"), 3000);
@@ -810,6 +914,10 @@ void MainWindow::exportPdf() {
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Export PDF for Printing"));
     QFormLayout form(&dialog);
+    QComboBox sizes;
+    fillExportSizes(sizes, doc_);
+    if (sizes.count() > 1)
+        form.addRow(tr("Size"), &sizes);
     QComboBox paper;
     paper.addItem(QStringLiteral("A4"), QPageSize::A4);
     paper.addItem(QStringLiteral("A3"), QPageSize::A3);
@@ -835,20 +943,18 @@ void MainWindow::exportPdf() {
         path += ".pdf";
 
     QVector<bool> visibility;
-    visibility.reserve(doc_.entities().size());
-    for (qsizetype i = 0; i < doc_.entities().size(); ++i)
-        visibility.append(view_->entityVisible(i));
+    QVector<opc::PieceGeometry> geometry;
+    const auto pattern = exportPattern(sizes.currentData().toString(), visibility, geometry);
     QVector<QPolygonF> allowances;
-    allowances.reserve(pieces_.size());
-    for (const auto& geometry : pieces_)
-        allowances.append(geometry.allowance);
+    for (const auto& piece : geometry)
+        allowances.append(piece.allowance);
 
     const opc::PatternPdfOptions options{
         static_cast<QPageSize::PageSizeId>(paper.currentData().toInt()),
         static_cast<QPageLayout::Orientation>(orientation.currentData().toInt())
     };
     QString error;
-    if (!opc::exportPatternPdf(path, doc_, visibility, allowances, options, error))
+    if (!opc::exportPatternPdf(path, pattern, visibility, allowances, options, error))
         QMessageBox::warning(this, tr("Export failed"), error);
     else
         statusBar()->showMessage(tr("PDF exported"), 3000);

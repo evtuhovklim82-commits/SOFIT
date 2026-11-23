@@ -1,5 +1,6 @@
 #pragma once
 #include <QGraphicsView>
+#include <QColor>
 #include <QPolygonF>
 #include <optional>
 #include "../core/PatternDocument.h"
@@ -22,6 +23,7 @@ public:
     void setEntityVisible(qsizetype index, bool visible);
     void applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances,
                      const QVector<QPainterPath>& markings = {});
+    void setSizeOverlays(const QVector<QPair<QPainterPath, QColor>>& overlays);
     void setEntities(const QVector<opc::Entity>& entities);
     void insertEntity(qsizetype index, const opc::Entity& entity);
     void removeEntity(qsizetype index);
@@ -70,6 +72,7 @@ private:
     QVector<QGraphicsPathItem*> items_;
     QVector<bool> entityVisibility_;
     QVector<QGraphicsPathItem*> allowances_;
+    QVector<QGraphicsPathItem*> sizeOverlays_;
     bool mainVisible_ = true;
     bool constructionVisible_ = true;
 };

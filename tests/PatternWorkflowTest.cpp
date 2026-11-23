@@ -10,6 +10,10 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QGraphicsItem>
+#include <QGraphicsScene>
+#include <QMenu>
+#include <QTabWidget>
+#include <QTableWidget>
 #include <QInputDialog>
 #include <QLabel>
 #include <QPushButton>
@@ -40,6 +44,7 @@ template<typename Dialog, typename Edit>
 void runDialog(QAction& command, Edit edit) {
     QTimer::singleShot(0, [&] {
         auto* dialog = qobject_cast<Dialog*>(QApplication::activeModalWidget());
+        if (!dialog) std::cerr << "Action: " << command.text().toStdString() << "\n";
         check(dialog, "Expected modal dialog");
         edit(*dialog);
     });
@@ -201,6 +206,88 @@ int main(int argc, char** argv) {
     check(!opc::exportPatternPdf(pdfPath, wide, {false, false}, {}, {}, error) && !error.isEmpty(),
           "Reject blank exports");
     check(pageCount(readPdf(pdfPath)) == 4, "Rejected exports leave the previous file intact");
+
+    runDialog<QDialog>(action(window, "Sizes, Measurements and Grade Rules…"), [](QDialog& dialog) {
+        const auto click = [&dialog](const QString& text) {
+            for (auto* button : dialog.findChildren<QPushButton*>()) {
+                if (button->text() == text) {
+                    button->click();
+                    return;
+                }
+            }
+            check(false, "Find production dialog button");
+        };
+        auto* tabs = dialog.findChild<QTabWidget*>();
+        auto* measurements = tabs->widget(0)->findChild<QTableWidget*>();
+        click("Add measurement row");
+        measurements->item(0, 0)->setText("L");
+        measurements->item(0, 1)->setText("Chest");
+        measurements->item(0, 2)->setText("1000");
+        tabs->setCurrentIndex(1);
+        auto* rules = tabs->widget(1)->findChild<QTableWidget*>();
+        click("Add grade rule");
+        rules->item(0, 0)->setText("L");
+        auto* points = qobject_cast<QComboBox*>(rules->cellWidget(0, 2));
+        points->setCurrentIndex(points->findData(QPointF(100, 40)));
+        rules->item(0, 3)->setText("25");
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    auto* overlayMenu = action(window, "Size Overlays").menu();
+    overlayMenu->aboutToShow();
+    overlayMenu->actions().front()->trigger();
+    check(overlayCount(view) == 2, "Display a graded size over the base pattern");
+
+    runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
+        dialog.findChild<QDoubleSpinBox*>()->setValue(1450);
+        const auto combos = dialog.findChildren<QComboBox*>();
+        combos.last()->setCurrentIndex(1);
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Add copy")
+                button->click();
+        }
+        bool estimate = false;
+        for (auto* label : dialog.findChildren<QLabel*>())
+            estimate |= label->text().contains("Copies: 1") && label->text().contains("Invalid contours: 0");
+        check(estimate, "Report fabric layout usage");
+        auto* layoutView = dialog.findChild<QGraphicsView*>();
+        const auto selected = layoutView->scene()->selectedItems();
+        check(selected.size() == 1, "Select the added copy");
+        selected.front()->setPos(20, 40);
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Turn 180°")
+                button->click();
+        }
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    action(window, "&Save").trigger();
+    check(loaded.load(pattern) && loaded.production().sizes.size() == 1 && loaded.production().rules.size() == 1
+          && loaded.production().placements.size() == 1 && loaded.production().placements.front().size == "L"
+          && loaded.production().fabricWidth == 1450
+          && loaded.production().placements.front().position == QPointF(20, 40)
+          && loaded.production().placements.front().reversed, "Save grading and layout through the UI");
+
+    const auto gradedDxfPath = temp.filePath("graded.dxf");
+    const auto gradedPdfPath = temp.filePath("graded.pdf");
+    const auto exportSize = [&](QAction& command, const QString& path) {
+        runDialog<QDialog>(command, [&path](QDialog& dialog) {
+            auto* sizes = dialog.findChild<QComboBox*>();
+            check(sizes && sizes->findData(QStringLiteral("L")) == 1, "Offer graded size for export");
+            sizes->setCurrentIndex(1);
+            QTimer::singleShot(0, [&path] {
+                auto* save = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+                check(save, "Choose graded export file");
+                save->selectFile(path);
+                static_cast<QDialog*>(save)->accept();
+            });
+            dialog.accept();
+        });
+    };
+    exportSize(action(window, "Export &DXF…"), gradedDxfPath);
+    QFile gradedDxf(gradedDxfPath);
+    check(gradedDxf.open(QIODevice::ReadOnly) && gradedDxf.readAll().contains("\n125\n"),
+          "Write the shifted X coordinate to DXF");
+    exportSize(pdfAction, gradedPdfPath);
+    check(pageCount(readPdf(gradedPdfPath)) == 1, "Export the graded pattern to PDF");
 
     action(window, "&New").trigger();
     check(tree.topLevelItemCount() == 0 && overlayCount(view) == 0, "Clear piece state in a new document");

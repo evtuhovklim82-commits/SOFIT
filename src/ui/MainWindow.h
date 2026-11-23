@@ -1,6 +1,7 @@
 #pragma once
 #include <QGraphicsScene>
 #include <QAction>
+#include <QSet>
 #include "../core/PieceGeometry.h"
 #include <QMainWindow>
 #include <QUndoStack>
@@ -27,6 +28,8 @@ private:
     void exactInput();
     void refreshObjects();
     void refreshPieceDisplay();
+    opc::PatternDocument exportPattern(const QString& size, QVector<bool>& visibility,
+                                       QVector<opc::PieceGeometry>& geometry) const;
     void moveEntity(qsizetype index, const QPointF& offset);
     void exportSvg();
     void exportPdf();
@@ -47,4 +50,5 @@ private:
     QString currentPath_;
     std::array<QAction*, 3> layerActions_{};
     QVector<opc::PieceGeometry> pieces_;
+    QSet<QString> overlaySizes_;
 };

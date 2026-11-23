@@ -4,7 +4,7 @@
 #include <QVector>
 #include <array>
 #include <optional>
-#include <optional>
+#include "ProductionData.h"
 
 namespace opc {
 enum class Shape { Point, Line, Rectangle, Circle, Curve };
@@ -38,12 +38,15 @@ public:
     const QVector<Entity>& entities() const { return entities_; }
     QVector<Piece>& pieces() { return pieces_; }
     const QVector<Piece>& pieces() const { return pieces_; }
+    ProductionData& production() { return production_; }
+    const ProductionData& production() const { return production_; }
     bool layerVisible(Layer layer) const { return layerVisibility_[static_cast<int>(layer)]; }
     void setLayerVisible(Layer layer, bool visible) { layerVisibility_[static_cast<int>(layer)] = visible; }
     bool save(const QString& path, QString* error = nullptr) const;
     bool load(const QString& path, QString* error = nullptr);
 
 private:
+    ProductionData production_;
     QVector<Entity> entities_;
     QVector<Piece> pieces_;
     std::array<bool, 3> layerVisibility_{true, true, true};

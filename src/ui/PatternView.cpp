@@ -237,6 +237,7 @@ void PatternView::setEntities(const QVector<opc::Entity>& entities) {
     entities_.clear();
     entityVisibility_.clear();
     allowances_.clear();
+    sizeOverlays_.clear();
     scene()->clear();
     for (const auto& entity : entities)
         insertEntity(items_.size(), entity);
@@ -329,6 +330,17 @@ void PatternView::applyLayers(const opc::PatternDocument& document, const QVecto
     }
 }
 
+void PatternView::setSizeOverlays(const QVector<QPair<QPainterPath, QColor>>& overlays) {
+    qDeleteAll(sizeOverlays_);
+    sizeOverlays_.clear();
+    for (const auto& [path, color] : overlays) {
+        auto* item = scene()->addPath(path, QPen(color, 0, Qt::DashDotLine));
+        item->setAcceptedMouseButtons(Qt::NoButton);
+        item->setZValue(-0.5);
+        sizeOverlays_.append(item);
+    }
+}
+
 qsizetype PatternView::selectedIndex() const {
     const auto selection = scene()->selectedItems();
     if (selection.isEmpty())
@@ -343,6 +355,8 @@ void PatternView::fitDrawing() {
             bounds = bounds.united(item->sceneBoundingRect());
     }
     for (const auto* item : allowances_)
+        bounds = bounds.united(item->sceneBoundingRect());
+    for (const auto* item : sizeOverlays_)
         bounds = bounds.united(item->sceneBoundingRect());
     if (bounds.isNull()) {
         resetTransform();
