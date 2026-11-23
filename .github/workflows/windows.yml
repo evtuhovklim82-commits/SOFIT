@@ -1,4 +1,4 @@
-name: Windows portable build
+name: Windows installer and portable build
 on:
   workflow_dispatch:
   push:
@@ -33,9 +33,16 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/SOFIT | Out-Null
           Copy-Item build/Release/sofit.exe dist/SOFIT/SOFIT.exe
-          windeployqt --release --no-translations dist/SOFIT/SOFIT.exe
+          windeployqt --release --no-translations --no-compiler-runtime dist/SOFIT/SOFIT.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($file in @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "platforms/qwindows.dll")) {
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw 'Visual Studio C++ tools not found' }
+          $crt = Get-Item "$vs/VC/Redist/MSVC/*/x64/Microsoft.VC143.CRT" |
+            Sort-Object { [version]$_.Parent.Parent.Name } -Descending | Select-Object -First 1
+          if (!$crt) { throw 'MSVC 2022 x64 redistributable DLLs not found' }
+          Copy-Item "$($crt.FullName)/*.dll" dist/SOFIT
+          foreach ($file in @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "platforms/qwindows.dll", "vcruntime140.dll", "msvcp140.dll")) {
             if (!(Test-Path "dist/SOFIT/$file")) { throw "Missing runtime file $file" }
           }
           Copy-Item README.md, LICENSE-NOTICE.txt dist/SOFIT
@@ -60,7 +67,53 @@ jobs:
             }
             if ($process.ExitCode -ne 0) { throw "Portable SOFIT failed for ${name}: $($process.ExitCode)" }
           }
+      - name: Compile Inno Setup installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe'
+          if (!(Test-Path $iscc)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $version = [regex]::Match((Get-Content CMakeLists.txt -Raw), 'project\(SOFIT VERSION ([0-9.]+)').Groups[1].Value
+          if (!$version) { throw "Missing SOFIT version" }
+          & $iscc "/DAppVersion=$version" packaging/SOFIT.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install, launch and uninstall SOFIT
+        shell: pwsh
+        run: |
+          function Run-Checked($file, $arguments) {
+            $process = Start-Process -FilePath $file -ArgumentList $arguments -PassThru
+            if (!$process.WaitForExit(120000)) {
+              $process.Kill()
+              throw "Timed out running $file"
+            }
+            if ($process.ExitCode -ne 0) { throw "$file exited with $($process.ExitCode)" }
+          }
+          $app = Join-Path $env:RUNNER_TEMP 'SOFIT Installed'
+          $setup = (Resolve-Path dist/SOFIT-Windows-x64-Setup.exe).Path
+          Run-Checked $setup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$app`"", '/TASKS=associate,desktopicon')
+          $shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'SOFIT.lnk'
+          $desktop = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'SOFIT.lnk'
+          foreach ($link in @($shortcut, $desktop)) {
+            if (!(Test-Path $link)) { throw "Missing shortcut $link" }
+          }
+          $key = 'HKCU:/Software/Classes/SOFIT.Pattern/shell/open/command'
+          $expected = '"{0}" "%1"' -f (Join-Path $app 'SOFIT.exe')
+          if ((Get-Item $key).GetValue('') -ne $expected) { throw 'Invalid .sofit shell command' }
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:QT_PLUGIN_PATH, Env:QT_QPA_PLATFORM_PLUGIN_PATH -ErrorAction SilentlyContinue
+          $env:QT_QPA_PLATFORM = 'windows'
+          $project = Join-Path $app 'examples/linked-trousers.sofit'
+          Run-Checked (Join-Path $app 'SOFIT.exe') @('--packaging-smoke', ('"' + $project + '"'))
+          Run-Checked (Join-Path $app 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+          foreach ($path in @((Join-Path $app 'SOFIT.exe'), $shortcut, $desktop, $key)) {
+            if (Test-Path $path) { throw "Uninstall left $path" }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: SOFIT-Windows-x64
-          path: SOFIT-Windows-x64.zip
+          path: |
+            SOFIT-Windows-x64.zip
+            dist/SOFIT-Windows-x64-Setup.exe
+          if-no-files-found: error

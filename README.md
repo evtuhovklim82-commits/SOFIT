@@ -1,11 +1,11 @@
-# SOFIT 2.4 Windows Professional
+# SOFIT 2.5 Windows Interoperability
 
 Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native Linux build remains available.
 
 ## Windows .exe via GitHub Actions
-1. In the SOFIT repository, open **Actions → Windows portable build → Run workflow**.
-2. After completion, download the `SOFIT-Windows-x64` artifact and unpack the ZIP inside it.
-3. Run `SOFIT.exe` on Windows. Keep it alongside the bundled Qt DLLs, platform plugins and `examples` folder.
+1. In GitHub Actions, open **Windows installer and portable build**. Download the `SOFIT-Windows-x64` artifact from a successful run.
+2. Run `SOFIT-Windows-x64-Setup.exe` for a per-user install, Start menu shortcut, optional desktop shortcut, and registration for opening `.sofit` files. Windows lets you choose the default app. Uninstall through **Settings → Apps**.
+3. For a portable setup, extract `SOFIT-Windows-x64.zip`. Keep `SOFIT.exe` with its Qt DLLs and plugins.
 4. Open a bundled example from **File → Open**, or pass a quoted project path to `SOFIT.exe`. **Save As** makes an editable copy at a new location.
 
 ### Canvas and workspace
@@ -17,11 +17,14 @@ Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native
 
 ### Exchange with GRAFIS
 
-Use `.sofit` as the editable SOFIT master. For SOFIT → GRAFIS, export the required size from **File → Export DXF** and use the **AutoCAD DXF** option in a new GRAFIS style. Check a known dimension and inspect contours and markings after import. GRAFIS documents that DXF without RUL enters the first size. [GRAFIS DXF import](https://help.grafis.de/en-gb/Content/ExportIImport/Import_von_Sprungwertschnitten.htm)
+1. **GRAFIS → SOFIT.** Keep the original GRAFIS style. Export a single size as text AutoCAD DXF and note a known dimension on one pattern piece. Use separate DXFs for other sizes. [GRAFIS export steps](https://help.grafis.de/en-gb/Content/ExportIImport/Schrittfolge_fuer_den_Export.htm)
+2. In **File → Import DXF**, review the source layers, millimeters per DXF unit and scale. Compare the preview dimensions against the source, inspect the skipped-entity report and click **Import**. Import adds to the current drawing as one undoable operation. Use a blank drawing for a new project.
+3. Keep the editable project in `.sofit`. Edit edges on the canvas. Check the pieces using **Pieces → Piece, Contour and Allowance** or **Seams → Check Fitting Block by Size**. Group separate edges with **Create Piece from Selection** when needed. For imported geometry, use **Grading → Sizes, Measurements and Grade Rules** to define SOFIT point offsets. Verify each size with **Size Overlays** and check the dimensions.
+4. **SOFIT → GRAFIS.** Use **File → Export DXF** and choose the required size. Import as **AutoCAD DXF** into a new GRAFIS style. Check the reference dimension, contours and markings. GRAFIS documents that DXF without RUL enters the first size. For printing, export PDF at actual size and measure its calibration mark. [GRAFIS DXF import](https://help.grafis.de/en-gb/Content/ExportIImport/Import_von_Sprungwertschnitten.htm)
 
-For GRAFIS → SOFIT, retain the original GRAFIS model and export production pieces for the required sizes. SOFIT 2.4 can export DXF. Import of DXF and AAMA/ASTM grading rules into SOFIT remains pending. Use PDF for printing and review. Print at actual size and measure the calibration mark. [GRAFIS export steps](https://help.grafis.de/en-gb/Content/ExportIImport/Schrittfolge_fuer_den_Export.htm)
+**DXF scope.** SOFIT reads planar model-space `LINE`, `POINT`, `LWPOLYLINE`, legacy 2D `POLYLINE`/`VERTEX`, `ARC`, `CIRCLE`, and clamped non-rational quadratic `SPLINE` with three control points and six knots. Arcs and polyline bulges become editable quadratic curves in spans of at most 15°. Independent closed polylines and simple endpoint chains with exact joins become candidate pieces. Check these for self-intersections and other contour errors. Standalone circles remain editable geometry. Layer names survive save and DXF re-export. The SOFIT canvas maps `CONSTRUCTION` to its construction layer and uses the main layer for other imported geometry.
 
-The workflow uses Qt 6.8.3 and MSVC 2022 x64 and runs CTest before packaging. The executable also requires the Microsoft Visual C++ x64 runtime.
+DXF carries geometric output only. Binary DXF, nonplanar or paper-space entities, block inserts, text, polyline widths, general splines, parametric history, AAMA/ASTM grade rules (RUL), and semantic notch and grainline data are outside this exchange. Layer display properties and legacy code pages are outside import scope. The preview reports skipped entities. The installation and portable launch are covered by the Windows MSVC 2022 x64 and Qt 6.8.3 workflow.
 
 ## Arch Linux — native (recommended)
 ```bash

@@ -4,6 +4,7 @@
 #include "ParametricDialog.h"
 #include "PatternPdf.h"
 #include "PatternDxf.h"
+#include "DxfImportDialog.h"
 #include "PieceMarkings.h"
 #include "Production.h"
 #include "ProductionDialogs.h"
@@ -160,7 +161,8 @@ private:
         qsizetype manualIndex = 0;
         for (qsizetype i = 0; i < document_.entities().size(); ++i) {
             const auto& name = document_.entities()[i].draftName;
-            const bool visible = name.isEmpty() ? manualVisibility[manualIndex++] : draftVisibility.value(name, true);
+            const bool visible = name.isEmpty()
+                ? manualVisibility.value(manualIndex++, true) : draftVisibility.value(name, true);
             if (!visible)
                 redraw_->setEntityVisible(i, false);
         }
@@ -320,6 +322,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     auto* saveAction = file->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::saveDocument);
     file->addAction(tr("Save &As…"), QKeySequence::SaveAs, this, &MainWindow::saveDocumentAs);
     file->addAction(tr("Export &SVG"), this, &MainWindow::exportSvg);
+    file->addAction(tr("Import DXF…"), this, &MainWindow::importDxf);
     file->addAction(tr("Export &DXF…"), this, &MainWindow::exportDxf);
     file->addAction(tr("Export &PDF for Printing…"), this, &MainWindow::exportPdf);
 
@@ -761,6 +764,8 @@ void MainWindow::refreshObjects() {
         if (entity.piece >= 0)
             item->setText(2, doc_.pieces()[entity.piece].name);
         item->setText(3, entity.layer == opc::Layer::Main ? tr("Main") : tr("Construction"));
+        if (!entity.dxfLayer.isEmpty())
+            item->setToolTip(3, tr("DXF source layer: %1").arg(entity.dxfLayer).toHtmlEscaped());
         item->setCheckState(1, view_->entityVisible(index) ? Qt::Checked : Qt::Unchecked);
         if (selected.contains(index))
             item->setSelected(true);
@@ -2382,6 +2387,28 @@ opc::PatternDocument MainWindow::exportPattern(const QString& size, QVector<bool
             geometry.append(opc::analyzePiece(pattern, i));
     }
     return pattern;
+}
+
+void MainWindow::importDxf() {
+    const auto path = QFileDialog::getOpenFileName(this, tr("Import DXF"), {}, tr("DXF (*.dxf)"));
+    if (path.isEmpty())
+        return;
+    QString error;
+    const auto drawing = opc::readDxf(path, error);
+    if (!drawing) {
+        QMessageBox::warning(this, tr("Import DXF"), error);
+        return;
+    }
+    DxfImportDialog dialog(*drawing, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    auto updated = drawing->appendTo(doc_, dialog.selectedLayers(), dialog.millimetersPerUnit());
+    if (updated.entities().size() == doc_.entities().size())
+        return;
+    view_->cancelDrawing();
+    undo_.push(new PatternCommand(doc_, std::move(updated), tr("Import DXF"), view_));
+    view_->fitDrawing();
 }
 
 void MainWindow::exportDxf() {

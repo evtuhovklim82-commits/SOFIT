@@ -10,7 +10,7 @@
 #include <QSaveFile>
 #include <QTextStream>
 #include <cmath>
-#include <initializer_list>
+#include <QStringList>
 
 namespace opc {
 namespace {
@@ -33,14 +33,14 @@ public:
             group(code + 20, 0);
     }
 
-    void entity(const char* type, const char* layer, const char* subclass) {
+    void entity(const char* type, const QString& layer, const char* subclass) {
         group(0, type);
         group(100, "AcDbEntity");
         group(8, layer);
         group(100, subclass);
     }
 
-    void polyline(const char* layer, const QPolygonF& vertices, bool closed) {
+    void polyline(const QString& layer, const QPolygonF& vertices, bool closed) {
         if (vertices.size() < 2)
             return;
         entity("LWPOLYLINE", layer, "AcDbPolyline");
@@ -50,13 +50,13 @@ public:
             point(10, vertex, true);
     }
 
-    void line(const char* layer, QPointF start, QPointF end) {
+    void line(const QString& layer, QPointF start, QPointF end) {
         entity("LINE", layer, "AcDbLine");
         point(10, start);
         point(11, end);
     }
 
-    void lines(const char* layer, const QPainterPath& path) {
+    void lines(const QString& layer, const QPainterPath& path) {
         for (qsizetype i = 1; i < path.elementCount(); ++i) {
             if (path.elementAt(i).isLineTo())
                 line(layer, path.elementAt(i - 1), path.elementAt(i));
@@ -67,7 +67,7 @@ private:
     QTextStream& stream_;
 };
 
-void writeHeader(DxfWriter& dxf, std::initializer_list<const char*> layers) {
+void writeHeader(DxfWriter& dxf, const QStringList& layers) {
     dxf.section("HEADER");
     dxf.group(9, "$ACADVER");
     dxf.group(1, "AC1015");
@@ -82,7 +82,7 @@ void writeHeader(DxfWriter& dxf, std::initializer_list<const char*> layers) {
     dxf.group(2, "LAYER");
     dxf.group(100, "AcDbSymbolTable");
     dxf.group(70, layers.size());
-    for (const char* layer : layers) {
+    for (const auto& layer : layers) {
         dxf.group(0, "LAYER");
         dxf.group(100, "AcDbSymbolTableRecord");
         dxf.group(100, "AcDbLayerTableRecord");
@@ -123,7 +123,22 @@ bool exportPatternDxf(const QString& path, const PatternDocument& document,
     QTextStream stream(&file);
     stream.setRealNumberPrecision(16);
     DxfWriter dxf(stream);
-    writeHeader(dxf, {"0", "MAIN", "CONSTRUCTION", "ALLOWANCE", "NOTCH", "GRAINLINE", "LABEL"});
+    QStringList layers{"0", "MAIN", "CONSTRUCTION", "ALLOWANCE", "NOTCH", "GRAINLINE", "LABEL"};
+    QSet<QString> layerKeys;
+    for (const auto& layer : layers)
+        layerKeys.insert(layer.toCaseFolded());
+    for (qsizetype i = 0; i < visibility.size(); ++i) {
+        const auto& entity = document.entities()[i];
+        if (!visibility[i] || !document.layerVisible(entity.layer) || entity.dxfLayer.isEmpty())
+            continue;
+        const auto name = dxfText(entity.dxfLayer);
+        const auto key = name.toCaseFolded();
+        if (!layerKeys.contains(key)) {
+            layers.append(name);
+            layerKeys.insert(key);
+        }
+    }
+    writeHeader(dxf, layers);
 
     dxf.section("ENTITIES");
     QVector<bool> visiblePieces(geometry.size(), false);
@@ -133,7 +148,9 @@ bool exportPatternDxf(const QString& path, const PatternDocument& document,
             continue;
         if (item.piece >= 0 && item.layer == Layer::Main)
             visiblePieces[item.piece] = true;
-        const char* layer = item.layer == Layer::Main ? "MAIN" : "CONSTRUCTION";
+        const auto layer = item.dxfLayer.isEmpty()
+            ? (item.layer == Layer::Main ? QStringLiteral("MAIN") : QStringLiteral("CONSTRUCTION"))
+            : dxfText(item.dxfLayer);
         switch (item.shape) {
         case Shape::Point:
             dxf.entity("POINT", layer, "AcDbPoint");

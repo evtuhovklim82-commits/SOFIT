@@ -58,6 +58,7 @@ private:
     void moveEntity(qsizetype index, const QPointF& offset);
     void exportSvg();
     void exportPdf();
+    void importDxf();
     void exportDxf();
     void createPiece();
     void assignPiece();

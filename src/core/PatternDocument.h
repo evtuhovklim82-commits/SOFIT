@@ -41,6 +41,7 @@ struct Entity {
     QString draftName{};
     std::optional<double> seamAllowanceMm;
     QVector<double> seamNotches; // Arc-length fractions measured from a.
+    QString dxfLayer;
 };
 
 // A step addresses its inputs by persistent formula object names.

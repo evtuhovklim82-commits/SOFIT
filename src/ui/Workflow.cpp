@@ -80,6 +80,9 @@ void showGuide(QMainWindow& window) {
         "<td>Pieces → Create Piece from Selection…, then Piece, Contour and Allowance…</td></tr>"
         "<tr><td>Place pieces on fabric</td><td><a href='https://www.grafis.com/marker'>Marker making</a></td>"
         "<td>Layout → Fabric Layout…; set fabric width, add copies by piece and size, and place them manually.</td></tr>"
+        "<tr><td>Bring a size into SOFIT</td><td><a href='https://help.grafis.de/en-gb/Content/ExportIImport/Schrittfolge_fuer_den_Export.htm'>Export a text DXF</a></td>"
+        "<td>File → Import DXF… Review millimeters, scale, layers, open paths and skipped entities. "
+        "Save the editable SOFIT project. Edit edges, check contours and add manual grading offsets where needed.</td></tr>"
         "<tr><td>Exchange a single size</td><td><a href='https://help.grafis.de/en-gb/Content/ExportIImport/Import_von_Sprungwertschnitten.htm'>Import as AutoCAD DXF</a></td>"
         "<td>File → Export DXF…; choose the size, then check a known dimension and contours in GRAFIS. "
         "Keep the SOFIT project for editing. SOFIT currently exports DXF and PDF.</td></tr>");

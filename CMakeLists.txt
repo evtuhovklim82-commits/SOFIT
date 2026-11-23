@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 2.4.0 LANGUAGES CXX)
+project(SOFIT VERSION 2.5.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -21,6 +21,7 @@ add_library(sofit_core STATIC
     src/core/SeamLinks.cpp
     src/core/PieceMarkings.cpp
     src/core/PatternDxf.cpp
+    src/core/DxfImport.cpp
     src/core/ParametricDraft.cpp
     src/core/PatternTemplates.cpp
     src/core/PatternDocument.cpp
@@ -36,6 +37,7 @@ add_library(sofit_widgets STATIC
     src/ui/TemplateWizard.cpp
     src/ui/Workflow.cpp
     src/ui/MainWindow.cpp
+    src/ui/DxfImportDialog.cpp
     src/ui/ProductionDialogs.cpp
     src/ui/MainWindow.h
     src/ui/PatternView.cpp
@@ -64,6 +66,10 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(sofit_dxf_tests tests/DxfImportTest.cpp)
+    target_link_libraries(sofit_dxf_tests PRIVATE sofit_core)
+    add_test(NAME sofit_dxf_import COMMAND sofit_dxf_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
+
     add_executable(sofit_core_tests tests/PieceGeometryTest.cpp)
     target_link_libraries(sofit_core_tests PRIVATE sofit_core)
     add_test(NAME sofit_core COMMAND sofit_core_tests)
@@ -83,6 +89,6 @@ if(BUILD_TESTING)
 
     add_executable(sofit_ui_tests tests/PatternWorkflowTest.cpp)
     target_link_libraries(sofit_ui_tests PRIVATE sofit_widgets)
-    add_test(NAME sofit_pattern_workflow COMMAND sofit_ui_tests)
+    add_test(NAME sofit_pattern_workflow COMMAND sofit_ui_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
     set_tests_properties(sofit_pattern_workflow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 20)
 endif()

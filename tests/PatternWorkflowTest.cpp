@@ -32,6 +32,7 @@
 #include <QTableWidget>
 #include <QInputDialog>
 #include <QLabel>
+#include <QListWidget>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QPlainTextEdit>
@@ -1276,6 +1277,50 @@ int main(int argc, char** argv) {
         check(mismatch, "Detect a seam length difference after a manual size offset");
     }
 
+    check(argc == 2, "DXF fixture directory is required");
+    MainWindow exchangeWindow;
+    exchangeWindow.show();
+    auto& importDxf = action(exchangeWindow, "Import DXF…");
+    const auto fixture = QString::fromLocal8Bit(argv[1]) + "/exchange-inches.dxf";
+    const auto openImport = [&] {
+        runDialog<QFileDialog>(importDxf, [&](QFileDialog& fileDialog) {
+            fileDialog.selectFile(fixture);
+            QTimer::singleShot(0, [&] {
+                auto* dialog = QApplication::activeModalWidget();
+                check(dialog && dialog->objectName() == "dxfImportDialog", "Show the DXF preview");
+                check(dialog->findChild<QDoubleSpinBox*>("dxfUnits")->value() == 25.4,
+                      "DXF preview proposes the declared inches conversion");
+                auto* layers = dialog->findChild<QListWidget*>("dxfLayers");
+                for (int index = 0; index < layers->count(); ++index) {
+                    auto* item = layers->item(index);
+                    item->setCheckState(item->data(Qt::UserRole) == "OUTLINE" ? Qt::Checked : Qt::Unchecked);
+                }
+                auto* accept = dialog->findChild<QPushButton*>("confirmDxfImport");
+                check(accept && accept->isEnabled(), "A filtered DXF layer can be imported");
+                accept->click();
+            });
+            static_cast<QDialog&>(fileDialog).accept();
+        });
+    };
+    auto* exchangeTree = exchangeWindow.findChild<QTreeWidget*>("drawingObjects");
+    if (!exchangeTree)
+        exchangeTree = exchangeWindow.findChild<QTreeWidget*>();
+    openImport();
+    check(exchangeTree->topLevelItemCount() == 4, "Import one editable piece through File menu");
+    action(exchangeWindow, "Undo Import DXF").trigger();
+    check(exchangeTree->topLevelItemCount() == 0, "Undo DXF import as one transaction");
+    action(exchangeWindow, "Redo Import DXF").trigger();
+    check(exchangeTree->topLevelItemCount() == 4, "Redo restores all imported edges");
+
+    const auto exchangePath = temp.filePath("exchange.sofit");
+    chooseFile(action(exchangeWindow, "&Save"), exchangePath);
+    opc::PatternDocument exchange;
+    check(exchange.load(exchangePath) && opc::analyzePiece(exchange, 0).error == opc::ContourError::None,
+          "Save and reopen the imported piece");
+    const auto exchangePdf = temp.filePath("exchange.pdf");
+    QString exchangeError;
+    check(opc::exportPatternPdf(exchangePdf, exchange, QVector<bool>(4, true), {{}}, {}, exchangeError) &&
+          pageCount(readPdf(exchangePdf)) > 0, "Export imported piece as PDF");
     MainWindow apronWindow;
     apronWindow.show();
     runDialog<QWizard>(action(apronWindow, "New Pattern from Template…"), [](QWizard& wizard) {

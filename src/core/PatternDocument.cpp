@@ -1,4 +1,5 @@
 #include "PatternDocument.h"
+#include <QRegularExpression>
 #include "Production.h"
 #include <QFile>
 #include <QJsonArray>
@@ -110,6 +111,8 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         }
         QJsonObject object{{"type", shapeName(entity.shape)}, {"coordinates", coordinates(entity)},
                            {"piece", entity.piece}, {"layer", entity.layer == Layer::Main ? "main" : "construction"}};
+        if (!entity.dxfLayer.isEmpty())
+            object.insert("dxfLayer", entity.dxfLayer);
         if (!entity.draftName.isEmpty())
             object.insert("draftName", entity.draftName);
         if (entity.seamAllowanceMm) {
@@ -349,6 +352,12 @@ bool PatternDocument::load(const QString& path, QString* error) {
                 return fail(QStringLiteral("Invalid object piece or layer"));
             entity.piece = static_cast<qsizetype>(piece);
             entity.layer = layer == "main" ? Layer::Main : Layer::Construction;
+        }
+        if (fields.contains("dxfLayer")) {
+            const auto sourceLayer = fields.value("dxfLayer");
+            if (!sourceLayer.isString() || sourceLayer.toString().contains(QRegularExpression("[\\x00-\\x1f]")))
+                return fail(QStringLiteral("Invalid DXF source layer"));
+            entity.dxfLayer = sourceLayer.toString();
         }
         if ((version >= 8 || linkedFormat) && fields.contains("draftName")) {
             entity.draftName = fields.value("draftName").toString();
