@@ -12,6 +12,13 @@ enum class Shape { Point, Line, Rectangle, Circle, Curve };
 
 enum class Layer { Main, Construction, Allowance };
 
+enum class ContourOperation {
+    Cut, Spread, TransferDart, TransferDartToOutlet, MoveOpenDart, Pleat, Gather, Relief, Yoke
+};
+
+QString contourOperationKey(ContourOperation operation);
+std::optional<ContourOperation> contourOperationFromKey(const QString& key);
+
 struct Piece {
     QString name;
     double allowanceMm = 0;
@@ -35,12 +42,17 @@ struct Entity {
 };
 
 // A step addresses the full piece by its persistent formula object names.
-struct SilhouetteStep {
+struct ModelingStep {
     QVector<QString> objects;
-    double axisFraction;
-    double topScale;
-    double bottomScale;
-    bool operator==(const SilhouetteStep&) const = default;
+    double axisFraction = 0;
+    double topScale = 1;
+    double bottomScale = 1;
+    std::optional<ContourOperation> contour;
+    QVector<QString> guides;
+    double spreadMm = 0;
+    QVector<QString> topology;
+    qsizetype secondPiece = -1;
+    bool operator==(const ModelingStep&) const = default;
 };
 
 class PatternDocument {
@@ -59,21 +71,31 @@ public:
     bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
     bool validateParametricSizes(const ProductionData& production, QString* error = nullptr) const;
     std::optional<QVector<Entity>> evaluateSizeDraft(const PatternSize& size) const;
-    const QVector<SilhouetteStep>& modelingHistory() const { return history_; }
+    const QVector<ModelingStep>& modelingHistory() const { return history_; }
     bool appendSilhouette(qsizetype piece, double axisFraction, double topScale,
                           double bottomScale, QString* error = nullptr);
+    bool appendContour(qsizetype piece, ContourOperation operation,
+                       const QVector<qsizetype>& guides, double spreadMm, QString* error = nullptr);
+    bool hasContourHistory() const { return !hiddenSources_.isEmpty(); }
     bool removeLastModelingStep(QString* error = nullptr);
     bool save(const QString& path, QString* error = nullptr) const;
     bool load(const QString& path, QString* error = nullptr);
 
 private:
+    bool captureContourTopology(ModelingStep& step, QString* error) const;
     QVector<Entity> bindDraftGeometry(QVector<Entity> generated) const;
     bool replayModeling(QVector<Entity>& entities, const ProductionData& production,
-                        QString* error) const;
+                        QString* error, ModelingStep* capture = nullptr) const;
     bool validateDraftSizes(const ParametricDraft& draft, const QVector<Entity>& base,
                             const ProductionData& production, QString* error) const;
 
-    QVector<SilhouetteStep> history_;
+    struct SourceBinding {
+        QString name;
+        qsizetype piece;
+        Layer layer;
+    };
+    QVector<ModelingStep> history_;
+    QVector<SourceBinding> hiddenSources_;
     ProductionData production_;
     ParametricDraft draft_;
     QVector<Entity> entities_;

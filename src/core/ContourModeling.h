@@ -3,7 +3,10 @@
 #include "PieceGeometry.h"
 
 namespace opc {
-enum class ContourOperation { Cut, Spread, TransferDart, TransferDartToOutlet, MoveOpenDart, Pleat, Gather };
+inline bool dividesPiece(ContourOperation operation) {
+    return operation == ContourOperation::Cut || operation == ContourOperation::Relief
+        || operation == ContourOperation::Yoke;
+}
 
 struct ContourEdit {
     PatternDocument document;

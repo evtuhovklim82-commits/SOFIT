@@ -27,6 +27,7 @@
 #include <QSignalBlocker>
 #include <QSet>
 #include <QTreeWidget>
+#include <QVBoxLayout>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -61,6 +62,25 @@ QString describeContour(opc::ContourError error) {
     case ContourError::SelfIntersecting: return QCoreApplication::translate("MainWindow", "Contour intersects, overlaps, or folds onto itself");
     case ContourError::UncertainCurves: return QCoreApplication::translate("MainWindow", "Curves are too close to verify a simple contour");
     case ContourError::TooComplex: return QCoreApplication::translate("MainWindow", "Contour exceeds the geometry limits");
+    }
+    return {};
+}
+
+QString modelingStepName(const opc::ModelingStep& step) {
+    using C = opc::ContourOperation;
+    const auto text = [](const char* label) { return QCoreApplication::translate("MainWindow", label); };
+    if (!step.contour)
+        return text("Shape Silhouette");
+    switch (*step.contour) {
+    case C::Cut: return text("Cut Piece");
+    case C::Relief: return text("Straight Relief Seam");
+    case C::Yoke: return text("Straight Yoke");
+    case C::Spread: return text("Slash and Spread");
+    case C::Pleat: return text("Box Pleat");
+    case C::Gather: return text("Gathering Fullness");
+    case C::TransferDart:
+    case C::TransferDartToOutlet: return text("Close and Transfer Dart");
+    case C::MoveOpenDart: return text("Move Open Contour Dart");
     }
     return {};
 }
@@ -313,6 +333,12 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     modeling->addAction(tr("Cut Piece…"), this, [this] {
         modelPiece(opc::ContourOperation::Cut, tr("Cut Piece"));
     });
+    modeling->addAction(tr("Straight Relief Seam…"), this, [this] {
+        modelPiece(opc::ContourOperation::Relief, tr("Straight Relief Seam"));
+    });
+    modeling->addAction(tr("Straight Yoke…"), this, [this] {
+        modelPiece(opc::ContourOperation::Yoke, tr("Straight Yoke"));
+    });
     modeling->addAction(tr("Slash and Spread…"), this, [this] {
         modelPiece(opc::ContourOperation::Spread, tr("Slash and Spread"));
     });
@@ -324,7 +350,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
     modeling->addSeparator();
     modeling->addAction(tr("Shape Silhouette…"), this, &MainWindow::shapeSilhouette);
-    modeling->addAction(tr("Modeling History…"), this, &MainWindow::showModelingHistory);
+    modeling->addAction(tr("Construction Tree…"), this, &MainWindow::showModelingHistory);
     modeling->addAction(tr("Add Box Pleat…"), this, [this] {
         modelPiece(opc::ContourOperation::Pleat, tr("Add Box Pleat"));
     });
@@ -357,7 +383,10 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         }
     });
     pattern->addAction(tr("Parametric Draft…"), this, [this] {
-        if (auto updated = editParametricDraft(this, doc_)) {
+        QString calculationError;
+        auto updated = editParametricDraft(this, doc_, &calculationError);
+        setModelingError(calculationError);
+        if (updated) {
             view_->cancelDrawing();
             const bool firstDrawing = doc_.entities().isEmpty();
             undo_.push(new PatternCommand(doc_, std::move(*updated), tr("Edit Parametric Draft"), view_));
@@ -437,7 +466,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         dialog.exec();
     });
 
-    seams->addAction(tr("Match Selected Seam Sections…"), this, &MainWindow::matchSeams);
+    seams->addAction(tr("Match Selected Seam Sections…"), this, [this] { matchSeams(selectedObjects()); });
     seams->addAction(tr("Allowance for Selected Edges…"), this, &MainWindow::editEdgeAllowance);
     seams->addAction(tr("Clear Automatic Notches on Selected Edges"), this, &MainWindow::clearEdgeNotches);
     auto* overlay = pattern->addMenu(tr("Size Overlays"));
@@ -628,6 +657,8 @@ void MainWindow::refreshPieceDisplay() {
 }
 
 void MainWindow::refreshObjects() {
+    setModelingError({});
+    refreshModelingHistory();
     const QSignalBlocker blocker(objects_);
     pieces_.clear();
     for (qsizetype index = 0; index < doc_.pieces().size(); ++index)
@@ -690,6 +721,7 @@ void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& 
     QString error;
     if (!document.modelingHistory().isEmpty()
         && !document.validateParametricSizes(document.production(), &error)) {
+        setModelingError(error);
         QMessageBox::warning(this, text, error);
         return;
     }
@@ -777,8 +809,7 @@ void MainWindow::measureSelection() {
     QMessageBox::information(this, tr("Measure Selection"), rows.join('\n'));
 }
 
-void MainWindow::matchSeams() {
-    const auto indices = selectedObjects();
+void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecond) {
     const auto title = tr("Match Seam Sections");
     if (indices.size() < 2 || !std::ranges::all_of(indices, [this](auto index) {
             const auto& edge = doc_.entities()[index];
@@ -824,6 +855,7 @@ void MainWindow::matchSeams() {
     count->setValue(3);
     form->addRow(tr("Notch pairs"), count);
     auto* reverse = new QCheckBox(tr("Reverse correspondence on section B"), &dialog);
+    reverse->setChecked(reverseSecond);
     form->addRow(reverse);
     auto* summary = new QLabel(&dialog);
     summary->setWordWrap(true);
@@ -1191,6 +1223,11 @@ void MainWindow::managePiece() {
         return;
     auto updated = doc_;
     if (result == 2) {
+        if (doc_.hasContourHistory()) {
+            QMessageBox::information(this, tr("Delete Piece"),
+                tr("Remove contour steps from the construction tree before deleting pieces."));
+            return;
+        }
         updated.pieces().removeAt(piece);
         updated.production().removePiece(piece);
         for (qsizetype index = 0; index < updated.entities().size(); ++index) {
@@ -1376,6 +1413,7 @@ void MainWindow::shapeSilhouette() {
         QString error;
         if (!updated.appendSilhouette(piece, fractions[axis->currentIndex()], top->value() / 100,
                                       bottom->value() / 100, &error)) {
+            setModelingError(error);
             QMessageBox::warning(this, title, error);
             return;
         }
@@ -1394,50 +1432,134 @@ void MainWindow::shapeSilhouette() {
 }
 
 void MainWindow::showModelingHistory() {
-    QDialog dialog(this);
-    const auto title = tr("Modeling History");
-    dialog.setWindowTitle(title);
-    QFormLayout form(&dialog);
-    QTreeWidget tree(&dialog);
-    tree.setHeaderLabels({tr("Step"), tr("Piece"), tr("Widths · top / bottom")});
-    form.addRow(&tree);
-    QDialogButtonBox buttons(QDialogButtonBox::Close, &dialog);
-    auto* remove = buttons.addButton(tr("Remove Last Step"), QDialogButtonBox::ActionRole);
-    form.addRow(&buttons);
-    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (!modelingDock_) {
+        modelingDock_ = new QDockWidget(tr("Construction Tree"), this);
+        auto* panel = new QWidget(modelingDock_);
+        auto* layout = new QVBoxLayout(panel);
+        modelingTree_ = new QTreeWidget(panel);
+        modelingTree_->setHeaderLabels({tr("Construction"), tr("Result")});
+        modelingError_ = new QLabel(panel);
+        modelingError_->setWordWrap(true);
+        modelingError_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        modelingError_->setTextFormat(Qt::PlainText);
+        modelingError_->hide();
+        removeModelingStep_ = new QPushButton(tr("Remove Last Step"), panel);
+        layout->addWidget(modelingTree_);
+        layout->addWidget(modelingError_);
+        layout->addWidget(removeModelingStep_);
+        modelingDock_->setWidget(panel);
+        addDockWidget(Qt::RightDockWidgetArea, modelingDock_);
+        connect(modelingTree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem* item) {
+            const auto pair = item->data(0, Qt::UserRole).toList();
+            if (pair.size() == 2)
+                matchSeams({static_cast<qsizetype>(pair[0].toLongLong()),
+                            static_cast<qsizetype>(pair[1].toLongLong())}, true);
+        });
+        connect(removeModelingStep_, &QPushButton::clicked, this, [this] {
+            auto updated = doc_;
+            QString error;
+            if (!updated.removeLastModelingStep(&error)) {
+                setModelingError(error);
+                return;
+            }
+            view_->cancelDrawing();
+            undo_.push(new PatternCommand(doc_, std::move(updated), tr("Remove Last Modeling Step"), view_));
+        });
+    }
+    modelingDock_->show();
+    refreshModelingHistory();
+    modelingDock_->raise();
+}
 
-    const auto refresh = [&] {
-        tree.clear();
-        auto* root = new QTreeWidgetItem(&tree, {tr("Parametric draft")});
-        const auto& history = doc_.modelingHistory();
-        for (qsizetype i = 0; i < history.size(); ++i) {
-            const auto& step = history[i];
-            const auto anchor = std::ranges::find(doc_.entities(), step.objects.front(), &opc::Entity::draftName);
-            const auto piece = anchor == doc_.entities().end() ? -1 : anchor->piece;
-            auto* item = new QTreeWidgetItem(root, {tr("%1. Shape Silhouette").arg(i + 1),
-                piece < 0 ? QString{} : doc_.pieces()[piece].name,
-                tr("%1% / %2%").arg(step.topScale * 100).arg(step.bottomScale * 100)});
-            for (const auto& name : step.objects)
-                new QTreeWidgetItem(item, {name});
+void MainWindow::setModelingError(const QString& error) {
+    if (!modelingDock_ && !error.isEmpty() && !doc_.modelingHistory().isEmpty())
+        showModelingHistory();
+    if (modelingError_) {
+        modelingError_->setText(error);
+        modelingError_->setVisible(!error.isEmpty());
+    }
+}
+
+void MainWindow::refreshModelingHistory() {
+    if (!modelingTree_ || modelingDock_->isHidden())
+        return;
+    modelingTree_->clear();
+    auto* root = new QTreeWidgetItem(modelingTree_, {tr("Parametric draft")});
+    const auto& draft = doc_.parametricDraft();
+    root->setText(1, tr("%1 measurements, %2 formula edges").arg(draft.measurements.size()).arg(draft.edges.size()));
+    const auto& history = doc_.modelingHistory();
+    QVector<QVector<qsizetype>> gradeSources(doc_.production().sizes.size());
+    QVector<opc::PatternDocument> grades;
+    const auto seamRow = [&](QTreeWidgetItem* step, qsizetype a, qsizetype b) {
+        if (grades.isEmpty()) {
+            for (qsizetype i = 0; i < doc_.production().sizes.size(); ++i)
+                grades.append(opc::gradedPattern(doc_, doc_.production().sizes[i].name, &gradeSources[i]));
         }
-        root->setExpanded(true);
-        tree.resizeColumnToContents(0);
-        remove->setEnabled(!history.isEmpty());
+        auto* pair = new QTreeWidgetItem(step, {tr("Paired cut edges")});
+        pair->setData(0, Qt::UserRole, QVariantList{QVariant::fromValue(a), QVariant::fromValue(b)});
+        pair->setToolTip(0, tr("Open the seam matching and notch placement dialog."));
+        const auto add = [&](const QString& size, const opc::Entity& first, const opc::Entity& second) {
+            const auto left = opc::seamLength(first);
+            const auto right = opc::seamLength(second);
+            if (left && right) {
+                auto* row = new QTreeWidgetItem(pair, {size, tr("%L1 / %L2 mm · B − A %L3 mm")
+                    .arg(*left, 0, 'f', 2).arg(*right, 0, 'f', 2).arg(*right - *left, 0, 'f', 2)});
+                // Cut closure edges are directed in opposite sewing directions.
+                auto opposite = second.seamNotches;
+                for (auto& notch : opposite)
+                    notch = 1 - notch;
+                std::ranges::sort(opposite);
+                auto firstNotches = first.seamNotches;
+                std::ranges::sort(firstNotches);
+                if (firstNotches.size() != opposite.size()
+                    || !std::ranges::equal(firstNotches, opposite, [](double x, double y) {
+                        return std::abs(x - y) <= 1e-6;
+                    }))
+                    new QTreeWidgetItem(row, {tr("Notch positions differ")});
+            }
+        };
+        add(tr("Base pattern"), doc_.entities()[a], doc_.entities()[b]);
+        for (qsizetype i = 0; i < grades.size(); ++i) {
+            const auto left = gradeSources[i].indexOf(a);
+            const auto right = gradeSources[i].indexOf(b);
+            const auto size = doc_.production().sizes[i].name;
+            if (left >= 0 && right >= 0)
+                add(size, grades[i].entities()[left], grades[i].entities()[right]);
+            else
+                new QTreeWidgetItem(pair, {size, tr("Cannot recalculate")});
+        }
     };
-    connect(remove, &QPushButton::clicked, &dialog, [&] {
-        auto updated = doc_;
-        QString error;
-        if (!updated.removeLastModelingStep(&error)) {
-            QMessageBox::warning(&dialog, title, error);
-            return;
+    for (qsizetype i = 0; i < history.size(); ++i) {
+        const auto& step = history[i];
+        auto* item = new QTreeWidgetItem(root, {tr("%1. %2").arg(i + 1).arg(modelingStepName(step))});
+        if (!step.contour)
+            item->setText(1, tr("%1% / %2%").arg(step.topScale * 100).arg(step.bottomScale * 100));
+        else if (step.secondPiece >= 0)
+            item->setText(1, doc_.pieces()[step.secondPiece].name);
+        else if (step.spreadMm > 0)
+            item->setText(1, tr("%L1 mm").arg(step.spreadMm));
+        auto* inputs = new QTreeWidgetItem(item, {tr("Source objects"), QString::number(step.objects.size())});
+        for (const auto& name : step.objects)
+            new QTreeWidgetItem(inputs, {name});
+        if (!step.guides.isEmpty()) {
+            auto* guides = new QTreeWidgetItem(item, {tr("Guides")});
+            for (const auto& name : step.guides)
+                new QTreeWidgetItem(guides, {name});
         }
-        view_->cancelDrawing();
-        undo_.push(new PatternCommand(doc_, std::move(updated), tr("Remove Last Modeling Step"), view_));
-        refresh();
-    });
-    refresh();
-    dialog.resize(610, 400);
-    dialog.exec();
+        if (step.secondPiece >= 0) {
+            const auto prefix = QStringLiteral("@%1:seam-").arg(i + 1);
+            const auto& entities = doc_.entities();
+            const auto a = std::ranges::find(entities, prefix + u'A', &opc::Entity::draftName);
+            const auto b = std::ranges::find(entities, prefix + u'B', &opc::Entity::draftName);
+            if (a != entities.end() && b != entities.end())
+                seamRow(item, a - entities.begin(), b - entities.begin());
+            else
+                new QTreeWidgetItem(item, {tr("Paired cut edges"), tr("Changed by a later contour step")});
+        }
+    }
+    root->setExpanded(true);
+    modelingTree_->resizeColumnToContents(0);
+    removeModelingStep_->setEnabled(!history.isEmpty());
 }
 
 void MainWindow::modelPiece(opc::ContourOperation operation, const QString& title) {
@@ -1481,6 +1603,23 @@ void MainWindow::modelPiece(opc::ContourOperation operation, const QString& titl
                                         20, 0.01, 100000, 2, &accepted);
         if (!accepted)
             return;
+    }
+    const auto named = [](const opc::Entity& entity) { return !entity.draftName.isEmpty(); };
+    const bool formula = std::ranges::any_of(doc_.entities(), [piece, named](const auto& entity) {
+        return entity.piece == piece && named(entity);
+    }) || std::ranges::any_of(guides, [&](qsizetype index) { return named(doc_.entities()[index]); });
+    if (formula) {
+        auto updated = doc_;
+        QString error;
+        if (!updated.appendContour(piece, operation, guides, width, &error)) {
+            setModelingError(error);
+            QMessageBox::warning(this, title, error);
+            return;
+        }
+        view_->cancelDrawing();
+        undo_.push(new PatternCommand(doc_, std::move(updated), title, view_));
+        showModelingHistory();
+        return;
     }
     auto result = opc::modelContour(doc_, piece, operation, guides, width);
     if (!result.edit) {

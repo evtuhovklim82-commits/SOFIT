@@ -46,6 +46,7 @@ void roundTripAndExport(const PatternDocument& document, const QString& size = {
     check(document.save(sofit, &error), "Save project: " + error);
     check(loaded.load(sofit, &error), "Reopen project: " + error);
     check(loaded.parametricDraft() == document.parametricDraft() && loaded.pieces() == document.pieces()
+          && loaded.modelingHistory() == document.modelingHistory()
           && saveProduction(loaded.production()) == saveProduction(document.production()),
           "Round trip formulas, size data and piece metadata");
     check(loaded.entities().size() == document.entities().size(), "Round trip all entities");
@@ -155,6 +156,162 @@ void checkModeling() {
     roundTripAndExport(moved.edit->document);
 }
 
+PatternDocument formulaPanel(const ParametricDraft& draft, const QStringList& construction) {
+    PatternDocument panel;
+    QString error;
+    check(panel.setParametricDraft(draft, &error), error);
+    panel.pieces().append({"Panel"});
+    for (qsizetype i = 0; i < panel.entities().size(); ++i) {
+        auto entity = panel.entities()[i];
+        if (entity.shape != Shape::Line)
+            continue;
+        if (construction.contains(entity.draftName))
+            entity.layer = Layer::Construction;
+        else
+            entity.piece = 0;
+        panel.replace(i, entity);
+    }
+    return panel;
+}
+
+qsizetype namedEdge(const PatternDocument& panel, const QString& name) {
+    const auto edge = std::ranges::find(panel.entities(), name, &Entity::draftName);
+    check(edge != panel.entities().end(), "Find " + name);
+    return edge - panel.entities().begin();
+}
+
+void checkContourHistory() {
+    ParametricDraft draft;
+    draft.measurements = {{"width", 100}, {"height", 80}, {"cut_y", 30}};
+    draft.points = {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "height"},
+                    {"D", "0", "height"}, {"E", "0", "cut_y"}, {"F", "width", "cut_y"}};
+    draft.edges = {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}},
+                   {"left", "D", "A", {}}, {"cut", "E", "F", {}}};
+    auto panel = formulaPanel(draft, {"cut"});
+    panel.pieces()[0].allowanceMm = 2;
+    panel.production().sizes.append({"L", {{"width", 140}, {"height", 100}, {"cut_y", 40}}});
+    QString error;
+    for (const auto operation : {ContourOperation::Cut, ContourOperation::Relief, ContourOperation::Yoke}) {
+        auto split = panel;
+        check(split.appendContour(0, operation, {namedEdge(split, "cut")}, 0, &error), error);
+        check(split.pieces().size() == 2, "Create two ordered panels");
+        const auto a = namedEdge(split, "@1:seam-A");
+        const auto b = namedEdge(split, "@1:seam-B");
+        const auto left = split.entities()[a];
+        const auto right = split.entities()[b];
+        check(left.a == right.b && left.b == right.a && near(*seamLength(left), 100),
+              "Create oppositely directed matching seams");
+        for (const auto [index, notch] : {std::pair{a, 0.25}, std::pair{b, 0.75}}) {
+            auto edge = split.entities()[index];
+            edge.seamNotches = {notch};
+            split.replace(index, edge);
+        }
+        const auto graded = gradedPattern(split, "L");
+        check(near(*seamLength(graded.entities()[a]), 140)
+              && near(*seamLength(graded.entities()[b]), 140)
+              && analyzePiece(graded, 0).notchAnchors.size() == 1
+              && analyzePiece(graded, 1).notchAnchors.size() == 1,
+              "Replay both seams, allowances and marks for the graded size");
+        roundTripAndExport(split, "L");
+
+        auto resized = draft;
+        resized.measurements[0].mm = 110;
+        std::ranges::reverse(resized.edges);
+        check(split.setParametricDraft(resized, &error), error);
+        check(near(*seamLength(split.entities()[namedEdge(split, "@1:seam-A")]), 110)
+              && split.entities()[namedEdge(split, "@1:seam-B")].seamNotches == QVector<double>{0.75},
+              "Keep generated edge identities and metadata independent of formula table order");
+        check(split.appendSilhouette(1, 0.5, 1.1, 1.1, &error), error);
+        check(near(*seamLength(split.entities()[namedEdge(split, "@1:seam-B")]), 121),
+              "Compose a silhouette operation on an output panel");
+        roundTripAndExport(split, "L");
+
+        auto grading = split.production();
+        grading.sizes[0].measurements["cut_y"] = 0;
+        check(!split.validateParametricSizes(grading, &error)
+              && error.contains("Size 'L'") && error.contains("Modeling step 1"), error);
+        auto missing = resized;
+        missing.edges.removeFirst();
+        check(!split.setParametricDraft(missing, &error) && split.parametricDraft() == resized,
+              "Reject a missing formula guide atomically");
+        check(split.removeLastModelingStep(&error) && split.removeLastModelingStep(&error), error);
+        check(split.pieces().size() == 1 && !split.hasContourHistory() && split.modelingHistory().isEmpty()
+              && split.entities()[namedEdge(split, "cut")].layer == Layer::Construction,
+              "Removing the split restores the source bindings and removes the second panel");
+    }
+
+    for (const auto operation : {ContourOperation::Spread, ContourOperation::Pleat, ContourOperation::Gather}) {
+        auto spread = panel;
+        check(spread.appendContour(0, operation, {namedEdge(spread, "cut")}, 24, &error), error);
+        check(near(analyzePiece(spread, 0).bounds.height(), 104)
+              && near(analyzePiece(gradedPattern(spread, "L"), 0).bounds.height(), 124),
+              "Apply exactly the fixed added fullness in base and graded sizes");
+        roundTripAndExport(spread, "L");
+    }
+
+    auto doubleCut = panel;
+    auto twoGuides = draft;
+    twoGuides.points += {{"G", "0", "cut_y / 2"}, {"H", "width", "cut_y / 2"}};
+    twoGuides.edges.append({"otherCut", "G", "H", {}});
+    check(doubleCut.setParametricDraft(twoGuides, &error), error);
+    auto guideIndex = namedEdge(doubleCut, "otherCut");
+    auto guide = doubleCut.entities()[guideIndex];
+    guide.layer = Layer::Construction;
+    doubleCut.replace(guideIndex, guide);
+    check(doubleCut.appendContour(0, ContourOperation::Yoke, {namedEdge(doubleCut, "cut")}, 0, &error), error);
+    const auto upper = analyzePiece(doubleCut, 0).bounds.top() == 0 ? 0 : 1;
+    check(doubleCut.appendContour(upper, ContourOperation::Cut,
+                                 {namedEdge(doubleCut, "otherCut")}, 0, &error), error);
+    check(doubleCut.pieces().size() == 3 && doubleCut.modelingHistory().size() == 2,
+          "Replay a second cut on generated edges");
+    roundTripAndExport(doubleCut, "L");
+    check(doubleCut.removeLastModelingStep(&error) && doubleCut.pieces().size() == 2, error);
+    check(namedEdge(doubleCut, "@1:seam-A") >= 0 && namedEdge(doubleCut, "@1:seam-B") >= 0
+          && doubleCut.entities()[namedEdge(doubleCut, "otherCut")].layer == Layer::Construction,
+          "Removing a dependent cut restores the previous stable edges and its guide");
+
+    auto changedTopology = panel;
+    auto size = changedTopology.production();
+    size.sizes.clear();
+    changedTopology.production() = size;
+    // At the larger width the cut starts on the top edge and ends on the right;
+    // both cuts are geometrically valid but produce different edge identities.
+    auto shifting = draft;
+    shifting.points[4].x = "width - 100";
+    shifting.points[4].y = "cut_y * (width - 140) * (width - 140) / 1600";
+    check(changedTopology.setParametricDraft(shifting, &error), error);
+    check(changedTopology.appendContour(0, ContourOperation::Cut, {namedEdge(changedTopology, "cut")}, 0, &error),
+          error);
+    size.sizes.append({"L", {{"width", 140}}});
+    check(!changedTopology.validateParametricSizes(size, &error)
+          && error.contains("connectivity changed"), error);
+
+    draft.points += {{"P", "width/2", "35"}, {"M1", "width/2-10", "0"}, {"M2", "width/2+10", "0"},
+                     {"O", "width", "40"}};
+    draft.edges += {{"legA", "M1", "P", {}}, {"legB", "P", "M2", {}}, {"outlet", "P", "O", {}}};
+    auto dart = formulaPanel(draft, {"cut", "legA", "legB", "outlet"});
+    dart.production().sizes.append({"L", {{"width", 130}, {"height", 85}}});
+    check(dart.appendContour(0, ContourOperation::TransferDartToOutlet,
+                            {namedEdge(dart, "legA"), namedEdge(dart, "legB"), namedEdge(dart, "outlet")}, 0, &error),
+          error);
+    check(analyzePiece(dart, 0).contour.contains(QPointF(50, 35))
+          && analyzePiece(gradedPattern(dart, "L"), 0).contour.contains(QPointF(65, 35)),
+          "Transfer the dart around the formula apex in both sizes");
+    roundTripAndExport(dart, "L");
+
+    draft.edges.removeFirst();
+    draft.edges += {{"topLeft", "A", "M1", {}}, {"topRight", "M2", "B", {}}};
+    auto openDart = formulaPanel(draft, {"cut", "outlet"});
+    openDart.production().sizes.append({"L", {{"width", 130}, {"height", 85}}});
+    check(openDart.appendContour(0, ContourOperation::MoveOpenDart,
+                                {namedEdge(openDart, "legA"), namedEdge(openDart, "legB"), namedEdge(openDart, "outlet")},
+                                0, &error), error);
+    check(analyzePiece(openDart, 0).contour.contains(QPointF(100, 40))
+          && analyzePiece(gradedPattern(openDart, "L"), 0).contour.contains(QPointF(130, 40)),
+          "Close the formula V and open a new outlet in both sizes");
+    roundTripAndExport(openDart, "L");
+}
+
 void checkTemplates() {
     const BodiceMeasurements m{920, 740, 420, 210, 68, 75, 22, 116, 38, 60, 40,
                                115, 300, 50, 220, 285, 87};
@@ -228,5 +385,6 @@ void checkTemplates() {
 int main(int argc, char** argv) {
     QGuiApplication app(argc, argv);
     checkModeling();
+    checkContourHistory();
     checkTemplates();
 }

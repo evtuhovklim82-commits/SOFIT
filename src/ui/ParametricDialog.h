@@ -5,4 +5,5 @@
 
 class QWidget;
 
-std::optional<opc::PatternDocument> editParametricDraft(QWidget* parent, const opc::PatternDocument& document);
+std::optional<opc::PatternDocument> editParametricDraft(QWidget* parent, const opc::PatternDocument& document,
+                                                         QString* calculationError = nullptr);

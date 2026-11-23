@@ -1,4 +1,4 @@
-# SOFIT 1.7 Professional
+# SOFIT 1.8 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -48,7 +48,7 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
 - Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
-- SOFIT opens `.sofit` formats 1–11 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Projects with modeling history use format 11 and require SOFIT 1.7 or later. SVG export includes enabled layers and uses millimeters.
+- SOFIT opens `.sofit` formats 1–12 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Silhouette-only history uses format 11 (SOFIT 1.7+). Contour history uses format 12 (SOFIT 1.8+). SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
 
 ## Seam tools
@@ -64,9 +64,10 @@ Use `macdeployqt` when packaging the app for distribution.
 ## Modeling tools
 
 - **Shape Silhouette** records a replayable step on pieces made entirely of assigned formula lines, quadratic curves and construction points. Each step stores the named objects, the axis relative to the current bounds, and the top and bottom scales. Unassigned formula points remain at their draft positions.
-- **Modeling History** displays the sequence under the parametric draft, with named objects under each step. Removing the last step, changing measurements, and adding a step all rebuild from the formulas. Undo/Redo restores the document and its history together. Invalid replay is rejected with the step and, when applicable, the size that failed.
-- History supports formula-based size measurements. Pieces with coordinate-based manual grade rules, perimeter-percentage notches or mixed manual and formula objects cannot add silhouette steps. Remove existing placements before adding a step. Renaming or reassigning objects referenced by history requires removing the affected steps first.
-- The history is a single ordered sequence. Manual modeling tools continue to make direct edits. Raglan sleeves, princess seams, yokes, shaped cuts, replayable folds and gathers, and automatic reshaping of seam geometry to target ease remain future work.
+- **Modeling → Construction Tree…** opens a dock with the ordered formula and modeling steps, their inputs, new panels and paired cut edges. It follows Undo/Redo. Rejected recalculations identify the step and, when applicable, the size. **Remove Last Step** rebuilds from the formulas and restores consumed guides. Removing a split also removes its added panel and panel-specific settings. Clear manual objects and fabric placements from that panel first.
+- Contour history covers straight cuts, straight relief seams and yokes, parallel spread, box pleats, gathering fullness and equal-leg dart transfer. To record a step, define the outline and guides in **Pattern → Parametric Draft…**. Assign the named outline lines to the piece, and place the named guide lines on the Construction layer. Guides can stay unassigned or belong to the target piece. Keep formula points and unrelated marks unassigned. For moving an open dart, include the two named V edges in the outline and select them with the outlet guide.
+- Each accepted edit replays from the formulas for the base and every size with measurement overrides. Guide attachment, edge order and contour connectivity must stay consistent across sizes. A changed attachment, missing source or invalid contour or allowance rejects the edit and keeps the last valid pattern. Undo/Redo restores geometry and history together. Generated edges keep their references through measurement changes and silhouette steps.
+- History pieces use formula-based size measurements. Clear manual point grade rules, existing fabric placements and perimeter notches before adding a step. Contour operations that replace edges also require clearing edge allowances and automatic marks on their inputs. Adding a step that consumes a paired edge ends that pair's live report. Piece deletion is available after removing contour history.
 
 - **Modeling → Split Line or Curve…** divides a line or quadratic Bézier curve into two edges with a shared endpoint. The percentage sets the distance along a line or the Bézier parameter on a curve.
 - **Modeling → Join Free Endpoints** moves the unique closest pair of free endpoints to their midpoint when the two edges share a layer and piece assignment and the gap is at most 5 mm.
@@ -74,11 +75,12 @@ Use `macdeployqt` when packaging the app for distribution.
 
 Split and join work on manually drawn edges in pieces without point grading rules, or on unassigned edges.
 
-### Cut, spread and transfer a dart
+### Cut, straight relief seam, yoke, spread and dart transfer
 
-Start with a piece that has one closed outline of straight lines or a rectangle. Draw a line with **Exact Input** or with snapping, then select it and use **Pattern → Move Selection to Construction Layer**. For cuts and spreads, both endpoints must lie on the outline and the segment between them must stay inside the piece.
+Start with a piece that has one closed outline of straight lines. A manually drawn rectangle also works. Use a named formula line for a replayable operation or draw a manual line with **Exact Input** for a direct edit. Select the guide and use **Pattern → Move Selection to Construction Layer**. For cuts and spreads, both endpoints must lie on the outline and the segment between them must stay inside the piece.
 
-- **Modeling → Cut Piece…** uses one selected construction line to make pieces A and B. Each receives a closed outline with its own copy of the cut edge. The panels keep their original positions, so the cut edges coincide on the canvas. Use the piece names in the objects list to distinguish them.
+- **Modeling → Cut Piece…**, **Straight Relief Seam…** and **Straight Yoke…** use one straight construction line to split the piece. Each panel receives a closed outline and its own copy of the same sewing edge. The panels stay in position on the canvas. The guide direction and source contour order determine which side becomes the added panel. Use the piece list to check and rename either side.
+- In the Construction Tree, expand **Paired cut edges** for a replayable split to compare lengths and corresponding notch fractions across all configured sizes. Activate the pair to open **Match Seam Sections** with both sides loaded and the correspondence reversed for the opposing edge directions. The dialog can place paired notches using the existing seam tools.
 - **Modeling → Slash and Spread…** uses one selected construction line. Enter the additional width in millimeters. One panel moves perpendicular to the cut, and the new outline bridges the gap at both ends. For built-in placement guides, use the pleat or gathering command.
 - **Modeling → Close and Transfer Dart…** uses three selected construction lines. Draw two equal legs from an interior apex to the same straight edge with **Dart**. Draw an outlet from the same apex to a different edge. Select all three lines in the objects list and identify the outlet in the dialog. SOFIT rotates a section around the apex, closes the old dart, and opens the transferred dart in the main outline.
 
@@ -88,7 +90,7 @@ Start with a piece that has one closed outline of straight lines or a rectangle.
 
 The cut, spread and dart commands consume the selected guides and replace the outline in one undoable action. SOFIT checks the source and result for closure, self-intersections and overlapping edges, and recalculates the stored seam allowance. If validation fails, the editor reports the reason and keeps the original geometry. New outlines use ordinary Main-layer line entities saved and exported through the existing SOFIT, PDF and DXF paths.
 
-The cut, spread and dart tools require manual geometry and one simple straight-sided outline. They support one cut at a time, parallel spread and equal-leg darts. Closing a dart requires an outlet for the displaced fullness. Curved or unequal dart legs, closing a dart without an outlet, multi-cut spreads and automatic seam truing are outside this workflow. Unassign unrelated Construction and Allowance objects from the target piece before modeling. Remove existing point grading rules, notches, edge-specific allowances and saved fabric placements before commands that replace edges. A piece-wide allowance carries over when the resulting offset validates. Add matched notches to the new edges with the Seams menu.
+The contour tools support one straight cut at a time, parallel spread and equal-leg darts. A closed dart transfers its fullness into an outlet on a different edge. The straight relief and yoke commands divide existing geometry along the selected guide. Curved princess seams, dart intake incorporated into a seam, automatic seam truing, multi-cut spreads and parametric raglan remain outside this workflow. Unassign unrelated Construction and Allowance objects from the target piece before modeling. Remove existing point grading rules, notches, edge-specific allowances and saved fabric placements before commands that replace edges. A piece-wide allowance carries over when the resulting offset validates. Add matched notches to the new edges with the Seams menu.
 
 **Modeling → Shape Silhouette…** scales the horizontal distance from a vertical axis at the center, left or right of the piece. Equal top and bottom percentages widen or narrow the piece uniformly. Different values taper or flare it. The operation keeps Y coordinates and uses the base outline's vertical bounds to interpolate scale between top and bottom. It transforms line endpoints and quadratic controls and converts a main-layer rectangle to four edges. A tapered quadratic uses transformed control points as a new quadratic. Check smooth joins and adjoining seam lengths after shaping.
 
@@ -318,7 +320,7 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-CTest checks contour geometry, offsets, file compatibility and the pattern workflow through the offscreen Qt interface. Use `-DBUILD_TESTING=OFF` for an application-only build.
+CTest checks contour geometry, offsets, file compatibility, formula and size replay, panel seam correspondence, PDF/DXF export and the pattern workflow through the offscreen Qt interface. Use `-DBUILD_TESTING=OFF` for an application-only build.
 
 ## Licensing/legal
 Code is intended for GPLv3 distribution, but check and include the complete GPLv3 license text before publishing. Qt library license obligations apply. Check SOFIT trademark availability before public branding. Independent implementation only.

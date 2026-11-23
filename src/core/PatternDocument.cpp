@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QSet>
+#include <algorithm>
 #include <utility>
 #include <cmath>
 
@@ -141,7 +142,7 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     int version = 7;
     if (parametric)
         version = production_.useDraftMeasurements && !production_.sizes.isEmpty() ? 9 : 8;
-    QJsonObject root{{"format", "SOFIT"}, {"version", !history_.isEmpty() ? 11 : hasSeamData ? 10 : version}, {"objects", objects},
+    QJsonObject root{{"format", "SOFIT"}, {"version", hasContourHistory() ? 12 : !history_.isEmpty() ? 11 : hasSeamData ? 10 : version}, {"objects", objects},
                      {"pieces", pieces}, {"layerVisibility", layerVisibility},
                      {"production", saveProduction(production_)}};
     if (hasSeamData || !history_.isEmpty())
@@ -151,14 +152,36 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     if (!history_.isEmpty()) {
         QJsonArray steps;
         for (const auto& step : history_) {
-            QJsonArray names;
-            for (const auto& name : step.objects)
-                names.append(name);
-            steps.append(QJsonObject{{"operation", "silhouette"}, {"objects", names},
-                                     {"axis", step.axisFraction}, {"top", step.topScale},
-                                     {"bottom", step.bottomScale}});
+            const auto names = [](const QVector<QString>& strings) {
+                QJsonArray array;
+                for (const auto& string : strings)
+                    array.append(string);
+                return array;
+            };
+            QJsonObject record{{"objects", names(step.objects)}};
+            if (step.contour) {
+                record.insert("operation", contourOperationKey(*step.contour));
+                record.insert("guides", names(step.guides));
+                record.insert("width", step.spreadMm);
+                record.insert("topology", names(step.topology));
+                record.insert("secondPiece", step.secondPiece);
+            } else {
+                record.insert("operation", "silhouette");
+                record.insert("axis", step.axisFraction);
+                record.insert("top", step.topScale);
+                record.insert("bottom", step.bottomScale);
+            }
+            steps.append(record);
         }
         root.insert("modelingHistory", steps);
+    }
+    if (hasContourHistory()) {
+        QJsonArray sources;
+        for (const auto& source : hiddenSources_) {
+            sources.append(QJsonObject{{"name", source.name}, {"piece", source.piece},
+                {"layer", source.layer == Layer::Main ? "main" : "construction"}});
+        }
+        root.insert("modelingSources", sources);
     }
     ProductionData validated;
     if (!loadProduction(root.value("production").toObject(), pieces_.size(), validated)) {
@@ -189,7 +212,8 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto root = json.object();
     const auto format = root.value("format").toString();
     const auto fileVersion = root.value("version").toDouble();
-    const bool historyFormat = fileVersion == 11;
+    const bool topologyFormat = fileVersion == 12;
+    const bool historyFormat = fileVersion == 11 || topologyFormat;
     const bool seamFormat = fileVersion == 10 || historyFormat;
     const auto version = root.value(seamFormat ? "baseVersion" : "version").toDouble();
     if (seamFormat && (version < (historyFormat ? 8 : 7) || version > 9))
@@ -331,16 +355,59 @@ bool PatternDocument::load(const QString& path, QString* error) {
             return fail(QStringLiteral("Missing modeling history"));
         for (const auto& value : steps) {
             const auto entry = value.toObject();
-            if (entry.value("operation").toString() != "silhouette")
-                return fail(QStringLiteral("Unknown modeling operation"));
-            SilhouetteStep step{{}, entry.value("axis").toDouble(-1),
-                                entry.value("top").toDouble(-1), entry.value("bottom").toDouble(-1)};
-            for (const auto& name : entry.value("objects").toArray()) {
-                if (!name.isString() || name.toString().isEmpty())
-                    return fail(QStringLiteral("Invalid modeling object name"));
-                step.objects.append(name.toString());
+            const auto operation = entry.value("operation").toString();
+            ModelingStep step;
+            const auto readNames = [](const QJsonValue& value, QVector<QString>& names) {
+                if (!value.isArray() || value.toArray().isEmpty())
+                    return false;
+                for (const auto& name : value.toArray()) {
+                    if (!name.isString() || name.toString().isEmpty())
+                        return false;
+                    names.append(name.toString());
+                }
+                return true;
+            };
+            if (!readNames(entry.value("objects"), step.objects))
+                return fail(QStringLiteral("Invalid modeling object names"));
+            if (operation == "silhouette") {
+                step.axisFraction = entry.value("axis").toDouble(-1);
+                step.topScale = entry.value("top").toDouble(-1);
+                step.bottomScale = entry.value("bottom").toDouble(-1);
+            } else {
+                if (!topologyFormat || !(step.contour = contourOperationFromKey(operation)))
+                    return fail(QStringLiteral("Unknown modeling operation"));
+                const auto width = entry.value("width").toDouble(-1);
+                const auto panel = entry.value("secondPiece").toDouble(-2);
+                if (!readNames(entry.value("guides"), step.guides)
+                    || !readNames(entry.value("topology"), step.topology)
+                    || !std::isfinite(width) || width < 0
+                    || panel < -1 || panel >= loaded.pieces_.size() || std::trunc(panel) != panel)
+                    return fail(QStringLiteral("Invalid contour modeling step"));
+                step.spreadMm = width;
+                step.secondPiece = static_cast<qsizetype>(panel);
             }
             loaded.history_.append(std::move(step));
+        }
+    }
+    if (topologyFormat) {
+        if (std::ranges::none_of(loaded.history_, [](const auto& step) { return step.contour.has_value(); }))
+            return fail(QStringLiteral("Missing contour modeling steps"));
+        const auto sources = root.value("modelingSources").toArray();
+        if (sources.isEmpty())
+            return fail(QStringLiteral("Missing modeling sources"));
+        QSet<QString> names = draftNames;
+        for (const auto& value : sources) {
+            const auto entry = value.toObject();
+            const auto name = entry.value("name").toString();
+            const auto piece = entry.value("piece").toDouble(-2);
+            const auto layer = entry.value("layer").toString();
+            if (name.isEmpty() || name.startsWith(u'@') || names.contains(name)
+                || piece < -1 || piece >= loaded.pieces_.size() || std::trunc(piece) != piece
+                || (layer != "main" && layer != "construction"))
+                return fail(QStringLiteral("Invalid modeling source binding"));
+            names.insert(name);
+            loaded.hiddenSources_.append({name, static_cast<qsizetype>(piece),
+                                          layer == "main" ? Layer::Main : Layer::Construction});
         }
     }
     if (version >= 8) {
@@ -348,16 +415,41 @@ bool PatternDocument::load(const QString& path, QString* error) {
         if (!loadDraft(root.value("parametricDraft").toObject(), draft))
             return fail(QStringLiteral("Invalid parametric draft"));
         QString draftError;
+        for (const auto& source : loaded.hiddenSources_) {
+            if (std::ranges::find(draft.edges, source.name, &DraftEdge::name) == draft.edges.end())
+                return fail(QStringLiteral("Unknown modeling source binding '%1'").arg(source.name));
+        }
         const auto storedObjects = loaded.entities_;
         if (!loaded.setParametricDraft(std::move(draft), &draftError))
             return fail(draftError);
         if (loaded.entities_.size() != storedObjects.size())
             return fail(QStringLiteral("Parametric object list does not match the draft"));
-        for (qsizetype i = 0; i < storedObjects.size(); ++i) {
-            const auto& stored = storedObjects[i];
-            const auto& generated = loaded.entities_[i];
-            if (stored.draftName != generated.draftName || stored.shape != generated.shape)
-                return fail(QStringLiteral("Parametric object list does not match the draft"));
+        if (topologyFormat) {
+            QHash<QString, Entity> replayed;
+            for (const auto& entity : loaded.entities_) {
+                if (!entity.draftName.isEmpty())
+                    replayed.insert(entity.draftName, entity);
+            }
+            loaded.entities_ = storedObjects;
+            for (auto& stored : loaded.entities_) {
+                if (stored.draftName.isEmpty())
+                    continue;
+                const auto generated = replayed.constFind(stored.draftName);
+                if (generated == replayed.cend() || stored.shape != generated->shape
+                    || stored.piece != generated->piece || stored.layer != generated->layer)
+                    return fail(QStringLiteral("Parametric object list does not match the replayed draft"));
+                stored = generated.value();
+                replayed.remove(stored.draftName);
+            }
+            if (!replayed.isEmpty())
+                return fail(QStringLiteral("Missing replayed parametric objects"));
+        } else {
+            for (qsizetype i = 0; i < storedObjects.size(); ++i) {
+                const auto& stored = storedObjects[i];
+                const auto& generated = loaded.entities_[i];
+                if (stored.draftName != generated.draftName || stored.shape != generated.shape)
+                    return fail(QStringLiteral("Parametric object list does not match the draft"));
+            }
         }
     }
     *this = std::move(loaded);

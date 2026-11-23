@@ -305,8 +305,13 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
     }
     if (!second.isEmpty()) {
         auto other = metadata;
-        edit.document.pieces()[piece].name += QStringLiteral(" A");
-        other.name += QStringLiteral(" B");
+        if (operation == ContourOperation::Cut) {
+            edit.document.pieces()[piece].name += QStringLiteral(" A");
+            other.name += QStringLiteral(" B");
+        } else {
+            other.name += operation == ContourOperation::Yoke
+                ? QStringLiteral(" · Yoke") : QStringLiteral(" · Relief panel");
+        }
         const auto otherIndex = edit.document.pieces().size();
         edit.document.pieces().append(other);
         appendRing(edit.document, otherIndex, second);

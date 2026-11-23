@@ -10,6 +10,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDockWidget>
 #include <QRegularExpression>
 #include <QDoubleSpinBox>
 #include <QFile>
@@ -677,21 +678,26 @@ int main(int argc, char** argv) {
         });
         chooser.accept();
     });
-    runDialog<QDialog>(action(bodiceWindow, "Modeling History…"), [](QDialog& dialog) {
-        const auto* tree = dialog.findChild<QTreeWidget*>();
-        const auto* root = tree->topLevelItem(0);
-        check(root->childCount() == 1 && root->child(0)->childCount() > 0,
-              "Show the recorded modeling step and its named formula objects");
-        dialog.reject();
+    action(bodiceWindow, "Construction Tree…").trigger();
+    const auto docks = bodiceWindow.findChildren<QDockWidget*>();
+    const auto construction = std::ranges::find_if(docks, [](const QDockWidget* dock) {
+        return dock->windowTitle() == "Construction Tree";
     });
+    check(construction != docks.end(), "Open the construction dock");
+    const auto* constructionTree = (*construction)->findChild<QTreeWidget*>();
+    check(constructionTree && constructionTree->topLevelItem(0)->childCount() == 1
+          && constructionTree->topLevelItem(0)->child(0)->childCount() > 0,
+          "Show the recorded modeling step and its named formula objects");
     action(bodiceWindow, "&Save").trigger();
     check(bodice.load(bodicePath) && bodice.modelingHistory().size() == 1
           && opc::analyzePiece(bodice, 0).bounds.width() > initialWidth, "Save the modeled bodice");
     action(bodiceWindow, "Undo Shape Silhouette").trigger();
+    check(constructionTree->topLevelItem(0)->childCount() == 0, "Refresh the open construction tree after undo");
     action(bodiceWindow, "&Save").trigger();
     check(bodice.load(bodicePath) && bodice.modelingHistory().isEmpty()
           && opc::analyzePiece(bodice, 0).bounds.width() == initialWidth, "Undo formula geometry and history together");
     action(bodiceWindow, "Redo Shape Silhouette").trigger();
+    check(constructionTree->topLevelItem(0)->childCount() == 1, "Refresh the open construction tree after redo");
     action(bodiceWindow, "&Save").trigger();
     check(bodice.load(bodicePath) && bodice.modelingHistory().size() == 1, "Redo modeling history");
     runDialog<QDialog>(action(bodiceWindow, "Diagnose Pieces by Size…"), [](QDialog& dialog) {
@@ -704,6 +710,64 @@ int main(int argc, char** argv) {
     check(opc::exportPatternPdf(bodicePdf, bodice, QVector<bool>(bodice.entities().size(), true),
                                 {}, {}, seamError)
           && pageCount(readPdf(bodicePdf)) > 0, "Export the fitting block as tiled PDF");
+
+    opc::PatternDocument yoke;
+    opc::ParametricDraft yokeDraft;
+    yokeDraft.measurements = {{"width", 100}};
+    yokeDraft.points = {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "80"},
+                        {"D", "0", "80"}, {"E", "0", "25"}, {"F", "width", "25"}};
+    yokeDraft.edges = {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}},
+                       {"left", "D", "A", {}}, {"guide", "E", "F", {}}};
+    check(yoke.setParametricDraft(yokeDraft), "Create a formula yoke fixture");
+    yoke.pieces().append({"Panel"});
+    for (qsizetype i = yokeDraft.points.size(); i < yoke.entities().size(); ++i) {
+        auto entity = yoke.entities()[i];
+        if (entity.draftName == "guide")
+            entity.layer = opc::Layer::Construction;
+        else
+            entity.piece = 0;
+        yoke.replace(i, entity);
+    }
+    yoke.production().sizes.append({"L", {{"width", 140}}});
+    const auto yokePath = temp.filePath("yoke.sofit");
+    check(yoke.save(yokePath), "Save the formula yoke fixture");
+    MainWindow yokeWindow;
+    yokeWindow.show();
+    chooseFile(action(yokeWindow, "&Open"), yokePath);
+    yokeWindow.findChild<QTreeWidget*>()->topLevelItem(yoke.entities().size() - 1)->setSelected(true);
+    action(yokeWindow, "Straight Yoke…").trigger();
+    action(yokeWindow, "&Save").trigger();
+    check(yoke.load(yokePath) && yoke.pieces().size() == 2 && yoke.hasContourHistory(),
+          "Save the replayable yoke from the normal modeling command");
+    auto* yokeTree = yokeWindow.findChildren<QDockWidget*>().back()->findChild<QTreeWidget*>();
+    auto* yokeStep = yokeTree->topLevelItem(0)->child(0);
+    auto* pair = yokeStep->child(yokeStep->childCount() - 1);
+    check(pair->text(0) == "Paired cut edges" && pair->childCount() == 2
+          && pair->child(1)->text(1).contains("140"), "Show the paired cut edges in the base and graded size");
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(dialog && dialog->windowTitle() == "Match Seam Sections", "Open matching from the cut pair");
+        check(dialog->findChild<QCheckBox*>()->isChecked(), "Reverse the paired edge correspondence");
+        for (auto* button : dialog->findChildren<QPushButton*>()) {
+            if (button->text() == "Place Paired Notches") {
+                button->click();
+                return;
+            }
+        }
+        check(false, "Find the paired notch command");
+    });
+    yokeTree->itemActivated(pair, 0);
+    action(yokeWindow, "Undo Place Paired Notches").trigger();
+    action(yokeWindow, "Undo Straight Yoke").trigger();
+    action(yokeWindow, "&Save").trigger();
+    check(yoke.load(yokePath) && yoke.pieces().size() == 1 && !yoke.hasContourHistory(),
+          "Undo restores the formula guide and original piece");
+    action(yokeWindow, "Redo Straight Yoke").trigger();
+    action(yokeWindow, "Redo Place Paired Notches").trigger();
+    action(yokeWindow, "&Save").trigger();
+    check(yoke.load(yokePath) && yoke.pieces().size() == 2
+          && opc::analyzePiece(yoke, 0).notchAnchors.size() == 3
+          && opc::analyzePiece(yoke, 1).notchAnchors.size() == 3, "Redo restores both panels and the paired marks");
 
     for (const int choice : {3, 4}) {
         const bool trousers = choice == 3;

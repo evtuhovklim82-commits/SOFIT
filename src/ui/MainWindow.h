@@ -11,6 +11,9 @@ namespace opc { enum class ContourOperation; }
 
 class PatternView;
 class QTreeWidget;
+class QDockWidget;
+class QLabel;
+class QPushButton;
 
 class MainWindow : public QMainWindow {
 public:
@@ -33,6 +36,8 @@ private:
     void joinSelectedEdges();
     void shapeSilhouette();
     void showModelingHistory();
+    void refreshModelingHistory();
+    void setModelingError(const QString& error);
     void diagnoseGradedPieces();
     void modelPiece(opc::ContourOperation operation, const QString& title);
     bool canModelEdge(const opc::Entity& edge);
@@ -48,7 +53,7 @@ private:
     void assignPiece();
     void managePiece();
     void measureSelection();
-    void matchSeams();
+    void matchSeams(const QVector<qsizetype>& indices, bool reverseSecond = false);
     void editEdgeAllowance();
     void clearEdgeNotches();
     void setSelectedLayer(opc::Layer layer);
@@ -61,6 +66,10 @@ private:
     PatternView* view_;
     QUndoStack undo_;
     QTreeWidget* objects_;
+    QDockWidget* modelingDock_ = nullptr;
+    QTreeWidget* modelingTree_ = nullptr;
+    QLabel* modelingError_ = nullptr;
+    QPushButton* removeModelingStep_ = nullptr;
     QString currentPath_;
     std::array<QAction*, 3> layerActions_{};
     QVector<opc::PieceGeometry> pieces_;

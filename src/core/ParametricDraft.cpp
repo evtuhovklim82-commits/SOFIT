@@ -355,11 +355,26 @@ QVector<Entity> PatternDocument::bindDraftGeometry(QVector<Entity> generated) co
         entities.append(replacement);
         indices.remove(original.draftName);
     }
+    for (const auto& source : hiddenSources_) {
+        const auto index = indices.constFind(source.name);
+        if (index == indices.cend())
+            continue;
+        auto entity = generated[index.value()];
+        entity.piece = source.piece;
+        entity.layer = source.layer;
+        entities.append(entity);
+        indices.remove(source.name);
+    }
     for (const auto& entity : std::as_const(generated)) {
         if (indices.contains(entity.draftName))
             entities.append(entity);
     }
     return entities;
+}
+
+bool PatternDocument::captureContourTopology(ModelingStep& step, QString* error) const {
+    auto source = bindDraftGeometry(DraftEvaluation(draft_).geometry(draft_));
+    return replayModeling(source, production_, error, &step);
 }
 
 bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) {

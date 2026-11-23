@@ -68,7 +68,8 @@ void readRows(const QTableWidget& table, const std::function<void(const QStringL
 }
 }
 
-std::optional<opc::PatternDocument> editParametricDraft(QWidget* parent, const opc::PatternDocument& document) {
+std::optional<opc::PatternDocument> editParametricDraft(QWidget* parent, const opc::PatternDocument& document,
+                                                         QString* calculationError) {
     QDialog dialog(parent);
     dialog.setWindowTitle(tr("Parametric Draft"));
     dialog.resize(760, 480);
@@ -141,7 +142,10 @@ std::optional<opc::PatternDocument> editParametricDraft(QWidget* parent, const o
         });
 
         auto updated = document;
-        if (error.isEmpty() && updated.setParametricDraft(std::move(draft), &error)) {
+        const bool valid = error.isEmpty() && updated.setParametricDraft(std::move(draft), &error);
+        if (calculationError)
+            *calculationError = error;
+        if (valid) {
             if (apply) {
                 if (updated.parametricDraft() != original)
                     result = std::move(updated);
