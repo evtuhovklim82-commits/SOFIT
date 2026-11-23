@@ -27,6 +27,8 @@ struct FittingCheck {
 };
 
 std::optional<PatternDocument> draftTrousers(const TrouserMeasurements& m, QString* error = nullptr);
+std::optional<PatternDocument> draftTrousersWithSeamLinks(const TrouserMeasurements& m,
+                                                         QString* error = nullptr);
 // An empty size checks the base. Named sizes include any manual grade offsets.
 FittingCheck checkFittingBlock(const PatternDocument& document, const QString& size = {},
                               double capEase = 4);

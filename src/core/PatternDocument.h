@@ -1,5 +1,7 @@
 #pragma once
+#include <QHash>
 #include <QPointF>
+#include <QSet>
 #include <QString>
 #include <QVector>
 #include <array>
@@ -56,6 +58,30 @@ struct ModelingStep {
     bool operator==(const ModelingStep&) const = default;
 };
 
+struct SeamLink {
+    QVector<QString> first, second; // Ordered from the selected sewing starts.
+    bool reverseFirst = false;
+    bool reverseSecond = false;
+    double targetEaseMm = 0;
+    double toleranceMm = 1;
+    int notchPairs = 0;
+    std::optional<double> allowanceMm;
+    bool operator==(const SeamLink&) const = default;
+};
+
+struct SeamLinkCheck {
+    double firstMm = 0, secondMm = 0;
+    bool withinTolerance = false;
+    QString error;
+};
+
+struct SeamLinkReport {
+    QVector<SeamLinkCheck> checks;
+    QHash<qsizetype, QVector<double>> notches;
+    QHash<qsizetype, double> allowances;
+    QSet<qsizetype> pieces;
+};
+
 class PatternDocument {
 public:
     void insert(qsizetype index, const Entity& entity) { entities_.insert(index, entity); }
@@ -81,10 +107,18 @@ public:
                        const QVector<qsizetype>& guides, double spreadMm, QString* error = nullptr);
     bool hasContourHistory() const { return !hiddenSources_.isEmpty(); }
     bool removeLastModelingStep(QString* error = nullptr);
+    const QVector<SeamLink>& seamLinks() const { return seamLinks_; }
+    bool addSeamLink(SeamLink link, QString* error = nullptr);
+    bool editSeamLink(qsizetype index, SeamLink link, QString* error = nullptr);
+    bool removeSeamLink(qsizetype index);
+    SeamLinkReport inspectSeamLinks() const;
+    bool validateSeamLinks(QString* error = nullptr) const;
     bool save(const QString& path, QString* error = nullptr) const;
     bool load(const QString& path, QString* error = nullptr);
 
 private:
+    friend PatternDocument gradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*);
+    QVector<SeamLink> seamLinks_;
     bool captureContourTopology(ModelingStep& step, QString* error) const;
     QVector<Entity> bindDraftGeometry(QVector<Entity> generated) const;
     bool replayModeling(QVector<Entity>& entities, const ProductionData& production,

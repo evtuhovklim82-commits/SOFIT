@@ -185,9 +185,11 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
     };
     QVector<bool> visiblePieces(document.pieces().size(), false);
     QVector<bool> edgeMarkedPieces(document.pieces().size(), false);
+    const auto linkedNotches = document.inspectSeamLinks().notches;
     for (qsizetype i = 0; i < document.entities().size(); ++i) {
         const auto& entity = document.entities()[i];
-        if (entity.piece >= 0 && entity.layer == Layer::Main && !entity.seamNotches.isEmpty())
+        if (entity.piece >= 0 && entity.layer == Layer::Main
+            && (!entity.seamNotches.isEmpty() || linkedNotches.contains(i)))
             edgeMarkedPieces[entity.piece] = true;
         if (objectVisibility[i] && document.layerVisible(entity.layer)) {
             append(entityPath(entity), entity.layer, entity.shape == Shape::Point);

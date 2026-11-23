@@ -1,5 +1,6 @@
 #include "BodiceDraft.h"
 #include "ContourModeling.h"
+#include "FittingBlocks.h"
 #include "PatternDxf.h"
 #include "PatternPdf.h"
 #include "PatternTemplates.h"
@@ -48,6 +49,7 @@ void roundTripAndExport(const PatternDocument& document, const QString& size = {
     check(loaded.load(sofit, &error), "Reopen project: " + error);
     check(loaded.parametricDraft() == document.parametricDraft() && loaded.pieces() == document.pieces()
           && loaded.modelingHistory() == document.modelingHistory()
+          && loaded.seamLinks() == document.seamLinks()
           && saveProduction(loaded.production()) == saveProduction(document.production()),
           "Round trip formulas, size data and piece metadata");
     check(loaded.entities().size() == document.entities().size(), "Round trip all entities");
@@ -78,6 +80,8 @@ void roundTripAndExport(const PatternDocument& document, const QString& size = {
     const auto dxfBytes = readFile(dxf);
     check(dxfBytes.contains("ENTITIES") && dxfBytes.contains("LINE") && dxfBytes.contains("EOF"),
           "Write pattern geometry in DXF");
+    if (!drawing.inspectSeamLinks().notches.isEmpty())
+        check(dxfBytes.contains("\n0\nLINE\n100\nAcDbEntity\n8\nNOTCH\n"), "Write actual linked notch lines to DXF");
 }
 
 void checkModeling() {
@@ -181,6 +185,99 @@ qsizetype namedEdge(const PatternDocument& panel, const QString& name) {
     return edge - panel.entities().begin();
 }
 
+void checkSeamLinks() {
+    ParametricDraft draft;
+    draft.measurements = {{"join_x", 60}, {"width", 100}, {"mate", 100}};
+    draft.points = {{"A", "0", "0"}, {"B", "join_x", "0"}, {"C", "width", "0"},
+                    {"D", "width", "40"}, {"E", "0", "40"},
+                    {"F", "0", "80"}, {"G", "mate", "80"}, {"H", "mate", "130"},
+                    {"I", "0", "130"}};
+    draft.edges = {{"left_top", "A", "B", {}}, {"right_top", "B", "C", {}},
+                   {"right", "C", "D", {}}, {"bottom", "D", "E", {}}, {"left", "E", "A", {}},
+                   {"mate_top", "F", "G", {}}, {"mate_right", "G", "H", {}},
+                   {"mate_bottom", "H", "I", {}}, {"mate_left", "I", "F", {}}};
+    auto panel = formulaPanel(draft, {});
+    panel.pieces().append({"Mate", 2});
+    panel.pieces()[0].allowanceMm = 2;
+    for (qsizetype i = 0; i < panel.entities().size(); ++i) {
+        auto entity = panel.entities()[i];
+        if (!entity.draftName.startsWith("mate_"))
+            continue;
+        entity.piece = 1;
+        panel.replace(i, entity);
+    }
+    panel.production().sizes.append({"L", {{"join_x", 40}, {"width", 110}, {"mate", 115}}});
+    panel.production().sizes.append({"XL", {{"join_x", 70}, {"width", 125}, {"mate", 125}}});
+    const SeamLink link{{"left_top", "right_top"}, {"mate_top"}, false, true, 0, 1, 1, 5};
+    QString error;
+    check(panel.addSeamLink(link, &error), "Link two sewing chains: " + error);
+    check(!panel.addSeamLink(link, &error) && panel.seamLinks().size() == 1,
+          "Reject a duplicate sewing link");
+    auto conflict = link;
+    conflict.allowanceMm = 6;
+    check(!panel.addSeamLink(conflict, &error) && error.contains("different allowances"),
+          "Reject overlapping links with different shared widths");
+    auto revised = link;
+    revised.allowanceMm = 4;
+    check(panel.editSeamLink(0, revised, &error) && panel.editSeamLink(0, link, &error), error);
+    const auto base = panel.inspectSeamLinks();
+    check(near(base.allowances.value(namedEdge(panel, "left_top")), 5)
+          && near(base.allowances.value(namedEdge(panel, "mate_top")), 5)
+          && near(analyzePiece(panel, 0).allowance.boundingRect().top(), -5)
+          && near(analyzePiece(panel, 1).allowance.boundingRect().top(), 75)
+          && base.checks.front().withinTolerance
+          && near(base.notches.value(namedEdge(panel, "left_top")).front(), 50.0 / 60),
+          "Put the base midpoint on the first edge of the chain");
+    for (int replay = 0; replay < 3; ++replay) {
+        const auto large = gradedPattern(panel, "L");
+        const auto report = large.inspectSeamLinks();
+        check(!report.checks.front().withinTolerance
+              && near(report.checks.front().secondMm - report.checks.front().firstMm, 5)
+              && !report.notches.contains(namedEdge(large, "left_top"))
+              && near(report.notches.value(namedEdge(large, "right_top")).front(), 15.0 / 70)
+              && analyzePiece(large, 0).notchAnchors.size() == 1
+              && analyzePiece(large, 1).notchAnchors.size() == 1,
+              "Recalculate chain position, sewing ease and both marks in every replay");
+        const auto extraLarge = gradedPattern(panel, "XL").inspectSeamLinks();
+        check(extraLarge.checks.front().withinTolerance, "Use independent size measurements");
+        check(panel.setParametricDraft(draft, &error), error);
+    }
+
+    auto grades = panel.production();
+    grades.sizes[0].measurements["join_x"] = 55;
+    check(!panel.validateParametricSizes(grades, &error) && error.contains("L")
+          && error.contains("junction") && panel.seamLinks() == QVector<SeamLink>{link},
+          "Reject a notch junction specific to one size without committing the change");
+    auto broken = draft;
+    broken.edges.removeFirst();
+    check(!panel.setParametricDraft(broken, &error) && error.contains("Seam link 1")
+          && panel.parametricDraft() == draft, "Roll back a formula edit that removes a linked edge");
+    check(panel.appendSilhouette(1, 0.5, 1.05, 1.05, &error), error);
+    check(!panel.inspectSeamLinks().checks.front().withinTolerance,
+          "Report ease from the replayed modeling result");
+    roundTripAndExport(panel, "L");
+    roundTripAndExport(gradedPattern(panel, "L"));
+    check(panel.removeSeamLink(0) && panel.inspectSeamLinks().notches.isEmpty()
+          && analyzePiece(panel, 0).notchAnchors.isEmpty(),
+          "Remove linked notches without leaving stored edge marks");
+}
+
+void checkLinkedTrouserBlock() {
+    QString error;
+    auto trousers = draftTrousersWithSeamLinks({740, 1000, 40, 60, 195, 270, 600, 1030, 460, 380, 100}, &error);
+    check(trousers && trousers->seamLinks().size() == 3, "Create the linked trouser block: " + error);
+    auto production = trousers->production();
+    production.sizes.append({"L", {{"waist", 820}, {"hip", 1080}, {"length", 1060}, {"knee", 490}}});
+    check(trousers->validateParametricSizes(production, &error), error);
+    trousers->production() = production;
+    const auto grade = gradedPattern(*trousers, "L");
+    check(grade.inspectSeamLinks().checks.size() == 3
+          && analyzePiece(grade, 0).notchAnchors.size() == 2
+          && analyzePiece(grade, 1).notchAnchors.size() == 2,
+          "Preconfigured inseam marks follow the size table");
+    roundTripAndExport(*trousers, "L");
+}
+
 void checkContourHistory() {
     ParametricDraft draft;
     draft.measurements = {{"width", 100}, {"height", 80}, {"cut_y", 30}};
@@ -200,6 +297,11 @@ void checkContourHistory() {
         const auto b = namedEdge(split, "@1:seam-B");
         const auto left = split.entities()[a];
         const auto right = split.entities()[b];
+        auto linkedSplit = split;
+        check(linkedSplit.addSeamLink({{left.draftName}, {right.draftName}, false, true, 0, 1, 2}, &error), error);
+        check(!linkedSplit.removeLastModelingStep(&error) && linkedSplit.pieces().size() == 2
+              && error.contains("Seam link 1"), "Rollback when a removed split would leave a dangling seam");
+        roundTripAndExport(linkedSplit, "L");
         check(left.a == right.b && left.b == right.a && near(*seamLength(left), 100),
               "Create oppositely directed matching seams");
         for (const auto [index, notch] : {std::pair{a, 0.25}, std::pair{b, 0.75}}) {
@@ -490,6 +592,8 @@ int main(int argc, char** argv) {
     QGuiApplication app(argc, argv);
     checkModeling();
     checkContourHistory();
+    checkSeamLinks();
+    checkLinkedTrouserBlock();
     checkTemplates();
     checkApronKit();
 }

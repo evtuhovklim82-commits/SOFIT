@@ -572,7 +572,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         qsizetype countIssues = 0;
         qsizetype pairIssues = 0;
         QString details;
+        QStringList checkedSizes;
         for (const auto& row : opc::cuttingKitRows(document, report)) {
+            if (!checkedSizes.contains(row.size))
+                checkedSizes.append(row.size);
             const auto& piece = document.pieces()[row.piece];
             details += tr("\n%1 · %2 | Expected: %3 | Plotted: %4 (single %5, left %6, right %7, on fold %8)")
                 .arg(piece.name, row.size.isEmpty() ? tr("Base") : row.size)
@@ -592,8 +595,35 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             if (!piece.grainAngle)
                 details += tr(" | Grain direction unspecified");
         }
+        qsizetype seamIssues = 0;
+        if (!document.seamLinks().isEmpty()) {
+            details += tr("\n\nSeam link checks");
+            for (const auto& size : checkedSizes) {
+                const auto pattern = opc::gradedPattern(document, size);
+                const auto checks = pattern.inspectSeamLinks().checks;
+                const auto label = size.isEmpty() ? tr("Base") : size;
+                if (checks.size() != document.seamLinks().size()) {
+                    details += tr("\n%1 · Could not recalculate seam links").arg(label);
+                    ++seamIssues;
+                    continue;
+                }
+                for (qsizetype i = 0; i < checks.size(); ++i) {
+                    const auto& check = checks[i];
+                    const auto& link = document.seamLinks()[i];
+                    const auto result = check.error.isEmpty()
+                        ? tr("Ease %L1 mm · Target %L2 ± %L3 mm · %4")
+                            .arg(check.secondMm - check.firstMm, 0, 'f', 2)
+                            .arg(link.targetEaseMm, 0, 'f', 2).arg(link.toleranceMm, 0, 'f', 2)
+                            .arg(check.withinTolerance ? tr("Within tolerance") : tr("Outside tolerance"))
+                        : check.error;
+                    details += tr("\n%1 · Seam link %2 · %3").arg(label).arg(i + 1).arg(result);
+                    if (!check.error.isEmpty() || !check.withinTolerance)
+                        ++seamIssues;
+                }
+            }
+        }
         if (data.placements.isEmpty() || usage.invalid || usage.outside || usage.overlaps
-            || report.orientationViolations || report.foldViolations || countIssues || pairIssues) {
+            || report.orientationViolations || report.foldViolations || countIssues || pairIssues || seamIssues) {
             text += tr("\nReview the issues below before cutting.\n");
         } else {
             text += tr("\nLayout geometry, copy counts and handed pairs pass the checks.\n");

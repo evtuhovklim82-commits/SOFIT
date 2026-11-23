@@ -363,6 +363,7 @@ std::optional<SeamSection> measureSeamSection(const PatternDocument& document,
 PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
     if (piece < 0 || piece >= document.pieces().size())
         return {};
+    const auto linked = document.inspectSeamLinks();
 
     QVector<Edge> edges;
     for (qsizetype index = 0; index < document.entities().size(); ++index) {
@@ -390,7 +391,8 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
         }
         for (auto i = firstEdge; i < edges.size(); ++i) {
             edges[i].entityIndex = index;
-            edges[i].width = entity.seamAllowanceMm.value_or(document.pieces()[piece].allowanceMm);
+            edges[i].width = linked.allowances.value(index,
+                entity.seamAllowanceMm.value_or(document.pieces()[piece].allowanceMm));
         }
         if (edges.size() > maxEdges)
             return {ContourError::TooComplex};
@@ -458,7 +460,7 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
                 return {ContourError::TooComplex};
             chords.append(edge);
         }
-        if (!document.entities()[edge.entityIndex].seamNotches.isEmpty())
+        if (linked.notches.contains(edge.entityIndex) || !document.entities()[edge.entityIndex].seamNotches.isEmpty())
             spans.append({firstChord, chords.size(), edge.entityIndex, reversed});
     }
     QPolygonF ring;
@@ -483,7 +485,14 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
         QVector<double> distances{0};
         for (auto i = span.first; i < span.end; ++i)
             distances.append(distances.back() + length(chords[i].end - chords[i].start));
-        for (const auto fraction : document.entities()[span.entity].seamNotches) {
+        auto fractions = document.entities()[span.entity].seamNotches;
+        for (double fraction : linked.notches.value(span.entity)) {
+            if (std::ranges::none_of(fractions, [fraction](double existing) {
+                    return std::abs(existing - fraction) < 1e-9;
+                }))
+                fractions.append(fraction);
+        }
+        for (const auto fraction : fractions) {
             const auto distance = (span.reversed ? 1 - fraction : fraction) * distances.back();
             const auto index = std::upper_bound(distances.begin(), distances.end(), distance)
                 - distances.begin() - 1;

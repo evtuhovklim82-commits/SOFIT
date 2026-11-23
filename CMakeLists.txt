@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 2.0.0 LANGUAGES CXX)
+project(SOFIT VERSION 2.1.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -18,6 +18,7 @@ add_library(sofit_core STATIC
     src/core/ModelingHistory.cpp
     src/core/PatternPdf.cpp
     src/core/Production.cpp
+    src/core/SeamLinks.cpp
     src/core/PieceMarkings.cpp
     src/core/PatternDxf.cpp
     src/core/ParametricDraft.cpp

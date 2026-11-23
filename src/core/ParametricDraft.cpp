@@ -319,8 +319,13 @@ bool PatternDocument::validateDraftSizes(const ParametricDraft& draft, const QVe
 bool PatternDocument::validateParametricSizes(const ProductionData& production, QString* error) const {
     if (error)
         error->clear();
-    if (history_.isEmpty())
+    if (history_.isEmpty() && seamLinks_.isEmpty())
         return validateDraftSizes(draft_, entities_, production, error);
+    if (draft_ == ParametricDraft{} && history_.isEmpty()) {
+        auto candidate = *this;
+        candidate.production_ = production;
+        return candidate.validateSeamLinks(error);
+    }
     auto candidate = *this;
     candidate.production_ = production;
     return candidate.setParametricDraft(draft_, error);
@@ -400,6 +405,13 @@ bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) 
         || !replayModeling(base, production_, error))
         return false;
 
+    if (!seamLinks_.isEmpty()) {
+        auto candidate = *this;
+        candidate.entities_ = base;
+        candidate.draft_ = draft;
+        if (!candidate.validateSeamLinks(error))
+            return false;
+    }
     entities_ = std::move(base);
     draft_ = std::move(draft);
     if (error)

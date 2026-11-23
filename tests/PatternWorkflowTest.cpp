@@ -26,6 +26,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QPlainTextEdit>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -831,7 +832,7 @@ int main(int argc, char** argv) {
     QTimer::singleShot(0, [] {
         auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
         check(dialog && dialog->windowTitle() == "Match Seam Sections", "Open matching from the cut pair");
-        check(dialog->findChild<QCheckBox*>()->isChecked(), "Reverse the paired edge correspondence");
+        check(dialog->findChild<QCheckBox*>("reverseSeamCorrespondence")->isChecked(), "Reverse the paired edge correspondence");
         for (auto* button : dialog->findChildren<QPushButton*>()) {
             if (button->text() == "Place Paired Notches") {
                 button->click();
@@ -852,6 +853,53 @@ int main(int argc, char** argv) {
     check(yoke.load(yokePath) && yoke.pieces().size() == 2
           && opc::analyzePiece(yoke, 0).notchAnchors.size() == 3
           && opc::analyzePiece(yoke, 1).notchAnchors.size() == 3, "Redo restores both panels and the paired marks");
+    auto* currentStep = yokeTree->topLevelItem(0)->child(0);
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(dialog && dialog->windowTitle() == "Match Seam Sections", "Open the modeled seam pair again");
+        for (auto* button : dialog->findChildren<QPushButton*>()) {
+            if (button->text() == "Save Seam Link") {
+                button->click();
+                return;
+            }
+        }
+        check(false, "Find the saved seam link command");
+    });
+    yokeTree->itemActivated(currentStep->child(currentStep->childCount() - 1), 0);
+    const auto verifyLink = [&](qsizetype links, int pairs) {
+        action(yokeWindow, "&Save").trigger();
+        check(yoke.load(yokePath) && yoke.seamLinks().size() == links
+              && (links == 0 || yoke.seamLinks().front().notchPairs == pairs),
+              "Persist the saved seam link through undo and redo");
+    };
+    verifyLink(1, 3);
+    action(yokeWindow, "Undo Save Seam Link").trigger();
+    verifyLink(0, 0);
+    action(yokeWindow, "Redo Save Seam Link").trigger();
+    verifyLink(1, 3);
+    auto* linkedSeams = yokeTree->topLevelItem(1);
+    check(linkedSeams && linkedSeams->child(0)->text(1).contains("Within tolerance")
+          && linkedSeams->child(0)->child(linkedSeams->child(0)->childCount() - 1)->text(0) == "L",
+          "Show base and graded linked seams in the construction tree");
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(dialog && dialog->windowTitle() == "Edit Seam Link 1", "Edit the saved seam link");
+        dialog->findChild<QSpinBox*>()->setValue(2);
+        dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+    });
+    yokeTree->itemActivated(linkedSeams->child(0), 0);
+    verifyLink(1, 2);
+    action(yokeWindow, "Undo Edit Seam Link").trigger();
+    verifyLink(1, 3);
+    action(yokeWindow, "Redo Edit Seam Link").trigger();
+    verifyLink(1, 2);
+    runDialog<QDialog>(action(yokeWindow, "Diagnose Pieces by Size…"), [](QDialog& dialog) {
+        const auto* report = dialog.findChild<QTreeWidget*>();
+        check(report && report->topLevelItemCount() == 2
+              && report->topLevelItem(1)->child(0)->text(1).contains("Within tolerance"),
+              "Audit linked seams with the cutting and grading checks");
+        dialog.reject();
+    });
     check(yoke.appendSilhouette(1, 0.5, 1.1, 1.1, &seamError) && yoke.save(yokePath),
           "Lengthen only one side of the marked seam");
     MainWindow mismatchedYoke;
@@ -867,6 +915,25 @@ int main(int argc, char** argv) {
               && sizeRow->child(0)->text(1).contains("mm"), "Report notch displacement along each graded seam");
     }
 
+    runDialog<QDialog>(action(mismatchedYoke, "Fabric Layout…"), [](QDialog& layout) {
+        for (auto* button : layout.findChildren<QPushButton*>()) {
+            if (button->text() != "Cutting report…")
+                continue;
+            QTimer::singleShot(0, [] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                check(dialog && dialog->windowTitle() == "Cutting report", "Open the marker cutting report");
+                const auto text = dialog->findChild<QPlainTextEdit*>()->toPlainText();
+                check(text.contains("Base · Seam link 1") && text.contains("Outside tolerance"),
+                      "Surface linked seam ease in the cutting report");
+                dialog->reject();
+            });
+            button->click();
+            layout.reject();
+            return;
+        }
+        check(false, "Find the cutting report command");
+    });
+
     for (const int choice : {3, 4}) {
         const bool trousers = choice == 3;
         const QString name = trousers ? "trousers" : "dress";
@@ -875,6 +942,12 @@ int main(int argc, char** argv) {
         runDialog<QWizard>(action(fittingWindow, "New Pattern from Template…"), [choice](QWizard& wizard) {
             wizard.findChild<QComboBox*>()->setCurrentIndex(choice);
             wizard.next();
+            if (choice == 3) {
+                for (auto* field : wizard.findChildren<QCheckBox*>()) {
+                    if (field->text().startsWith("Track side seams"))
+                        field->setChecked(true);
+                }
+            }
             wizard.button(QWizard::FinishButton)->click();
         });
         runDialog<QDialog>(action(fittingWindow, "Check Fitting Block by Size…"), [trousers](QDialog& dialog) {
@@ -887,7 +960,8 @@ int main(int argc, char** argv) {
         const auto projectPath = temp.filePath(name + ".sofit");
         chooseFile(action(fittingWindow, "&Save"), projectPath);
         opc::PatternDocument block;
-        check(block.load(projectPath) && block.pieces().size() == (trousers ? 2 : 4),
+        check(block.load(projectPath) && block.pieces().size() == (trousers ? 2 : 4)
+              && block.seamLinks().size() == (trousers ? 3 : 0),
               "Round trip all fitting pieces created through the wizard");
         auto& sizes = block.production().sizes;
         sizes.append({"L", {{"waist", 800}, {"hip", 1060}, {"bust", 980}}});

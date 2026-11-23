@@ -155,8 +155,30 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     QJsonObject root{{"format", "SOFIT"}, {"version", hasContourHistory() ? 12 : !history_.isEmpty() ? 11 : hasSeamData ? 10 : version}, {"objects", objects},
                      {"pieces", pieces}, {"layerVisibility", layerVisibility},
                      {"production", saveProduction(production_)}};
-    if (hasSeamData || !history_.isEmpty())
+    if (hasSeamData || !history_.isEmpty() || !seamLinks_.isEmpty())
         root.insert("baseVersion", version);
+    if (!seamLinks_.isEmpty()) {
+        root.insert("linkedBaseVersion", hasContourHistory() ? 12 : !history_.isEmpty() ? 11 : 10);
+        root.insert("version", 13);
+        const auto saveNames = [](const QVector<QString>& names) {
+            QJsonArray array;
+            for (const auto& name : names)
+                array.append(name);
+            return array;
+        };
+        QJsonArray links;
+        for (const auto& link : seamLinks_) {
+            QJsonObject record{
+                {"first", saveNames(link.first)}, {"second", saveNames(link.second)},
+                {"reverseFirst", link.reverseFirst}, {"reverseSecond", link.reverseSecond},
+                {"ease", link.targetEaseMm}, {"tolerance", link.toleranceMm}, {"notches", link.notchPairs}
+            };
+            if (link.allowanceMm)
+                record.insert("allowance", *link.allowanceMm);
+            links.append(record);
+        }
+        root.insert("seamLinks", links);
+    }
     if (parametric)
         root.insert("parametricDraft", saveDraft(draft_));
     if (!history_.isEmpty()) {
@@ -223,7 +245,10 @@ bool PatternDocument::load(const QString& path, QString* error) {
         return fail(QStringLiteral("Invalid JSON document"));
     const auto root = json.object();
     const auto format = root.value("format").toString();
-    const auto fileVersion = root.value("version").toDouble();
+    const bool linkedFormat = root.value("version").toDouble() == 13;
+    const auto fileVersion = root.value(linkedFormat ? "linkedBaseVersion" : "version").toDouble();
+    if (linkedFormat && fileVersion != 10 && fileVersion != 11 && fileVersion != 12)
+        return fail(QStringLiteral("Invalid linked document version"));
     const bool topologyFormat = fileVersion == 12;
     const bool historyFormat = fileVersion == 11 || topologyFormat;
     const bool seamFormat = fileVersion == 10 || historyFormat;
@@ -321,7 +346,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
             entity.piece = static_cast<qsizetype>(piece);
             entity.layer = layer == "main" ? Layer::Main : Layer::Construction;
         }
-        if (version >= 8 && fields.contains("draftName")) {
+        if ((version >= 8 || linkedFormat) && fields.contains("draftName")) {
             entity.draftName = fields.value("draftName").toString();
             if (topologyFormat && entity.draftName.startsWith(u'@'))
                 entity.draftName = canonicalContourName(entity.draftName);
@@ -472,6 +497,41 @@ bool PatternDocument::load(const QString& path, QString* error) {
                 if (stored.draftName != generated.draftName || stored.shape != generated.shape)
                     return fail(QStringLiteral("Parametric object list does not match the draft"));
             }
+        }
+    }
+    if (linkedFormat) {
+        const auto links = root.value("seamLinks").toArray();
+        if (links.isEmpty())
+            return fail(QStringLiteral("Missing seam links"));
+        const auto readNames = [](const QJsonValue& value, QVector<QString>& result) {
+            for (const auto& item : value.toArray()) {
+                if (!item.isString() || item.toString().isEmpty())
+                    return false;
+                result.append(item.toString());
+            }
+            return !result.isEmpty();
+        };
+        for (const auto& value : links) {
+            const auto record = value.toObject();
+            SeamLink link;
+            const auto count = record.value("notches").toDouble(-1);
+            if (!readNames(record.value("first"), link.first) || !readNames(record.value("second"), link.second)
+                || !record.value("reverseFirst").isBool() || !record.value("reverseSecond").isBool()
+                || !record.value("ease").isDouble() || !record.value("tolerance").isDouble()
+                || count < 0 || count > 20 || std::trunc(count) != count)
+                return fail(QStringLiteral("Invalid seam link"));
+            link.reverseFirst = record.value("reverseFirst").toBool();
+            link.reverseSecond = record.value("reverseSecond").toBool();
+            link.targetEaseMm = record.value("ease").toDouble();
+            link.toleranceMm = record.value("tolerance").toDouble();
+            link.notchPairs = static_cast<int>(count);
+            if (record.contains("allowance")) {
+                if (!record.value("allowance").isDouble())
+                    return fail(QStringLiteral("Invalid shared seam allowance"));
+                link.allowanceMm = record.value("allowance").toDouble();
+            }
+            if (!loaded.addSeamLink(std::move(link), error))
+                return false;
         }
     }
     *this = std::move(loaded);

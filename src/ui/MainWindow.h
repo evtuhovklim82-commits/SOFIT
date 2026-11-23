@@ -38,6 +38,7 @@ private:
     void joinSelectedEdges();
     void shapeSilhouette();
     void showModelingHistory();
+    void editSeamLink(qsizetype index);
     void editModelingStep(qsizetype index);
     void refreshModelingHistory();
     void setModelingError(const QString& error);

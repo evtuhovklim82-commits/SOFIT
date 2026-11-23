@@ -2,6 +2,7 @@
 #include "PatternTemplates.h"
 #include "BodiceDraft.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDoubleSpinBox>
@@ -120,6 +121,10 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     const auto* knee = measurement(tr("Finished knee circumference per leg"), 460, 100, 1200);
     const auto* hem = measurement(tr("Finished hem circumference per leg"), 380, 100, 1200);
 
+    auto* linkedTrousers = new QCheckBox(tr("Track side seams and inseams with paired notches"));
+    linkedTrousers->setToolTip(tr("Add a seam link for the side and one for each section of the inseam. Set cutting allowances after the fitting."));
+    form->addRow(linkedTrousers);
+
     const int dressStart = form->rowCount();
     const auto* skirtLength = measurement(tr("Waist to dress hem"), 620, 200, 1500);
     const auto* hemFlare = measurement(tr("Extra dress hem circumference beyond eased hip"), 160, 0, 1500);
@@ -184,11 +189,14 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                 }, &error))
                 return document;
         } else if (index == Trousers) {
-            if (auto document = opc::draftTrousers({
-                    waist->value(), fittedHip->value(), waistEase->value(), hipEase->value(),
-                    hipDepth->value(), rise->value(), kneeDepth->value(), trouserLength->value(),
-                    knee->value(), hem->value(), lowerDart->value()
-                }, &error))
+            const opc::TrouserMeasurements trousers{
+                waist->value(), fittedHip->value(), waistEase->value(), hipEase->value(),
+                hipDepth->value(), rise->value(), kneeDepth->value(), trouserLength->value(),
+                knee->value(), hem->value(), lowerDart->value()
+            };
+            auto document = linkedTrousers->isChecked()
+                ? opc::draftTrousersWithSeamLinks(trousers, &error) : opc::draftTrousers(trousers, &error);
+            if (document)
                 return document;
         } else {
             const opc::BodiceMeasurements bodice{

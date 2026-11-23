@@ -29,6 +29,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -64,6 +65,16 @@ QString describeContour(opc::ContourError error) {
     case ContourError::TooComplex: return QCoreApplication::translate("MainWindow", "Contour exceeds the geometry limits");
     }
     return {};
+}
+
+QString describeSeamLink(const opc::SeamLinkCheck& check, double target) {
+    const auto text = [](const char* label) { return QCoreApplication::translate("MainWindow", label); };
+    if (!check.error.isEmpty())
+        return check.error;
+    return text("A %L1 mm · B %L2 mm · Ease %L3 mm (target %L4 mm) · %5")
+        .arg(check.firstMm, 0, 'f', 2).arg(check.secondMm, 0, 'f', 2)
+        .arg(check.secondMm - check.firstMm, 0, 'f', 2).arg(target, 0, 'f', 2)
+        .arg(check.withinTolerance ? text("Within tolerance") : text("Outside tolerance"));
 }
 
 QString modelingStepName(const opc::ModelingStep& step) {
@@ -720,7 +731,7 @@ qsizetype MainWindow::choosePiece(const QString& title) {
 
 void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& text, bool redraw) {
     QString error;
-    if (!document.modelingHistory().isEmpty()
+    if ((!document.modelingHistory().isEmpty() || !document.seamLinks().isEmpty())
         && !document.validateParametricSizes(document.production(), &error)) {
         setModelingError(error);
         QMessageBox::warning(this, text, error);
@@ -729,8 +740,10 @@ void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& 
     const auto selected = selectedObjects();
     view_->cancelDrawing();
     undo_.push(new PatternCommand(doc_, std::move(document), text, redraw ? view_ : nullptr));
-    for (const auto index : selected)
-        objects_->topLevelItem(index)->setSelected(true);
+    for (const auto index : selected) {
+        if (auto* item = objects_->topLevelItem(index))
+            item->setSelected(true);
+    }
 }
 
 void MainWindow::createPiece() {
@@ -852,17 +865,27 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
     tolerance->setSuffix(tr(" mm"));
     form->addRow(tr("Tolerance (±)"), tolerance);
     auto* count = new QSpinBox(&dialog);
-    count->setRange(1, 20);
+    count->setRange(0, 20);
     count->setValue(3);
     form->addRow(tr("Notch pairs"), count);
+    auto* shareAllowance = new QCheckBox(tr("Share allowance on linked edges"), &dialog);
+    auto* linkedWidth = new QDoubleSpinBox(&dialog);
+    linkedWidth->setRange(0, 1000);
+    linkedWidth->setValue(10);
+    linkedWidth->setSuffix(tr(" mm"));
+    linkedWidth->setEnabled(false);
+    form->addRow(shareAllowance, linkedWidth);
+    connect(shareAllowance, &QCheckBox::toggled, linkedWidth, &QWidget::setEnabled);
     auto* reverse = new QCheckBox(tr("Reverse correspondence on section B"), &dialog);
+    reverse->setObjectName("reverseSeamCorrespondence");
     reverse->setChecked(reverseSecond);
     form->addRow(reverse);
     auto* summary = new QLabel(&dialog);
     summary->setWordWrap(true);
     form->addRow(summary);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    auto* add = buttons->addButton(tr("Place Paired Notches"), QDialogButtonBox::AcceptRole);
+    auto* add = buttons->addButton(tr("Place Paired Notches"), QDialogButtonBox::ActionRole);
+    auto* link = buttons->addButton(tr("Save Seam Link"), QDialogButtonBox::ActionRole);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
@@ -870,6 +893,11 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
     fillExportSizes(*size, doc_);
     form->insertRow(form->rowCount() - 2, tr("Compare graded size"), size);
     std::optional<opc::SeamSection> a, b;
+    const auto named = [this](const opc::SeamSection& section) {
+        return std::ranges::all_of(section.edges, [this](const auto& edge) {
+            return !doc_.entities()[edge.index].draftName.isEmpty();
+        });
+    };
     const auto refresh = [&] {
         QVector<qsizetype> aIndices, bIndices;
         for (qsizetype i = 0; i < indices.size(); ++i)
@@ -879,6 +907,7 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
         if (!a || !b) {
             summary->setText(tr("Assign one connected, open chain to each section."));
             add->setEnabled(false);
+            link->setEnabled(false);
             return;
         }
         const auto difference = b->lengthMm - a->lengthMm;
@@ -929,7 +958,9 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
             }
         }
         summary->setText(message);
-        add->setEnabled(valid);
+        add->setEnabled(valid && count->value() > 0);
+        link->setEnabled(valid && named(*a) && named(*b));
+        link->setToolTip(tr("Save the seam sections and recalculate the notch pairs for every size. Requires named formula or modeling edges."));
     };
     for (auto* side : sides)
         connect(side, &QComboBox::currentIndexChanged, &dialog, refresh);
@@ -937,6 +968,7 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
     connect(tolerance, &QDoubleSpinBox::valueChanged, &dialog, refresh);
     connect(size, &QComboBox::currentIndexChanged, &dialog, refresh);
     connect(reverse, &QCheckBox::toggled, &dialog, refresh);
+    connect(count, &QSpinBox::valueChanged, &dialog, refresh);
     connect(add, &QPushButton::clicked, &dialog, [&] {
         auto updated = doc_;
         bool changed = false;
@@ -966,6 +998,33 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
         if (changed)
             applyPatternEdit(std::move(updated), tr("Place Paired Notches"));
         dialog.accept();
+    });
+    connect(link, &QPushButton::clicked, &dialog, [&] {
+        opc::SeamLink relation;
+        const auto capture = [this](const opc::SeamSection& section, bool reversed,
+                                    QVector<QString>& names, bool& reverseFirst) {
+            for (const auto& edge : section.edges)
+                names.append(doc_.entities()[edge.index].draftName);
+            if (reversed)
+                std::ranges::reverse(names);
+            reverseFirst = reversed ? !section.edges.back().reversed : section.edges.front().reversed;
+        };
+        capture(*a, false, relation.first, relation.reverseFirst);
+        capture(*b, reverse->isChecked(), relation.second, relation.reverseSecond);
+        relation.targetEaseMm = target->value();
+        relation.toleranceMm = tolerance->value();
+        relation.notchPairs = count->value();
+        if (shareAllowance->isChecked())
+            relation.allowanceMm = linkedWidth->value();
+        auto updated = doc_;
+        QString error;
+        if (!updated.addSeamLink(std::move(relation), &error)) {
+            QMessageBox::warning(&dialog, title, error);
+            return;
+        }
+        applyPatternEdit(std::move(updated), tr("Save Seam Link"));
+        dialog.accept();
+        showModelingHistory();
     });
     refresh();
     dialog.exec();
@@ -1072,6 +1131,11 @@ void MainWindow::diagnoseGradedPieces() {
             group->setText(1, doc_.pieces().isEmpty() ? tr("No pieces") : tr("Size evaluation failed"));
             return;
         }
+        const auto links = graded.inspectSeamLinks();
+        for (qsizetype i = 0; i < links.checks.size(); ++i) {
+            new QTreeWidgetItem(group, {tr("Seam link %1").arg(i + 1),
+                describeSeamLink(links.checks[i], doc_.seamLinks()[i].targetEaseMm)});
+        }
         const auto counts = copyCounts.constFind(size);
         if (counts == copyCounts.cend() && !copyCounts.isEmpty())
             group->setText(1, tr("Size is absent from the layout"));
@@ -1109,9 +1173,17 @@ void MainWindow::diagnoseGradedPieces() {
             if (!piece.showLabel)
                 new QTreeWidgetItem(row, {tr("Label"), tr("Printed label is disabled")});
             qsizetype expected = piece.notches.size();
-            for (const auto& edge : graded.entities()) {
-                if (edge.piece == i && edge.layer == opc::Layer::Main)
-                    expected += edge.seamNotches.size();
+            for (qsizetype j = 0; j < graded.entities().size(); ++j) {
+                const auto& edge = graded.entities()[j];
+                if (edge.piece != i || edge.layer != opc::Layer::Main)
+                    continue;
+                expected += edge.seamNotches.size();
+                for (const auto fraction : links.notches.value(j)) {
+                    if (std::ranges::none_of(edge.seamNotches, [fraction](double existing) {
+                            return std::abs(existing - fraction) < 1e-9;
+                        }))
+                        ++expected;
+                }
             }
             if (expected) {
                 const auto marks = opc::buildPieceMarkings(piece, geometry, !geometry.allowance.isEmpty());
@@ -1508,6 +1580,8 @@ void MainWindow::showModelingHistory() {
                             static_cast<qsizetype>(pair[1].toLongLong())}, true);
             else if (const auto step = item->data(0, Qt::UserRole + 1); step.isValid())
                 editModelingStep(step.toLongLong());
+            else if (const auto relation = item->data(0, Qt::UserRole + 2); relation.isValid())
+                editSeamLink(relation.toLongLong());
         });
         connect(removeModelingStep_, &QPushButton::clicked, this, [this] {
             auto updated = doc_;
@@ -1523,6 +1597,62 @@ void MainWindow::showModelingHistory() {
     modelingDock_->show();
     refreshModelingHistory();
     modelingDock_->raise();
+}
+
+void MainWindow::editSeamLink(qsizetype index) {
+    const auto original = doc_.seamLinks()[index];
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Edit Seam Link %1").arg(index + 1));
+    QFormLayout form(&dialog);
+    QDoubleSpinBox target, tolerance, width;
+    for (auto* field : {&target, &tolerance, &width}) {
+        field->setRange(0, 100000);
+        field->setDecimals(3);
+        field->setSuffix(tr(" mm"));
+    }
+    target.setMinimum(-100000);
+    target.setValue(original.targetEaseMm);
+    tolerance.setValue(original.toleranceMm);
+    width.setValue(original.allowanceMm.value_or(10));
+    width.setEnabled(original.allowanceMm.has_value());
+    QCheckBox share(tr("Share allowance on linked edges"));
+    share.setChecked(original.allowanceMm.has_value());
+    connect(&share, &QCheckBox::toggled, &width, &QWidget::setEnabled);
+    QSpinBox count;
+    count.setRange(0, 20);
+    count.setValue(original.notchPairs);
+    form.addRow(tr("Target ease (B − A)"), &target);
+    form.addRow(tr("Tolerance (±)"), &tolerance);
+    form.addRow(tr("Notch pairs"), &count);
+    form.addRow(&share, &width);
+    QDialogButtonBox buttons(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+    auto* remove = buttons.addButton(tr("Remove Seam Link"), QDialogButtonBox::DestructiveRole);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(remove, &QPushButton::clicked, &dialog, [&] {
+        auto updated = doc_;
+        if (updated.removeSeamLink(index))
+            applyPatternEdit(std::move(updated), tr("Remove Seam Link"));
+        dialog.accept();
+    });
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        auto revised = original;
+        revised.targetEaseMm = target.value();
+        revised.toleranceMm = tolerance.value();
+        revised.notchPairs = count.value();
+        revised.allowanceMm = share.isChecked() ? std::optional<double>(width.value()) : std::nullopt;
+        if (revised != original) {
+            auto updated = doc_;
+            QString error;
+            if (!updated.editSeamLink(index, std::move(revised), &error)) {
+                QMessageBox::warning(&dialog, dialog.windowTitle(), error);
+                return;
+            }
+            applyPatternEdit(std::move(updated), tr("Edit Seam Link"));
+        }
+        dialog.accept();
+    });
+    dialog.exec();
 }
 
 void MainWindow::editModelingStep(qsizetype index) {
@@ -1682,6 +1812,35 @@ void MainWindow::refreshModelingHistory() {
             else
                 new QTreeWidgetItem(item, {tr("Paired cut edges"), tr("Changed by a later contour step")});
         }
+    }
+    if (!doc_.seamLinks().isEmpty()) {
+        if (grades.isEmpty()) {
+            for (const auto& size : doc_.production().sizes)
+                grades.append(opc::gradedPattern(doc_, size.name));
+        }
+        auto* links = new QTreeWidgetItem(modelingTree_, {tr("Saved seam links")});
+        const auto base = doc_.inspectSeamLinks();
+        QVector<opc::SeamLinkReport> reports;
+        for (const auto& grade : grades)
+            reports.append(grade.inspectSeamLinks());
+        for (qsizetype i = 0; i < doc_.seamLinks().size(); ++i) {
+            const auto& link = doc_.seamLinks()[i];
+            auto* row = new QTreeWidgetItem(links, {tr("Seam link %1").arg(i + 1),
+                describeSeamLink(base.checks[i], link.targetEaseMm)});
+            row->setData(0, Qt::UserRole + 2, QVariant::fromValue(i));
+            row->setToolTip(0, tr("Double-click to edit or remove this seam link."));
+            new QTreeWidgetItem(row, {tr("Section A"), QStringList(link.first.begin(), link.first.end()).join(", ")});
+            new QTreeWidgetItem(row, {tr("Section B"), QStringList(link.second.begin(), link.second.end()).join(", ")});
+            new QTreeWidgetItem(row, {tr("Notch pairs"), QString::number(link.notchPairs)});
+            if (link.allowanceMm)
+                new QTreeWidgetItem(row, {tr("Shared allowance"), tr("%L1 mm").arg(*link.allowanceMm)});
+            for (qsizetype j = 0; j < reports.size(); ++j) {
+                const auto& checks = reports[j].checks;
+                new QTreeWidgetItem(row, {doc_.production().sizes[j].name,
+                    i < checks.size() ? describeSeamLink(checks[i], link.targetEaseMm) : tr("Cannot recalculate")});
+            }
+        }
+        links->setExpanded(true);
     }
     root->setExpanded(true);
     modelingTree_->resizeColumnToContents(0);

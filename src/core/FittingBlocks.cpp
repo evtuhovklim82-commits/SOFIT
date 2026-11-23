@@ -111,6 +111,26 @@ std::optional<PatternDocument> draftTrousers(const TrouserMeasurements& m, QStri
     return document;
 }
 
+std::optional<PatternDocument> draftTrousersWithSeamLinks(const TrouserMeasurements& m, QString* error) {
+    auto document = draftTrousers(m, error);
+    if (!document)
+        return {};
+    const auto link = [&](const QStringList& edges, int notchPairs) {
+        SeamLink relation;
+        for (const auto& edge : edges) {
+            relation.first.append(QStringLiteral("trouser_front_") + edge);
+            relation.second.append(QStringLiteral("trouser_back_") + edge);
+        }
+        relation.toleranceMm = 2;
+        relation.notchPairs = notchPairs;
+        return document->addSeamLink(std::move(relation), error);
+    };
+    if (!link({"side_hip", "side_seat", "side_upper", "side_lower"}, 0)
+        || !link({"inseam_lower"}, 1) || !link({"inseam_upper"}, 1))
+        return {};
+    return document;
+}
+
 FittingCheck checkFittingBlock(const PatternDocument& document, const QString& size, double capEase) {
     QVector<qsizetype> sources;
     const auto drawing = gradedPattern(document, size, &sources);

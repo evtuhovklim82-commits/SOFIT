@@ -93,6 +93,7 @@ PatternDocument gradedPattern(const PatternDocument& document, const QString& si
 
     PatternDocument graded;
     graded.pieces() = document.pieces();
+    graded.seamLinks_ = document.seamLinks_;
     for (auto& piece : graded.pieces())
         piece.size = size;
     for (auto layer : {Layer::Main, Layer::Construction, Layer::Allowance})
@@ -112,7 +113,8 @@ PatternDocument gradedPattern(const PatternDocument& document, const QString& si
             entity.b = computed->b;
             entity.control = computed->control;
         }
-        entity.draftName.clear();
+        if (graded.seamLinks().isEmpty())
+            entity.draftName.clear();
         const auto append = [&](const Entity& gradedEntity) {
             graded.insert(graded.entities().size(), gradedEntity);
             if (sourceIndices)
