@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 1.2.0 LANGUAGES CXX)
+project(SOFIT VERSION 1.3.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -9,6 +9,7 @@ endif()
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 
 add_library(sofit_core STATIC
+    src/core/ContourModeling.cpp
     src/core/EntityPath.cpp
     src/core/Modeling.cpp
     src/core/PatternPdf.cpp
@@ -39,6 +40,7 @@ target_include_directories(sofit_widgets PUBLIC src/ui)
 
 qt_add_executable(sofit src/app/main.cpp)
 target_link_libraries(sofit PRIVATE sofit_widgets)
+target_compile_definitions(sofit PRIVATE SOFIT_VERSION="${PROJECT_VERSION}")
 set_target_properties(sofit PROPERTIES WIN32_EXECUTABLE TRUE MACOSX_BUNDLE TRUE)
 install(TARGETS sofit BUNDLE DESTINATION . RUNTIME DESTINATION bin)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

@@ -7,6 +7,8 @@
 #include <QUndoStack>
 #include "../core/PatternDocument.h"
 
+namespace opc { enum class ContourOperation; }
+
 class PatternView;
 class QTreeWidget;
 
@@ -29,6 +31,7 @@ private:
     void exactInput();
     void splitSelectedEdge();
     void joinSelectedEdges();
+    void modelPiece(opc::ContourOperation operation, const QString& title);
     bool canModelEdge(const opc::Entity& edge);
     void refreshObjects();
     void refreshPieceDisplay();

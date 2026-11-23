@@ -5,6 +5,7 @@
 int main(int argc, char** argv) {
     QApplication app(argc,argv);
     app.setApplicationName("SOFIT");
+    app.setApplicationVersion(QStringLiteral(SOFIT_VERSION));
     app.setOrganizationName("SOFIT Community");
     app.setStyle(QStyleFactory::create("Fusion"));
     QPalette palette;

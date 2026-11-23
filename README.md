@@ -1,4 +1,4 @@
-# SOFIT 1.2 — independent CAD prototype
+# SOFIT 1.3 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -57,7 +57,19 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Modeling → Join Free Endpoints** moves the unique closest pair of free endpoints to their midpoint when the two edges share a layer and piece assignment and the gap is at most 5 mm.
 - **Dart** takes the first leg end, the apex, and the second leg end. It previews the legs, adds them to the Construction layer, and records both legs as one undoable action.
 
-Split and join work on manually drawn edges in pieces without point grading rules, or on unassigned edges. Dart creates construction geometry for manual modeling.
+Split and join work on manually drawn edges in pieces without point grading rules, or on unassigned edges.
+
+### Cut, spread and transfer a dart
+
+Start with a piece that has one closed outline of straight lines or a rectangle. Draw a line with **Exact Input** or with snapping, then select it and use **Pattern → Move Selection to Construction Layer**. For cuts and spreads, both endpoints must lie on the outline and the segment between them must stay inside the piece.
+
+- **Modeling → Cut Piece…** uses one selected construction line to make pieces A and B. Each receives a closed outline with its own copy of the cut edge. The panels keep their original positions, so the cut edges coincide on the canvas. Use the piece names in the objects list to distinguish them.
+- **Modeling → Slash and Spread…** uses one selected construction line. Enter the additional width in millimeters. One panel moves perpendicular to the cut, and the new outline bridges the gap at both ends. Use the added width for a pleat or gathering. Fold lines and gathering marks are added manually.
+- **Modeling → Close and Transfer Dart…** uses three selected construction lines. Draw two equal legs from an interior apex to the same straight edge with **Dart**. Draw an outlet from the same apex to a different edge. Select all three lines in the objects list. SOFIT rotates a section around the apex, closes the old dart, and opens the transferred dart in the main outline.
+
+The commands consume the selected guides and replace the outline in one undoable action. SOFIT checks the source and result for closure, self-intersections and overlapping edges, and recalculates the stored seam allowance. If validation fails, the editor reports the reason and keeps the original geometry. New outlines use ordinary Main-layer line entities saved and exported through the existing SOFIT, PDF and DXF paths.
+
+This workflow supports one straight internal cut at a time, parallel spread, and dart closure with a transfer outlet. It requires manual geometry and one simple straight-sided outline. Curves, holes, multiple cuts, unequal or shaped dart mouths, and pivot spreading are outside this workflow. Unassign or remove other Construction and Allowance objects from the target piece before modeling. Pieces with generated geometry, point grading rules, notches, or saved fabric placements cannot be modeled with these commands.
 
 ## Parametric drafting
 

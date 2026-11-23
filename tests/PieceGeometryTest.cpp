@@ -1,5 +1,6 @@
 #include "PieceGeometry.h"
 #include "Modeling.h"
+#include "ContourModeling.h"
 #include "PieceMarkings.h"
 #include "PatternDxf.h"
 
@@ -245,9 +246,131 @@ void testModeling() {
 }
 }
 
+namespace {
+qsizetype guide(PatternDocument& document, QPointF a, QPointF b) {
+    const auto index = document.entities().size();
+    document.insert(index, {Shape::Line, a, b, {}, -1, Layer::Construction});
+    return index;
+}
+
+double area(const QPolygonF& ring) {
+    double sum = 0;
+    for (qsizetype i = 0; i < ring.size(); ++i) {
+        const auto a = ring[i];
+        const auto b = ring[(i + 1) % ring.size()];
+        sum += a.x() * b.y() - a.y() * b.x();
+    }
+    return std::abs(sum) / 2;
+}
+
+void testContourCutAndSpread() {
+    PatternDocument document;
+    document.pieces().append({QStringLiteral("Front"), 4, 2});
+    document.insert(0, {Shape::Rectangle, {0, 0}, {100, 80}, {}, 0});
+    // Inserting the first cut endpoint late in the ring must survive insertion of the second.
+    const auto slash = guide(document, {100, 40}, {0, 40});
+    document.insert(2, {Shape::Line, {500, 0}, {500, 50}});
+    const auto cut = modelContour(document, 0, ContourOperation::Cut, {slash});
+    check(cut.edit.has_value(), qPrintable(cut.error));
+    const auto& panels = cut.edit->document;
+    check(panels.pieces().size() == 2 && panels.pieces()[0].name == "Front A"
+          && panels.pieces()[1].name == "Front B" && panels.pieces()[1].cutCount == 2,
+          "Cut makes two independently identified pieces with production metadata");
+    for (qsizetype piece = 0; piece < 2; ++piece) {
+        const auto geometry = analyzePiece(panels, piece);
+        check(geometry.error == ContourError::None && !geometry.allowance.isEmpty()
+              && near(area(geometry.contour), 4000) && near(geometry.perimeterMm, 280),
+              "Each panel contains the full cutting edge and its own allowance");
+    }
+    check(panels.entities().front().a == QPointF(500, 0)
+          && cut.edit->removedEntities == QVector<qsizetype>{0, 1} && document.entities().size() == 3,
+          "Cut preserves unrelated geometry and leaves the original untouched");
+
+    for (const bool reverse : {false, true}) {
+        auto source = document;
+        if (reverse) {
+            auto line = source.entities()[slash];
+            std::swap(line.a, line.b);
+            source.replace(slash, line);
+        }
+        const auto spread = modelContour(source, 0, ContourOperation::Spread, {slash}, 20);
+        check(spread.edit.has_value(), qPrintable(spread.error));
+        const auto geometry = analyzePiece(spread.edit->document, 0);
+        check(geometry.error == ContourError::None && near(geometry.bounds.height(), 100)
+              && near(area(geometry.contour), 10000) && !geometry.allowanceFailed,
+              "Parallel spread adds the specified width in either direction");
+    }
+    check(!modelContour(document, 0, ContourOperation::Spread, {slash}, 0).edit,
+          "Reject zero spread width");
+
+    auto concave = polygon({{0, 0}, {100, 0}, {100, 100}, {70, 100}, {70, 30},
+                            {30, 30}, {30, 100}, {0, 100}});
+    const auto outside = guide(concave, {0, 70}, {100, 70});
+    const auto acrossNotch = modelContour(concave, 0, ContourOperation::Cut, {outside});
+    check(!acrossNotch.edit && acrossNotch.error.contains("interior"), "Reject a cut across a concavity");
+    const auto alongEdge = guide(concave, {0, 0}, {100, 0});
+    check(!modelContour(concave, 0, ContourOperation::Cut, {alongEdge}).edit,
+          "Reject a cut on the boundary");
+
+    auto crossing = polygon({{0, 0}, {100, 100}, {100, 0}, {0, 100}});
+    const auto crossingGuide = guide(crossing, {0, 50}, {100, 50});
+    const auto invalid = modelContour(crossing, 0, ContourOperation::Cut, {crossingGuide});
+    check(!invalid.edit && invalid.error.contains("crosses"), "Report a self-intersecting source");
+    auto open = polygon({{0, 0}, {100, 0}, {100, 80}, {0, 80}});
+    open.remove(0);
+    const auto openGuide = guide(open, {0, 40}, {100, 40});
+    const auto gap = modelContour(open, 0, ContourOperation::Cut, {openGuide});
+    check(!gap.edit && gap.error.contains("open ends"), "Report an open source");
+
+    document.production().rules.append({QStringLiteral("M"), 0, {0, 0}, {2, 0}});
+    check(!modelContour(document, 0, ContourOperation::Cut, {slash}).edit
+          && document.production().rules.size() == 1, "Guard point grading rules");
+}
+
+void testDartTransfer() {
+    auto document = polygon({{0, 0}, {100, 0}, {100, 80}, {0, 80}});
+    const QPointF apex(50, 35);
+    const auto first = guide(document, {40, 0}, apex);
+    const auto second = guide(document, apex, {60, 0});
+    const auto outlet = guide(document, {100, 40}, apex);
+    const auto result = modelContour(document, 0, ContourOperation::TransferDart, {outlet, second, first});
+    check(result.edit.has_value(), qPrintable(result.error));
+    const auto& edited = result.edit->document;
+    const auto geometry = analyzePiece(edited, 0);
+    check(geometry.error == ContourError::None && geometry.contour.contains(apex)
+          && near(area(geometry.contour), 8000 - 350),
+          "Rotate the panel, close the old dart and cut a new wedge through the apex");
+    int legs = 0;
+    for (const auto& edge : edited.entities()) {
+        check(edge.layer == Layer::Main, "Transfer consumes the selected guides");
+        if (edge.a == apex || edge.b == apex) {
+            ++legs;
+            check(near(QLineF(edge.a, edge.b).length(), QLineF(apex, QPointF(100, 40)).length()),
+                  "Both relocated dart legs retain the outlet radius");
+        }
+    }
+    check(legs == 2, "Relocated dart is part of the outline");
+
+    QTemporaryDir temp;
+    PatternDocument loaded;
+    const auto path = temp.filePath("transferred.sofit");
+    check(edited.save(path) && loaded.load(path)
+          && analyzePiece(loaded, 0).contour == geometry.contour,
+          "New contour round-trips through the existing SOFIT file format");
+
+    auto unequal = document.entities()[second];
+    unequal.b = {65, 0};
+    document.replace(second, unequal);
+    const auto rejected = modelContour(document, 0, ContourOperation::TransferDart, {first, second, outlet});
+    check(!rejected.edit && rejected.error.contains("equal length"), "Reject unequal old dart legs");
+}
+}
+
 int main() {
     testLines();
     testCurves();
     testFiles();
     testModeling();
+    testContourCutAndSpread();
+    testDartTransfer();
 }

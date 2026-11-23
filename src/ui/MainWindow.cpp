@@ -9,6 +9,7 @@
 #include "TemplateWizard.h"
 #include "EntityPath.h"
 #include "Modeling.h"
+#include "ContourModeling.h"
 #include <QPixmap>
 #include <QCheckBox>
 #include <QSpinBox>
@@ -59,13 +60,30 @@ public:
                    PatternView* redraw = nullptr)
         : QUndoCommand(text), document_(document), before_(document), after_(std::move(after)), redraw_(redraw) {}
 
-    void undo() override { apply(before_); }
-    void redo() override { apply(after_); }
+    PatternCommand(opc::PatternDocument& document, opc::ContourEdit edit, const QString& text,
+                   PatternView& redraw)
+        : PatternCommand(document, std::move(edit.document), text, &redraw) {
+        for (qsizetype i = 0; i < before_.entities().size(); ++i) {
+            if (!std::binary_search(edit.removedEntities.cbegin(), edit.removedEntities.cend(), i))
+                survivingIndices_.append(i);
+        }
+        beforeVisibility_.resize(before_.entities().size(), true);
+        afterVisibility_.resize(after_.entities().size(), true);
+    }
+
+    void undo() override { apply(false); }
+    void redo() override { apply(true); }
 
 private:
-    void apply(const opc::PatternDocument& updated) {
+    void apply(bool forward) {
+        const auto& updated = forward ? after_ : before_;
         if (!redraw_) {
             document_ = updated;
+            return;
+        }
+
+        if (!afterVisibility_.isEmpty()) {
+            applyContour(updated, forward);
             return;
         }
 
@@ -91,9 +109,32 @@ private:
         }
     }
 
+    void applyContour(const opc::PatternDocument& updated, bool forward) {
+        auto& current = forward ? beforeVisibility_ : afterVisibility_;
+        auto& next = forward ? afterVisibility_ : beforeVisibility_;
+        for (qsizetype i = 0; i < current.size(); ++i)
+            current[i] = redraw_->entityVisible(i);
+        for (qsizetype i = 0; i < survivingIndices_.size(); ++i) {
+            const auto original = survivingIndices_[i];
+            if (forward)
+                next[i] = current[original];
+            else
+                next[original] = current[i];
+        }
+        redraw_->cancelDrawing();
+        document_ = updated;
+        redraw_->setEntities(document_.entities());
+        for (qsizetype i = 0; i < next.size(); ++i) {
+            if (!next[i])
+                redraw_->setEntityVisible(i, false);
+        }
+    }
+
     opc::PatternDocument& document_;
     opc::PatternDocument before_, after_;
     PatternView* redraw_;
+    QVector<qsizetype> survivingIndices_;
+    QVector<bool> beforeVisibility_, afterVisibility_;
 };
 
 class ReplaceEntityCommand : public QUndoCommand {
@@ -153,7 +194,9 @@ private:
 }
 
 MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
-    setWindowTitle(QStringLiteral("SOFIT 0.9[*]"));
+    const auto version = QCoreApplication::applicationVersion();
+    setWindowTitle(version.isEmpty() ? QStringLiteral("SOFIT[*]")
+                                     : QStringLiteral("SOFIT %1[*]").arg(version));
     resize(1100, 750);
     setCentralWidget(view_);
     setStyleSheet(QStringLiteral(
@@ -243,6 +286,17 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         });
         split->setEnabled(edges && selected.size() == 1);
         join->setEnabled(edges && selected.size() == 2);
+    });
+
+    modeling->addSeparator();
+    modeling->addAction(tr("Cut Piece…"), this, [this] {
+        modelPiece(opc::ContourOperation::Cut, tr("Cut Piece"));
+    });
+    modeling->addAction(tr("Slash and Spread…"), this, [this] {
+        modelPiece(opc::ContourOperation::Spread, tr("Slash and Spread"));
+    });
+    modeling->addAction(tr("Close and Transfer Dart…"), this, [this] {
+        modelPiece(opc::ContourOperation::TransferDart, tr("Close and Transfer Dart"));
     });
 
     auto* pattern = menuBar()->addMenu(tr("&Pattern"));
@@ -877,6 +931,35 @@ void MainWindow::joinSelectedEdges() {
     undo_.push(new ReplaceEntityCommand(doc_, *view_, first, (*joined)[0], title));
     undo_.push(new ReplaceEntityCommand(doc_, *view_, second, (*joined)[1], title));
     undo_.endMacro();
+}
+
+void MainWindow::modelPiece(opc::ContourOperation operation, const QString& title) {
+    const auto guides = selectedObjects();
+    const bool dart = operation == opc::ContourOperation::TransferDart;
+    if (guides.size() != (dart ? 3 : 1)) {
+        QMessageBox::information(this, title, dart
+            ? tr("Select both dart legs and the outlet line on the Construction layer.")
+            : tr("Select one construction line with both ends on the piece contour."));
+        return;
+    }
+    const auto piece = choosePiece(title);
+    if (piece < 0)
+        return;
+    double width = 0;
+    if (operation == opc::ContourOperation::Spread) {
+        bool accepted = false;
+        width = QInputDialog::getDouble(this, title, tr("Spread width perpendicular to the cut (mm)"),
+                                        20, 0.01, 100000, 2, &accepted);
+        if (!accepted)
+            return;
+    }
+    auto result = opc::modelContour(doc_, piece, operation, guides, width);
+    if (!result.edit) {
+        QMessageBox::warning(this, title, result.error);
+        return;
+    }
+    undo_.push(new PatternCommand(doc_, std::move(*result.edit), title, *view_));
+    statusBar()->showMessage(tr("%1 completed. The new contour passed validation.").arg(title), 5000);
 }
 
 void MainWindow::exactInput() {

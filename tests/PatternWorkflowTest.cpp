@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "PatternView.h"
 #include "PatternPdf.h"
+#include "PatternDxf.h"
 #include "PieceGeometry.h"
 #include "Production.h"
 
@@ -129,12 +130,84 @@ void testModelingWorkflow() {
     check(tree.topLevelItemCount() == 4, "Redo both dart legs at once");
 }
 
+void testContourModelingWorkflow() {
+    MainWindow window;
+    window.show();
+    auto& view = *window.findChild<PatternView*>();
+    auto& tree = *window.findChild<QTreeWidget*>();
+    view.entityDrawn({opc::Shape::Rectangle, {0, 0}, {100, 80}});
+    tree.topLevelItem(0)->setSelected(true);
+    runDialog<QInputDialog>(action(window, "Create Piece from Selection…"), [](QInputDialog& dialog) {
+        dialog.setTextValue("Front");
+        dialog.accept();
+    });
+    view.entityDrawn({opc::Shape::Point, {500, 500}});
+    tree.topLevelItem(1)->setCheckState(1, Qt::Unchecked);
+    view.entityDrawn({opc::Shape::Line, {0, 40}, {100, 40}, {}, -1, opc::Layer::Construction});
+    tree.clearSelection();
+    tree.topLevelItem(2)->setSelected(true);
+    action(window, "Cut Piece…").trigger();
+    check(tree.topLevelItemCount() == 9 && tree.topLevelItem(1)->text(2) == "Front A"
+          && tree.topLevelItem(8)->text(2) == "Front B" && !view.entityVisible(0),
+          "The Modeling menu cuts a piece and preserves unrelated object visibility");
+    action(window, "Undo Cut Piece").trigger();
+    check(tree.topLevelItemCount() == 3 && tree.topLevelItem(0)->text(2) == "Front"
+          && tree.topLevelItem(2)->text(3) == "Construction" && !view.entityVisible(1),
+          "Undo restores the source outline and cut guide in one step");
+    action(window, "Redo Cut Piece").trigger();
+    check(tree.topLevelItemCount() == 9 && !view.entityVisible(0), "Redo restores both panels");
+    action(window, "Undo Cut Piece").trigger();
+    tree.topLevelItem(2)->setSelected(true);
+    runDialog<QInputDialog>(action(window, "Slash and Spread…"), [](QInputDialog& dialog) {
+        dialog.setDoubleValue(25);
+        dialog.accept();
+    });
+    check(tree.topLevelItemCount() == 9 && tree.topLevelItem(8)->text(2) == "Front",
+          "Slash and Spread rebuilds one outline");
+    tree.topLevelItem(0)->setCheckState(1, Qt::Checked);
+    action(window, "Undo Slash and Spread").trigger();
+    check(view.entityVisible(1), "Undo keeps later visibility changes to surviving objects");
+    tree.clearSelection();
+    tree.topLevelItem(2)->setSelected(true);
+    action(window, "Delete Selection").trigger();
+
+    const QPointF apex(50, 35);
+    view.dartDrawn({opc::Shape::Line, {40, 0}, apex, {}, -1, opc::Layer::Construction},
+                   {opc::Shape::Line, apex, {60, 0}, {}, -1, opc::Layer::Construction});
+    view.entityDrawn({opc::Shape::Line, apex, {100, 40}, {}, -1, opc::Layer::Construction});
+    tree.clearSelection();
+    for (int i = 2; i < 5; ++i)
+        tree.topLevelItem(i)->setSelected(true);
+    action(window, "Close and Transfer Dart…").trigger();
+    check(tree.topLevelItemCount() == 9 && tree.topLevelItem(8)->text(3) == "Main",
+          "Dart transfer replaces the original outline and construction guides");
+
+    QTemporaryDir temp;
+    const auto patternPath = temp.filePath("transferred.sofit");
+    chooseFile(action(window, "&Save"), patternPath);
+    opc::PatternDocument document;
+    check(document.load(patternPath), "Save the modeled document through the editor");
+    const auto geometry = opc::analyzePiece(document, 0);
+    check(geometry.error == opc::ContourError::None && geometry.contour.contains(apex),
+          "Saved geometry contains the relocated dart");
+    QString error;
+    const QVector<bool> visible(document.entities().size(), true);
+    const auto pdfPath = temp.filePath("transferred.pdf");
+    check(opc::exportPatternPdf(pdfPath, document, visible, {}, {}, error),
+          "Export the transferred dart to PDF");
+    check(pageCount(readPdf(pdfPath)) > 0, "The modeled PDF has a printable page");
+    check(opc::exportPatternDxf(temp.filePath("transferred.dxf"), document, visible, {geometry}, error),
+          "Export the transferred dart to DXF");
+
+}
+
 }
 
 int main(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
     testModelingWorkflow();
+    testContourModelingWorkflow();
     MainWindow window;
     window.show();
 
