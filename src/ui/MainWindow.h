@@ -15,7 +15,11 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
 private:
+    void moveView(const QPointF& scenePoint, const QPoint& viewportPoint);
+    bool panning_ = false;
+    QPoint lastPanPosition_;
     opc::PatternDocument* doc_ = nullptr;
     bool pending_ = false;
     QPointF first_;
