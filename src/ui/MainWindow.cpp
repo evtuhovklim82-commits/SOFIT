@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Workflow.h"
 #include "PatternView.h"
 #include "ParametricDialog.h"
 #include "PatternPdf.h"
@@ -300,9 +301,9 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     connect(&undo_, &QUndoStack::indexChanged, this, &MainWindow::refreshObjects);
 
     auto* file = menuBar()->addMenu(tr("&File"));
-    file->addAction(tr("&New"), QKeySequence::New, this, &MainWindow::newDocument);
-    file->addAction(tr("&Open"), QKeySequence::Open, this, &MainWindow::openDocument);
-    file->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::saveDocument);
+    auto* newAction = file->addAction(tr("&New"), QKeySequence::New, this, &MainWindow::newDocument);
+    auto* openAction = file->addAction(tr("&Open"), QKeySequence::Open, this, &MainWindow::openDocument);
+    auto* saveAction = file->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::saveDocument);
     file->addAction(tr("Export &SVG"), this, &MainWindow::exportSvg);
     file->addAction(tr("Export &DXF…"), this, &MainWindow::exportDxf);
     file->addAction(tr("Export &PDF for Printing…"), this, &MainWindow::exportPdf);
@@ -327,7 +328,11 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     connect(&undo_, &QUndoStack::indexChanged, this, updateDelete);
     connect(&undo_, &QUndoStack::cleanChanged, this, [this](bool clean) { setWindowModified(!clean); });
 
+    auto* construction = menuBar()->addMenu(tr("&Construction"));
     auto* modeling = menuBar()->addMenu(tr("&Modeling"));
+    auto* grading = menuBar()->addMenu(tr("&Grading"));
+    auto* pieces = menuBar()->addMenu(tr("&Pieces"));
+    auto* layout = menuBar()->addMenu(tr("&Layout"));
     auto* split = modeling->addAction(tr("Split Line or Curve…"), this, &MainWindow::splitSelectedEdge);
     auto* join = modeling->addAction(tr("Join Free Endpoints"), this, &MainWindow::joinSelectedEdges);
     join->setToolTip(tr("Select two edges on the same layer and piece. Closes a gap of up to 5 mm."));
@@ -351,7 +356,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     modeling->addAction(tr("Straight Yoke…"), this, [this] {
         modelPiece(opc::ContourOperation::Yoke, tr("Straight Yoke"));
     });
-    modeling->addAction(tr("Slash and Spread…"), this, [this] {
+    auto* spreadAction = modeling->addAction(tr("Slash and Spread…"), this, [this] {
         modelPiece(opc::ContourOperation::Spread, tr("Slash and Spread"));
     });
     modeling->addAction(tr("Close and Transfer Dart…"), this, [this] {
@@ -370,10 +375,9 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         modelPiece(opc::ContourOperation::Gather, tr("Add Gathering Fullness"));
     });
 
-    auto* pattern = menuBar()->addMenu(tr("&Pattern"));
-    pattern->addAction(tr("Create Piece from Selection…"), this, &MainWindow::createPiece);
-    pattern->addAction(tr("Assign Selection to Piece…"), this, &MainWindow::assignPiece);
-    pattern->addAction(tr("Remove Selection from Piece"), this, [this] {
+    auto* createPieceAction = pieces->addAction(tr("Create Piece from Selection…"), this, &MainWindow::createPiece);
+    pieces->addAction(tr("Assign Selection to Piece…"), this, &MainWindow::assignPiece);
+    pieces->addAction(tr("Remove Selection from Piece"), this, [this] {
         auto updated = doc_;
         bool changed = false;
         for (const auto index : selectedObjects()) {
@@ -385,8 +389,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         if (changed)
             applyPatternEdit(std::move(updated), tr("Remove Objects from Piece"));
     });
-    pattern->addAction(tr("Piece, Contour and Allowance…"), this, &MainWindow::managePiece);
-    pattern->addAction(tr("New Pattern from Template…"), this, [this] {
+    auto* allowanceAction = pieces->addAction(tr("Piece, Contour and Allowance…"), this, &MainWindow::managePiece);
+    auto* templateAction = construction->addAction(tr("New Pattern from Template…"), this, [this] {
         if (auto generated = createPatternFromTemplate(this); generated && confirmDiscard()) {
             replaceDocument({}, {});
             view_->cancelDrawing();
@@ -394,7 +398,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             view_->fitDrawing();
         }
     });
-    pattern->addAction(tr("Parametric Draft…"), this, [this] {
+    auto* draftAction = construction->addAction(tr("Parametric Draft…"), this, [this] {
         QString calculationError;
         auto updated = editParametricDraft(this, doc_, &calculationError);
         setModelingError(calculationError);
@@ -406,7 +410,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
                 view_->fitDrawing();
         }
     });
-    pattern->addAction(tr("Sizes, Measurements and Grade Rules…"), this, [this] {
+    auto* sizesAction = grading->addAction(tr("Sizes, Measurements and Grade Rules…"), this, [this] {
         if (auto production = editGrading(this, doc_)) {
             if (production->useDraftMeasurements == doc_.production().useDraftMeasurements
                 && opc::saveProduction(*production) == opc::saveProduction(doc_.production()))
@@ -416,7 +420,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Edit Sizes and Grade Rules"));
         }
     });
-    pattern->addAction(tr("Fabric Layout…"), this, [this] {
+    auto* layoutAction = layout->addAction(tr("Fabric Layout…"), this, [this] {
         if (auto production = editFabricLayout(this, doc_)) {
             if (opc::saveProduction(*production) == opc::saveProduction(doc_.production()))
                 return;
@@ -425,8 +429,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Edit Fabric Layout"));
         }
     });
-    pattern->addAction(tr("Diagnose Pieces by Size…"), this, &MainWindow::diagnoseGradedPieces);
-    auto* seams = pattern->addMenu(tr("Seams"));
+    grading->addAction(tr("Diagnose Pieces by Size…"), this, &MainWindow::diagnoseGradedPieces);
+    auto* seams = pieces->addMenu(tr("Seams"));
     seams->addAction(tr("Measure Selected Lines and Curves"), this, &MainWindow::measureSelection);
     seams->addAction(tr("Check Fitting Block by Size…"), this, [this] {
         QDialog dialog(this);
@@ -481,7 +485,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     seams->addAction(tr("Match Selected Seam Sections…"), this, [this] { matchSeams(selectedObjects()); });
     seams->addAction(tr("Allowance for Selected Edges…"), this, &MainWindow::editEdgeAllowance);
     seams->addAction(tr("Clear Automatic Notches on Selected Edges"), this, &MainWindow::clearEdgeNotches);
-    auto* overlay = pattern->addMenu(tr("Size Overlays"));
+    auto* overlay = grading->addMenu(tr("Size Overlays"));
     connect(overlay, &QMenu::aboutToShow, this, [this, overlay] {
         overlay->clear();
         const auto& sizes = doc_.production().sizes;
@@ -503,10 +507,10 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             });
         }
     });
-    pattern->addSeparator();
-    pattern->addAction(tr("Move Selection to Main Layer"), this,
+    construction->addSeparator();
+    construction->addAction(tr("Move Selection to Main Layer"), this,
                        [this] { setSelectedLayer(opc::Layer::Main); });
-    pattern->addAction(tr("Move Selection to Construction Layer"), this,
+    construction->addAction(tr("Move Selection to Construction Layer"), this,
                        [this] { setSelectedLayer(opc::Layer::Construction); });
 
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
@@ -537,6 +541,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     viewMenu->addAction(tr("Zoom In"), QKeySequence::ZoomIn, view_, [this] { view_->zoomAtCenter(1.2); });
     viewMenu->addAction(tr("Zoom Out"), QKeySequence::ZoomOut, view_, [this] { view_->zoomAtCenter(1 / 1.2); });
     auto* cancelAction = new QAction(this);
+    cancelAction->setText(tr("Cancel Drawing"));
     cancelAction->setShortcut(QKeySequence(Qt::Key_Escape));
     connect(cancelAction, &QAction::triggered, this, [this] {
         view_->cancelDrawing();
@@ -570,19 +575,28 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     addTool(tr("Dart"), PatternView::Tool::Dart, tr("Pick the first leg end, apex, then the second leg end"));
     addTool(tr("Measure"), PatternView::Tool::Measure, tr("Pick two points to measure the distance"));
 
+    auto* drawing = construction->addMenu(tr("Drawing Tools"));
+    drawing->addActions(toolbar->actions());
+
     auto* projectToolbar = addToolBar(tr("Project and View"));
     projectToolbar->setMovable(false);
-    for (auto* action : file->actions())
-        projectToolbar->addAction(action);
+    projectToolbar->addActions({newAction, openAction, saveAction});
     projectToolbar->addSeparator();
     projectToolbar->addAction(undoAction);
     projectToolbar->addAction(redoAction);
     projectToolbar->addAction(deleteAction);
-    projectToolbar->addAction(tr("Exact Input…"), QKeySequence(Qt::Key_I), this, &MainWindow::exactInput);
+    auto* exactAction = construction->addAction(tr("Exact Input…"), QKeySequence(Qt::Key_I),
+                                                this, &MainWindow::exactInput);
+    projectToolbar->addAction(exactAction);
     projectToolbar->addSeparator();
     projectToolbar->addAction(snapAction);
     projectToolbar->addAction(objectSnap);
     projectToolbar->addAction(fitAction);
+    installWorkflow(*this, {construction, modeling, grading, pieces, layout}, *viewMenu, {
+        {"template", templateAction}, {"draft", draftAction}, {"spread", spreadAction},
+        {"sizes", sizesAction}, {"createPiece", createPieceAction}, {"allowance", allowanceAction},
+        {"layout", layoutAction}, {"exactInput", exactAction}, {"fit", fitAction}
+    });
     connect(view_, &PatternView::entityDrawn, this, &MainWindow::addEntity);
     connect(view_, &PatternView::dartDrawn, this, [this](const opc::Entity& first, const opc::Entity& second) {
         undo_.beginMacro(tr("Draw Dart"));

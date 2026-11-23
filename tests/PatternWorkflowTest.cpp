@@ -20,6 +20,12 @@
 #include <QGraphicsItem>
 #include <QGraphicsScene>
 #include <QMenu>
+#include <QKeyEvent>
+#include <QKeySequenceEdit>
+#include <QSettings>
+#include <QTextBrowser>
+#include <QToolBar>
+#include <QToolButton>
 #include <QMouseEvent>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -280,9 +286,120 @@ void testContourModelingWorkflow() {
 
 }
 
+namespace {
+void testStageNavigationAndPreferences() {
+    MainWindow window;
+    window.show();
+    auto* toolbar = window.findChild<QToolBar*>("workflowToolbar");
+    check(toolbar && !toolbar->isHidden(), "Workflow toolbar is visible by default");
+    const auto buttons = toolbar->findChildren<QToolButton*>(QString{}, Qt::FindDirectChildrenOnly);
+    const QList<QPair<QString, QString>> expected{
+        {"Construction", "Parametric Draft…"}, {"Modeling", "Slash and Spread…"},
+        {"Grading", "Sizes, Measurements and Grade Rules…"},
+        {"Pieces", "Piece, Contour and Allowance…"}, {"Layout", "Fabric Layout…"}
+    };
+    QList<QToolButton*> stages;
+    for (auto* button : buttons) {
+        if (button->menu())
+            stages.append(button);
+    }
+    check(stages.size() == expected.size(), "Five workflow stages");
+    for (qsizetype i = 0; i < expected.size(); ++i) {
+        check(stages[i]->text() == expected[i].first, "Workflow stage order and label");
+        check(stages[i]->menu()->actions().contains(&action(window, expected[i].second)),
+              "Stage toolbar opens menu containing the real command");
+    }
+
+    auto* layoutButton = stages.back();
+    auto* layoutMenu = layoutButton->menu();
+    bool menuOpened = false;
+    const auto opening = QObject::connect(layoutMenu, &QMenu::aboutToShow, toolbar, [&] {
+        menuOpened = true;
+        QTimer::singleShot(0, layoutMenu, &QMenu::close);
+    });
+    const auto clickPosition = layoutButton->rect().center();
+    QMouseEvent click(QEvent::MouseButtonPress, clickPosition, layoutButton->mapToGlobal(clickPosition),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(layoutButton, &click);
+    QObject::disconnect(opening);
+    check(menuOpened, "Layout opens from the stage button");
+
+    runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
+        bool hasPieceGuidance = false;
+        for (auto* label : dialog.findChildren<QLabel*>())
+            hasPieceGuidance |= label->text().contains("Pieces → Create Piece from Selection");
+        check(hasPieceGuidance, "Empty layout explains the required prior stage");
+        dialog.reject();
+    });
+    runDialog<QDialog>(action(window, "GRAFIS ⇄ SOFIT"), [](QDialog& dialog) {
+        auto* guide = dialog.findChild<QTextBrowser*>("grafisWorkflowGuide");
+        check(guide && guide->toHtml().contains("help.grafis.de"), "Guide links to GRAFIS publisher documentation");
+        check(guide->toPlainText().contains("Layout → Fabric Layout"), "Guide names the working SOFIT command");
+        dialog.reject();
+    });
+
+    const auto setShortcut = [&](bool save) {
+        runDialog<QDialog>(action(window, "Keyboard Shortcuts…"), [&](QDialog& dialog) {
+            auto* layout = dialog.findChild<QKeySequenceEdit*>("layout");
+            auto* fit = dialog.findChild<QKeySequenceEdit*>("fit");
+            auto* controls = dialog.findChild<QDialogButtonBox*>();
+            check(layout && fit && controls, "Shortcut editors are available");
+            layout->setKeySequence(QKeySequence("Ctrl+Z"));
+            controls->button(QDialogButtonBox::Ok)->click();
+            check(dialog.isVisible(), "Existing Undo binding blocks shortcut collision");
+            layout->setKeySequence(QKeySequence("Ctrl+Alt+L"));
+            fit->setKeySequence(layout->keySequence());
+            controls->button(QDialogButtonBox::Ok)->click();
+            check(dialog.isVisible(), "Two edited commands cannot share a shortcut");
+            fit->clear();
+            controls->button(save ? QDialogButtonBox::Ok : QDialogButtonBox::Cancel)->click();
+        });
+    };
+    setShortcut(false);
+    check(action(window, "Fabric Layout…").shortcut().isEmpty(), "Cancel keeps the previous bindings");
+    setShortcut(true);
+    check(action(window, "Fabric Layout…").shortcut() == QKeySequence("Ctrl+Alt+L"), "Apply layout shortcut");
+    toolbar->toggleViewAction()->trigger();
+
+    MainWindow restored;
+    restored.show();
+    restored.activateWindow();
+    QApplication::processEvents();
+    check(restored.findChild<QToolBar*>("workflowToolbar")->isHidden(), "Toolbar visibility persists");
+    check(action(restored, "Fabric Layout…").shortcut() == QKeySequence("Ctrl+Alt+L"), "Shortcut persists");
+    check(action(restored, "Fit Drawing").shortcut().isEmpty(), "Disabled shortcut persists");
+    auto& layoutCommand = action(restored, "Fabric Layout…");
+    bool activated = false;
+    QObject::connect(&layoutCommand, &QAction::triggered, &restored, [&] { activated = true; });
+    QTimer::singleShot(0, [&] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(dialog && dialog->windowTitle() == "Fabric Layout", "Shortcut opens the actual layout editor");
+        dialog->reject();
+    });
+    QKeyEvent key(QEvent::KeyPress, Qt::Key_L, Qt::ControlModifier | Qt::AltModifier);
+    QApplication::sendEvent(restored.findChild<PatternView*>(), &key);
+    check(activated, "Configured key dispatches the real action");
+    runDialog<QDialog>(action(restored, "Keyboard Shortcuts…"), [](QDialog& dialog) {
+        auto* controls = dialog.findChild<QDialogButtonBox*>();
+        controls->button(QDialogButtonBox::RestoreDefaults)->click();
+        controls->button(QDialogButtonBox::Ok)->click();
+    });
+    check(layoutCommand.shortcut().isEmpty(), "Default reset clears new binding");
+    check(action(restored, "Fit Drawing").shortcut() == QKeySequence("F"), "Default reset restores Fit Drawing");
+    QSettings().clear();
+}
+}
+
 int main(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
+    QTemporaryDir preferences;
+    check(preferences.isValid(), "Isolate workflow preferences");
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, preferences.path());
+    app.setOrganizationName("SOFIT Workflow Test");
+    app.setApplicationName("Preferences");
+    testStageNavigationAndPreferences();
     testGeometryEditing();
     testModelingWorkflow();
     testContourModelingWorkflow();

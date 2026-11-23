@@ -339,6 +339,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     automaticControls->addStretch();
 
     auto* hint = new QLabel(tr("Grain runs along the fabric length. Fold copies need a straight outer edge and a finished cutting contour with zero added allowance. Set the width of the folded fabric for fold layouts."));
+    if (document.pieces().isEmpty()) {
+        hint->setText(tr("To begin a layout, close this window and use Pieces → Create Piece from Selection. "
+                         "Select the objects that form a closed outline first."));
+    }
     hint->setWordWrap(true);
     layout->addWidget(hint);
     QGraphicsScene scene;
@@ -478,7 +482,8 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         const auto cut = cutFor(placement).cut;
         if (cut.isEmpty()) {
             QMessageBox::warning(&dialog, dialog.windowTitle(), placement.fold == opc::FoldEdge::None
-                ? tr("This size needs a valid closed contour and a valid allowance.")
+                ? tr("This size needs a valid closed contour and allowance. "
+                     "Use Grading → Diagnose Pieces by Size to find the problem.")
                 : tr("Use a finished contour with zero added allowance and a straight outer edge on the selected side, parallel to the grain."));
             return;
         }

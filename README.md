@@ -1,4 +1,4 @@
-# SOFIT 2.1 Professional
+# SOFIT 2.2 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -51,9 +51,24 @@ Use `macdeployqt` when packaging the app for distribution.
 - SOFIT opens `.sofit` formats 1–13 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Silhouette-only history uses format 11 (SOFIT 1.7+). Contour history uses format 12 (SOFIT 1.8+). Saved seam links use format 13 (SOFIT 2.1+). SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
 
-## Professional workflow in 2.1
+## Workspace in 2.2
 
-1. Select the named formula or modeling edges on both pieces. Open **Pattern → Seams → Match Selected Seam Sections**, assign the edges to A and B, confirm the sewing directions and set the target ease and tolerance. Use **Save Seam Link** to keep the relationship with the project.
+Use the menus or the Workflow toolbar to move among the five stages. Commands remain available
+as the project evolves, so you can return to construction or modeling after checking graded pieces.
+
+1. **Construction**. Start from a template, edit a parametric draft, or draw the base with exact input and drawing tools.
+2. **Modeling**. Shape the silhouette, cut and spread, transfer darts, and inspect the construction tree.
+3. **Grading**. Define sizes and rules, compare size overlays, and diagnose contours and marks by size.
+4. **Pieces**. Group contours into production pieces and check seam allowances, grainlines, and notches. Create a piece earlier when a modeling command needs one.
+5. **Layout**. Select sizes and pieces for fabric placement, check the cutting report, and export the marker.
+
+**View → Keyboard Shortcuts** saves personal bindings for selected workflow commands.
+**View → Workflow** controls the toolbar. Both settings are separate from the pattern file.
+**Help → GRAFIS ⇄ SOFIT** links to the publisher's documentation for corresponding tasks.
+
+## Checking linked seams
+
+1. Select the named formula or modeling edges on both pieces. Open **Pieces → Seams → Match Selected Seam Sections**, assign the edges to A and B, confirm the sewing directions and set the target ease and tolerance. Use **Save Seam Link** to keep the relationship with the project.
 2. Set a notch count and, optionally, a shared cutting allowance. SOFIT walks each entire section in every size and distributes the marks proportionally from the sewing starts. A mark can move to another edge in the same chain as measurements change. A shared width overrides any piece default or individual allowance on the covered edges. Removing it restores those settings.
 3. Open **Modeling → Construction Tree** to review the base and every size. Activate a saved link to change the target ease, tolerance, notch count or shared width, or to remove the link. These edits support Undo and Redo. **Diagnose Pieces by Size** shows the seam checks with the piece and kit results. The cutting report in **Fabric Layout** includes the linked seam checks for the sizes on the marker.
 4. Export the individual pattern for the required size in PDF or DXF to include the linked notches. Fabric layout uses the resulting cutting outlines. Its exports contain the cutting outlines and layout guides. Seam diagnostics display out-of-tolerance ease for review.
@@ -66,9 +81,9 @@ The trouser fitting block can create links for the side seam and the two section
 
 - In **Modeling → Construction Tree**, activate a silhouette, slash-and-spread, pleat, or gathering step to edit its numeric settings. SOFIT rebuilds the base pattern and all formula sizes, keeps named edge references and restores the previous state if any step fails. Undo and Redo cover the entire edit. Clear the fabric layout before changing an existing step.
 - **Shape Silhouette** can also change the length, scaling vertically from the top of each piece. Width settings remain independent. Existing shape operations keep their original length unless edited. Files using length scaling or the new `positive(expression)` formula require SOFIT 2.0.
-- **Pattern → New Pattern from Template → Bib apron with waist and neck ties** creates a one-piece body, two waist ties and two neck ties. The body uses half of the entered widths on either side of the centre. Each tie has a lengthwise fold guide at its centre and a seam-line width of twice the finished width. All three pieces start with 10 mm allowances. Named formulas check the relative dimensions of the bib and ties again whenever measurements or formula sizes change.
+- **Construction → New Pattern from Template → Bib apron with waist and neck ties** creates a one-piece body, two waist ties and two neck ties. The body uses half of the entered widths on either side of the centre. Each tie has a lengthwise fold guide at its centre and a seam-line width of twice the finished width. All three pieces start with 10 mm allowances. Named formulas check the relative dimensions of the bib and ties again whenever measurements or formula sizes change.
 - **Diagnose Pieces by Size** groups contour, allowance, notch and cut-quantity checks by size. For a size in the marker it shows the copies present and any missing or extra copies for one kit. The Construction Tree compares opposite cut seams, including notch distances in millimetres from the sewing start.
-- Open [the apron example](examples/bib-apron.sofit) to inspect a graded kit on 1,500 mm fabric. Open **Pattern → Fabric Layout** for the cutting report and 1:1 tiled PDF or DXF export. Open [the skirt example](examples/graded-skirt.sofit) and edit its silhouette step to try recalculation and Undo/Redo with a second size.
+- Open [the apron example](examples/bib-apron.sofit) to inspect a graded kit on 1,500 mm fabric. Open **Layout → Fabric Layout** for the cutting report and 1:1 tiled PDF or DXF export. Open [the skirt example](examples/graded-skirt.sofit) and edit its silhouette step to try recalculation and Undo/Redo with a second size.
 
 ## Professional workflow in 1.9
 
@@ -82,19 +97,19 @@ Numeric editing covers manually drawn points, straight segments and quadratic cu
 
 ## Seam tools
 
-- In the Objects list, select lines and quadratic Bézier curves. **Pattern → Seams → Measure Selected Lines and Curves** reports their individual lengths and total in millimeters. Quadratic lengths use subdivision with chord and control-polygon bounds. The absolute length error budget is 0.001 mm per curve within the supported coordinate range.
+- In the Objects list, select lines and quadratic Bézier curves. **Pieces → Seams → Measure Selected Lines and Curves** reports their individual lengths and total in millimeters. Quadratic lengths use subdivision with chord and control-polygon bounds. The absolute length error budget is 0.001 mm per curve within the supported coordinate range.
 - With both seams selected, open **Match Selected Seam Sections** and assign the edges to A and B. Each section must be one connected open chain on one piece, or a chain of unassigned edges for measurement. The dialog shows both lengths, signed ease (B − A), and the result against the target ease and tolerance. **Compare graded size** checks the same source edges and target in the chosen size. Use **Save Seam Link** to keep the match in the project.
 - **Place Paired Notches** distributes marks at equal fractions of each section length. The dialog displays each start endpoint and lets you reverse B. Both pieces need valid closed outlines. If a requested mark lands on a junction, choose a different count. Marks are stored on individual edges at normalized arc-length positions and are recomputed from the graded geometry. This distributes ease proportionally and does not prescribe where to concentrate it. The graded result preserves each mark's fraction on its own edge; matching a particular graded size again may require adjusting its layout separately. Use **Clear Automatic Notches on Selected Edges** to remove stored marks.
 - **Allowance for Selected Edges** overrides the piece default on selected lines and quadratic curves. A width of zero follows the seam, and resetting an override uses the piece default. Rectangles use the piece default. Offsets use polygonal approximations for curves, mitered corners and steps at straight or nearly tangent width transitions. The editor rejects unsafe corners and outlines instead of clipping them automatically. Check the cut outline for each graded size before export.
 - **Piece, Contour and Allowance** reports open outlines, intersecting or overlapping geometry, and objects with segments shorter than 1 mm. The short-edge report is advisory. Intersection diagnosis follows the existing simple-contour validator, which can reject ambiguous close curves and reports the first topology failure.
-- **Pattern → Diagnose Pieces by Size** lists contour failures, failed allowance generation, missing marks and marks whose outward projection misses the cut outline.
+- **Grading → Diagnose Pieces by Size** lists contour failures, failed allowance generation, missing marks and marks whose outward projection misses the cut outline.
 - Edge edits and paired notch placement can be undone and redone. The canvas, PDF and DXF derive cut outlines and notch marks from the document and the chosen size. Clear automatic notches before splitting their edge and clear edge metadata before using cut, spread or dart transfer on its piece.
 
 ## Modeling tools
 
 - **Shape Silhouette** records a replayable step on pieces made entirely of assigned formula lines, quadratic curves and construction points. Each step stores the named objects, the axis relative to the current bounds, and the top and bottom scales. Unassigned formula points remain at their draft positions.
 - **Modeling → Construction Tree…** opens a dock with the ordered formula and modeling steps, their inputs, new panels and paired cut edges. It follows Undo/Redo. Rejected recalculations identify the step and, when applicable, the size. **Remove Last Step** rebuilds from the formulas and restores consumed guides. Removing a split also removes its added panel and panel-specific settings. Clear manual objects and fabric placements from that panel first.
-- Contour history covers straight cuts, straight relief seams and yokes, parallel spread, box pleats, gathering fullness and equal-leg dart transfer. To record a step, define the outline and guides in **Pattern → Parametric Draft…**. Assign the named outline lines to the piece, and place the named guide lines on the Construction layer. Guides can stay unassigned or belong to the target piece. Keep formula points and unrelated marks unassigned. For moving an open dart, include the two named V edges in the outline and select them with the outlet guide.
+- Contour history covers straight cuts, straight relief seams and yokes, parallel spread, box pleats, gathering fullness and equal-leg dart transfer. To record a step, define the outline and guides in **Construction → Parametric Draft…**. Assign the named outline lines to the piece, and place the named guide lines on the Construction layer. Guides can stay unassigned or belong to the target piece. Keep formula points and unrelated marks unassigned. For moving an open dart, include the two named V edges in the outline and select them with the outlet guide.
 - Each accepted edit replays from the formulas for the base and every size with measurement overrides. Guide attachment, edge order and contour connectivity must stay consistent across sizes. A changed attachment, missing source or invalid contour or allowance rejects the edit and keeps the last valid pattern. Undo/Redo restores geometry and history together. Generated edges keep their references through measurement changes and silhouette steps.
 - History pieces use formula-based size measurements. Clear manual point grade rules, existing fabric placements and perimeter notches before adding a step. Contour operations that replace edges also require clearing edge allowances and automatic marks on their inputs. The tree reports whether a later contour step replaced an automatically identified cut pair. A saved seam link blocks operations that would consume its edges. Piece deletion is available after removing contour history.
 
@@ -106,7 +121,7 @@ Split and join work on manually drawn edges in pieces without point grading rule
 
 ### Cut, straight relief seam, yoke, spread and dart transfer
 
-Start with a piece that has one closed outline of straight lines. A manually drawn rectangle also works. Use a named formula line for a replayable operation or draw a manual line with **Exact Input** for a direct edit. Select the guide and use **Pattern → Move Selection to Construction Layer**. For cuts and spreads, both endpoints must lie on the outline and the segment between them must stay inside the piece.
+Start with a piece that has one closed outline of straight lines. A manually drawn rectangle also works. Use a named formula line for a replayable operation or draw a manual line with **Exact Input** for a direct edit. Select the guide and use **Construction → Move Selection to Construction Layer**. For cuts and spreads, both endpoints must lie on the outline and the segment between them must stay inside the piece.
 
 - **Modeling → Cut Piece…**, **Straight Relief Seam…** and **Straight Yoke…** use one straight construction line to split the piece. Each panel receives a closed outline and its own copy of the same sewing edge. The panels stay in position on the canvas. The guide direction and source contour order determine which side becomes the added panel. Use the piece list to check and rename either side.
 - In the Construction Tree, expand **Paired cut edges** for a replayable split to compare lengths and corresponding notch fractions across all configured sizes. Activate the pair to open **Match Seam Sections** with both sides loaded and the correspondence reversed for the opposing edge directions. The dialog can place paired notches using the existing seam tools.
@@ -127,7 +142,7 @@ Silhouette shaping retains edge-specific allowances and arc-length notch fractio
 
 ## Parametric drafting
 
-1. Open **Pattern → Parametric Draft…**. In **Measurements**, add `chest` with value `920` mm. In **Parameters**, add `ease` with formula `15`.
+1. Open **Construction → Parametric Draft…**. In **Measurements**, add `chest` with value `920` mm. In **Parameters**, add `ease` with formula `15`.
 2. In **Points**, enter `A` with X and Y formulas `0`, `B` with X `chest / 4 + ease` and Y `A.y`, and `C` with X `B.x / 2` and Y `-25`.
 3. In **Lines and curves**, enter `AB` with start `A` and end `B`. Leave the control point blank for a straight line, or enter `C` for a quadratic Bézier curve.
 4. Click **Validate**, then **Apply**. Reopen the draft and change `chest` to `1000`. The X coordinate of `B` increases from 245 to 265 mm. Undo and Redo restore the inputs and geometry together.
@@ -139,7 +154,7 @@ Edit or delete generated objects in the draft editor. Piece and layer assignment
 
 ## Draft a skirt from measurements
 
-1. Open **Pattern → New Pattern from Template…** and choose a gathered or A-line skirt.
+1. Open **Construction → New Pattern from Template…** and choose a gathered or A-line skirt.
 2. Enter hip circumference, finished length, extra opening circumference, and casing depth in mm. The A-line template also takes extra hem circumference.
 3. Finish the wizard. It creates a new editable drawing with one full panel to cut twice, a casing fold guide, a lengthwise grainline, and a 10 mm perimeter allowance.
 4. Join the side seams, finish the raw edges, and turn the top down along the casing fold. Fit the elastic at the waist and finish the hem. Check the fit with a test garment before cutting final fabric.
@@ -148,7 +163,7 @@ To make another size, add `hip` and optionally `length` in the size table. Openi
 
 ### Bodice and set-in sleeve fitting block
 
-In **Pattern → New Pattern from Template…**, choose **Bodice and set-in sleeve (fitting block)**.
+In **Construction → New Pattern from Template…**, choose **Bodice and set-in sleeve (fitting block)**.
 Enter the dimensions and wearing ease in millimetres. Use the waist level and the level of the
 neck-side shoulder point as horizontal references. Measure circumference around the whole body
 and horizontal shoulder run from the neck-side point to the shoulder tip. Measure shoulder drop
@@ -287,7 +302,7 @@ typical overrides are `waist`, `hip`, `rise`, `knee_depth`, `length`, `knee` and
 `hem`. For the dress, use `bust`, `waist`, `hip`, `bodice_length`, `hip_depth` and
 `skirt_length` as needed. Read the complete names in **Parametric Draft…**.
 
-Open **Pattern → Seams → Check Fitting Block by Size…**. Select the base or
+Open **Pieces → Seams → Check Fitting Block by Size…**. Select the base or
 any named size. The report measures that size's final geometry, including manual
 grade offsets, and flags invalid contours, missing seams and differences outside
 the selected tolerance. It checks shoulders and bodice sides, both cap sections
@@ -301,9 +316,9 @@ millimeters.
 ## Pattern pieces
 
 1. Draw the boundary and any construction lines. Select the objects in **Drawing Objects** (Ctrl or Shift for several).
-2. Choose **Pattern → Create Piece from Selection…** and name the piece. Use **Assign Selection to Piece…** to add or transfer objects later.
-3. Move guides and markings to the construction layer using **Pattern → Move Selection to Construction Layer**. The contour uses the piece's main-layer lines, rectangles and quadratic curves.
-4. Open **Pattern → Piece, Contour and Allowance…** to check the contour, read its perimeter and axis-aligned width and height, and set an outward seam allowance in millimeters. The allowance follows the boundary when it changes. Use **View → Layers** to control which layers are visible.
+2. Choose **Pieces → Create Piece from Selection…** and name the piece. Use **Assign Selection to Piece…** to add or transfer objects later.
+3. Move guides and markings to the construction layer using **Construction → Move Selection to Construction Layer**. The contour uses the piece's main-layer lines, rectangles and quadratic curves.
+4. Open **Pieces → Piece, Contour and Allowance…** to check the contour, read its perimeter and axis-aligned width and height, and set an outward seam allowance in millimeters. The allowance follows the boundary when it changes. Use **View → Layers** to control which layers are visible.
 
 Each piece can have one simple outer contour. The checker accepts unordered edges and either winding direction. It joins endpoints within 0.000001 mm. Open ends, branching, disconnected loops and intersecting edges are rejected. Construction geometry stays part of the piece and does not contribute to contour measurements.
 
@@ -313,10 +328,10 @@ SOFIT 5 saves piece names, membership, layer assignments, layer visibility and a
 
 ## Grading sizes and fabric layout
 
-1. Open **Pattern → Sizes, Measurements and Grade Rules…**. On **Measurements**, enter the size and one measurement in mm per row. Repeat the size name for more measurements. A size can also have an empty measurement list. With **Use size measurements in draft formulas** enabled, a row overrides a base measurement with the exact same name. Omitted measurements use the base values. Other rows remain available for reference. Opening a format 8 file with sizes keeps its old grading behavior. Enable the option in the grading dialog and save to use format 9.
+1. Open **Grading → Sizes, Measurements and Grade Rules…**. On **Measurements**, enter the size and one measurement in mm per row. Repeat the size name for more measurements. A size can also have an empty measurement list. With **Use size measurements in draft formulas** enabled, a row overrides a base measurement with the exact same name. Omitted measurements use the base values. Other rows remain available for reference. Opening a format 8 file with sizes keeps its old grading behavior. Enable the option in the grading dialog and save to use format 9.
 2. On **Grade Rules**, add a rule for each point that moves in a target size. Select the piece and the point in base coordinates, then enter ΔX and ΔY in mm. Coincident points of the same piece share the offset. Rectangle corners and quadratic control points are available. Offsets are added after formula evaluation and are looked up by the original base coordinates. Manual geometry continues to move by the existing offsets.
-3. Enable the sizes to compare in **Pattern → Size Overlays**. The menu swatches match the canvas colors. **File → Export DXF…** and **Export PDF for Printing…** offer the base pattern or a single target size.
-4. Open **Pattern → Fabric Layout…**, set the width in mm, choose a piece and size, and click **Add copy**. Add each required copy, drag the copies inside the fabric, and use **Turn 180°** where the fabric allows it. The declared grainline is aligned with the fabric length. Without a grainline the original orientation is used. The outline includes the seam allowance when defined.
+3. Enable the sizes to compare in **Grading → Size Overlays**. The menu swatches match the canvas colors. **File → Export DXF…** and **Export PDF for Printing…** offer the base pattern or a single target size.
+4. Open **Layout → Fabric Layout…**, set the width in mm, choose a piece and size, and click **Add copy**. Add each required copy, drag the copies inside the fabric, and use **Turn 180°** where the fabric allows it. The declared grainline is aligned with the fabric length. Without a grainline the original orientation is used. The outline includes the seam allowance when defined.
 5. Choose a cut mode before adding copies. **Left + right pair** adds one original and one mirrored contour per unit of quantity. You can also add either hand by itself. The reflection preserves the lengthwise grain direction.
 6. For on-fold pieces, enter the working width of the folded fabric and select the side with a straight outer cutting edge parallel to the grain. Use a finished cutting contour with a zero automatic allowance. Dragging is restricted to movement along the fold.
 7. Enable **One-way nap or print** to require the original grain direction across the layout. Use **Fix orientation for new copies** to apply the same restriction to individual copies. Otherwise an aligned 180° turn is available. **Auto arrange** tries three deterministic orders with up to 200 plotted copies, places fold copies along their assigned edge, and checks the outlines for overlap and fit.
@@ -356,7 +371,7 @@ Code is intended for GPLv3 distribution, but check and include the complete GPLv
 
 ## Piece markings and DXF
 
-Choose **Pattern → Piece, Contour and Allowance…** to set the cut quantity, size,
+Choose **Pieces → Piece, Contour and Allowance…** to set the cut quantity, size,
 label visibility, grainline angle, and notch positions. Markings appear on
 closed pieces. The grainline angle is measured clockwise from the right.
 Enter notch positions as space-separated percentages of the perimeter, using a
