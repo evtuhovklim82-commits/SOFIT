@@ -8,6 +8,7 @@
 #include <QPainter>
 #include <QStatusBar>
 #include <QTextStream>
+#include <QWheelEvent>
 #include <QXmlStreamWriter>
 #include <algorithm>
 #include <cmath>
@@ -16,7 +17,46 @@ PatternView::PatternView(QGraphicsScene* scene, QWidget* parent):QGraphicsView(s
     setRenderHint(QPainter::Antialiasing);
     setMouseTracking(true);
     setDragMode(QGraphicsView::NoDrag);
+    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
 }
+void PatternView::drawBackground(QPainter* painter, const QRectF& rect) {
+    QGraphicsView::drawBackground(painter, rect);
+
+    // Keep the grid visible when zoomed out while preserving its origin.
+    const qreal scale = transform().m11();
+    const qreal step = scale >= 0.8 ? 10.0 : scale >= 0.16 ? 50.0 : 250.0;
+
+    painter->save();
+    painter->setRenderHint(QPainter::Antialiasing, false);
+    painter->setPen(QPen(QColor(215, 215, 215), 0));
+    for (qreal x = std::ceil(rect.left() / step) * step; x <= rect.right(); x += step)
+        painter->drawLine(QLineF(x, rect.top(), x, rect.bottom()));
+    for (qreal y = std::ceil(rect.top() / step) * step; y <= rect.bottom(); y += step)
+        painter->drawLine(QLineF(rect.left(), y, rect.right(), y));
+    painter->restore();
+}
+
+void PatternView::wheelEvent(QWheelEvent* event) {
+    const int delta = event->angleDelta().y();
+    if (delta == 0) {
+        QGraphicsView::wheelEvent(event);
+        return;
+    }
+
+    constexpr qreal minScale = 0.1;
+    constexpr qreal maxScale = 10.0;
+    const qreal currentScale = transform().m11();
+    const qreal nextScale = std::clamp(
+        currentScale * std::pow(1.2, delta / 120.0), minScale, maxScale);
+    if (nextScale != currentScale) {
+        const qreal factor = nextScale / currentScale;
+        scale(factor, factor);
+        if (pending_ && preview_)
+            preview_->setLine(QLineF(first_, mapToScene(event->position().toPoint())));
+    }
+    event->accept();
+}
+
 void PatternView::setDocument(opc::PatternDocument* doc) { doc_=doc; refresh(); }
 void PatternView::refresh() {
     pending_=false; preview_=nullptr;
@@ -47,7 +87,7 @@ MainWindow::MainWindow():view_(new PatternView(&scene_,this)) {
     add(tr("&Open"),QKeySequence::Open,[this]{openDocument();});
     add(tr("&Save"),QKeySequence::Save,[this]{saveDocument();});
     add(tr("Export &SVG"),QKeySequence(),[this]{exportSvg();});
-    statusBar()->showMessage(tr("Left click: first/second endpoint | Right click: cancel | Units: mm"));
+    statusBar()->showMessage(tr("Left click: first/second endpoint | Right click: cancel | Mouse wheel: zoom | Units: mm"));
 }
 void MainWindow::newDocument() { doc_.clear(); currentPath_.clear(); view_->refresh(); }
 void MainWindow::openDocument() {

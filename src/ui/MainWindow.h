@@ -11,6 +11,8 @@ public:
     void setDocument(opc::PatternDocument* doc);
     void refresh();
 protected:
+    void drawBackground(QPainter* painter, const QRectF& rect) override;
+    void wheelEvent(QWheelEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
 private:
