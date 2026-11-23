@@ -4,6 +4,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 #include <algorithm>
@@ -12,6 +13,15 @@
 
 namespace opc {
 namespace {
+QString canonicalContourName(const QString& name) {
+    // SOFIT 1.8 could save the numeric UTF-16 values in generated cut edge names.
+    static const QRegularExpression legacySeam(QStringLiteral("\\A(@[1-9][0-9]*:seam-)(65|66)\\z"));
+    const auto match = legacySeam.match(name);
+    if (!match.hasMatch())
+        return name;
+    return match.captured(1) + (match.captured(2) == QStringLiteral("65") ? u'A' : u'B');
+}
+
 QString shapeName(Shape shape) {
     switch (shape) {
     case Shape::Point: return QStringLiteral("point");
@@ -311,6 +321,8 @@ bool PatternDocument::load(const QString& path, QString* error) {
         }
         if (version >= 8 && fields.contains("draftName")) {
             entity.draftName = fields.value("draftName").toString();
+            if (topologyFormat && entity.draftName.startsWith(u'@'))
+                entity.draftName = canonicalContourName(entity.draftName);
             if (entity.draftName.isEmpty() || draftNames.contains(entity.draftName))
                 return fail(QStringLiteral("Invalid or duplicate parametric object name"));
             draftNames.insert(entity.draftName);
@@ -385,6 +397,12 @@ bool PatternDocument::load(const QString& path, QString* error) {
                     return fail(QStringLiteral("Invalid contour modeling step"));
                 step.spreadMm = width;
                 step.secondPiece = static_cast<qsizetype>(panel);
+            }
+            if (topologyFormat) {
+                for (auto& name : step.objects)
+                    name = canonicalContourName(name);
+                for (auto& name : step.guides)
+                    name = canonicalContourName(name);
             }
             loaded.history_.append(std::move(step));
         }

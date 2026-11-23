@@ -265,6 +265,29 @@ void checkContourHistory() {
     check(doubleCut.pieces().size() == 3 && doubleCut.modelingHistory().size() == 2,
           "Replay a second cut on generated edges");
     roundTripAndExport(doubleCut, "L");
+
+    const auto seam = namedEdge(doubleCut, "@2:seam-A");
+    auto marked = doubleCut.entities()[seam];
+    marked.seamNotches = {0.25};
+    doubleCut.replace(seam, marked);
+    QTemporaryDir temporary;
+    check(temporary.isValid(), "Create a directory for the SOFIT 1.8 compatibility fixture");
+    const auto legacyPath = temporary.filePath("numeric-seam-names.sofit");
+    check(doubleCut.save(legacyPath, &error), error);
+    auto legacy = readFile(legacyPath);
+    legacy.replace("@1:seam-A", "@1:seam-65").replace("@1:seam-B", "@1:seam-66")
+          .replace("@2:seam-A", "@2:seam-65").replace("@2:seam-B", "@2:seam-66");
+    QFile file(legacyPath);
+    check(file.open(QIODevice::WriteOnly) && file.write(legacy) == legacy.size(),
+          "Write the numeric seam names produced by SOFIT 1.8");
+    file.close();
+    PatternDocument reopened;
+    check(reopened.load(legacyPath, &error), error);
+    check(reopened.modelingHistory() == doubleCut.modelingHistory()
+          && reopened.entities()[namedEdge(reopened, "@2:seam-A")].seamNotches == marked.seamNotches,
+          "Restore canonical seam references and preserve notches when opening SOFIT 1.8 files");
+    roundTripAndExport(reopened, "L");
+
     check(doubleCut.removeLastModelingStep(&error) && doubleCut.pieces().size() == 2, error);
     check(namedEdge(doubleCut, "@1:seam-A") >= 0 && namedEdge(doubleCut, "@1:seam-B") >= 0
           && doubleCut.entities()[namedEdge(doubleCut, "otherCut")].layer == Layer::Construction,

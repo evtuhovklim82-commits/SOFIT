@@ -327,7 +327,7 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
             entity.draftName = QStringLiteral("@%1:%2").arg(i + 1).arg(j + 1);
             const auto lastInPanel = j + 1 == modeled.size() || modeled[j + 1].piece != localPiece;
             if (split && lastInPanel)
-                entity.draftName = QStringLiteral("@%1:seam-%2").arg(i + 1).arg(localPiece == 0 ? u'A' : u'B');
+                entity.draftName = QStringLiteral("@%1:seam-%2").arg(i + 1).arg(QChar(localPiece == 0 ? u'A' : u'B'));
             const auto metadata = outputMetadata.constFind(entity.draftName);
             if (metadata != outputMetadata.cend()) {
                 if (metadata->piece != entity.piece || metadata->layer != entity.layer)
