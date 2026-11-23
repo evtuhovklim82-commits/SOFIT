@@ -5,6 +5,7 @@
 #include "../core/PatternDocument.h"
 
 class PatternView;
+class QTreeWidget;
 
 class MainWindow : public QMainWindow {
 public:
@@ -22,11 +23,14 @@ private:
     void addEntity(const opc::Entity& entity);
     void deleteSelection();
     void exactInput();
+    void refreshObjects();
+    void moveEntity(qsizetype index, const QPointF& offset);
     void exportSvg();
 
     opc::PatternDocument doc_;
     QGraphicsScene scene_;
     PatternView* view_;
     QUndoStack undo_;
+    QTreeWidget* objects_;
     QString currentPath_;
 };

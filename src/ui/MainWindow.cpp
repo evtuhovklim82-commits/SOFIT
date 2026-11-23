@@ -3,6 +3,10 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
+#include <QDockWidget>
+#include <QHeaderView>
+#include <QSignalBlocker>
+#include <QTreeWidget>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -13,6 +17,7 @@
 #include <QLocale>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPainterPath>
 #include <QSaveFile>
 #include <QStatusBar>
 #include <QToolBar>
@@ -21,12 +26,40 @@
 #include <numbers>
 
 namespace {
+class MoveCommand : public QUndoCommand {
+public:
+    MoveCommand(opc::PatternDocument& document, PatternView& view, qsizetype index,
+                const QPointF& offset, const QString& text)
+        : QUndoCommand(text), document_(document), view_(view), index_(index),
+          before_(document.entities()[index]), after_(before_) {
+        after_.a += offset;
+        after_.b += offset;
+        if (after_.shape == opc::Shape::Curve)
+            after_.control += offset;
+    }
+
+    void undo() override { apply(before_); }
+    void redo() override { apply(after_); }
+
+private:
+    void apply(const opc::Entity& entity) {
+        view_.cancelDrawing();
+        document_.replace(index_, entity);
+        view_.replaceEntity(index_, entity);
+    }
+
+    opc::PatternDocument& document_;
+    PatternView& view_;
+    qsizetype index_;
+    opc::Entity before_, after_;
+};
+
 class EntityCommand : public QUndoCommand {
 public:
     EntityCommand(opc::PatternDocument& document, PatternView& view, qsizetype index,
                   const opc::Entity& entity, bool adding, const QString& text)
         : QUndoCommand(text), document_(document), view_(view), index_(index),
-          entity_(entity), adding_(adding) {}
+          entity_(entity), adding_(adding), visible_(adding || view.entityVisible(index)) {}
 
     void redo() override { apply(adding_); }
     void undo() override { apply(!adding_); }
@@ -37,7 +70,9 @@ private:
         if (insert) {
             document_.insert(index_, entity_);
             view_.insertEntity(index_, entity_);
+            view_.setEntityVisible(index_, visible_);
         } else {
+            visible_ = view_.entityVisible(index_);
             document_.remove(index_);
             view_.removeEntity(index_);
         }
@@ -48,6 +83,7 @@ private:
     qsizetype index_;
     opc::Entity entity_;
     bool adding_;
+    bool visible_;
 };
 }
 
@@ -55,6 +91,45 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     setWindowTitle(QStringLiteral("SOFIT 0.3[*]"));
     resize(1100, 750);
     setCentralWidget(view_);
+    setStyleSheet(QStringLiteral(
+        "QToolBar { spacing: 5px; padding: 5px; border: 0; }"
+        "QToolButton { padding: 6px 9px; border: 1px solid transparent; border-radius: 4px; }"
+        "QToolButton:hover { background: #344457; }"
+        "QToolButton:checked { background: #244755; border-color: #4f9cb1; }"
+        "QTreeView { border: 1px solid #344253; }"
+        "QTreeView::item { min-height: 24px; }"
+        "QStatusBar { background: #1b2430; }"));
+
+    auto* dock = new QDockWidget(tr("Drawing Objects"), this);
+    dock->setObjectName(QStringLiteral("drawingObjects"));
+    dock->setMinimumWidth(220);
+    objects_ = new QTreeWidget(dock);
+    objects_->setHeaderLabels({tr("Object"), tr("Visible")});
+    objects_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    objects_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    objects_->setRootIsDecorated(false);
+    objects_->setAlternatingRowColors(true);
+    dock->setWidget(objects_);
+    addDockWidget(Qt::RightDockWidgetArea, dock);
+    connect(objects_, &QTreeWidget::itemSelectionChanged, this, [this] {
+        const auto selected = objects_->selectedItems();
+        view_->selectEntity(selected.isEmpty() ? -1 : objects_->indexOfTopLevelItem(selected.front()));
+    });
+    connect(objects_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
+        if (column == 1)
+            view_->setEntityVisible(objects_->indexOfTopLevelItem(item), item->checkState(1) == Qt::Checked);
+    });
+    connect(&scene_, &QGraphicsScene::selectionChanged, this, [this] {
+        const QSignalBlocker blocker(objects_);
+        const auto index = view_->selectedIndex();
+        objects_->clearSelection();
+        if (index >= 0 && index < objects_->topLevelItemCount()) {
+            auto* item = objects_->topLevelItem(index);
+            objects_->setCurrentItem(item);
+            objects_->scrollToItem(item);
+        }
+    });
+    connect(&undo_, &QUndoStack::indexChanged, this, &MainWindow::refreshObjects);
 
     auto* file = menuBar()->addMenu(tr("&File"));
     file->addAction(tr("&New"), QKeySequence::New, this, &MainWindow::newDocument);
@@ -78,6 +153,12 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     connect(&undo_, &QUndoStack::cleanChanged, this, [this](bool clean) { setWindowModified(!clean); });
 
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu->addAction(dock->toggleViewAction());
+    auto* objectSnap = viewMenu->addAction(tr("Snap to Objects"));
+    objectSnap->setCheckable(true);
+    objectSnap->setChecked(true);
+    objectSnap->setToolTip(tr("Snap to points, corners and straight-edge intersections"));
+    connect(objectSnap, &QAction::toggled, view_, &PatternView::setSnapToObjects);
     auto* snapAction = viewMenu->addAction(tr("Snap to Grid (10 mm)"));
     snapAction->setCheckable(true);
     connect(snapAction, &QAction::toggled, view_, &PatternView::setSnapToGrid);
@@ -93,25 +174,54 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
     addAction(cancelAction);
 
-    auto* toolbar = addToolBar(tr("Drawing Tools"));
+    auto* toolbar = new QToolBar(tr("Drawing Tools"), this);
+    addToolBar(Qt::LeftToolBarArea, toolbar);
     toolbar->setMovable(false);
+    toolbar->setAllowedAreas(Qt::LeftToolBarArea | Qt::RightToolBarArea);
     auto* tools = new QActionGroup(this);
-    const auto addTool = [this, toolbar, tools](const QString& text, PatternView::Tool tool) {
+    const auto addTool = [this, toolbar, tools](const QString& text, PatternView::Tool tool, const QString& hint) {
         auto* action = toolbar->addAction(text);
         action->setCheckable(true);
         tools->addAction(action);
-        connect(action, &QAction::triggered, view_, [this, tool] { view_->setTool(tool); });
+        action->setToolTip(hint);
+        connect(action, &QAction::triggered, view_, [this, tool, hint] {
+            view_->setTool(tool);
+            statusBar()->showMessage(hint);
+        });
         return action;
     };
-    addTool(tr("Select"), PatternView::Tool::Select)->setChecked(true);
-    addTool(tr("Point"), PatternView::Tool::Point);
-    addTool(tr("Line"), PatternView::Tool::Line);
-    addTool(tr("Rectangle"), PatternView::Tool::Rectangle);
-    toolbar->addSeparator();
-    toolbar->addAction(tr("Exact Input…"), QKeySequence(Qt::Key_I), this, &MainWindow::exactInput);
-    toolbar->addAction(snapAction);
-    toolbar->addAction(fitAction);
+    addTool(tr("Select"), PatternView::Tool::Select, tr("Select or drag an object"))->setChecked(true);
+    addTool(tr("Point"), PatternView::Tool::Point, tr("Click to place a point"));
+    addTool(tr("Line"), PatternView::Tool::Line, tr("Pick the two endpoints"));
+    addTool(tr("Rectangle"), PatternView::Tool::Rectangle, tr("Pick opposite corners"));
+    addTool(tr("Circle"), PatternView::Tool::Circle, tr("Pick the center, then a point on the circle"));
+    addTool(tr("Curve"), PatternView::Tool::Curve, tr("Pick both endpoints, then the Bézier control point"));
+    addTool(tr("Measure"), PatternView::Tool::Measure, tr("Pick two points to measure the distance"));
+
+    auto* projectToolbar = addToolBar(tr("Project and View"));
+    projectToolbar->setMovable(false);
+    for (auto* action : file->actions())
+        projectToolbar->addAction(action);
+    projectToolbar->addSeparator();
+    projectToolbar->addAction(undoAction);
+    projectToolbar->addAction(redoAction);
+    projectToolbar->addAction(deleteAction);
+    projectToolbar->addAction(tr("Exact Input…"), QKeySequence(Qt::Key_I), this, &MainWindow::exactInput);
+    projectToolbar->addSeparator();
+    projectToolbar->addAction(snapAction);
+    projectToolbar->addAction(objectSnap);
+    projectToolbar->addAction(fitAction);
     connect(view_, &PatternView::entityDrawn, this, &MainWindow::addEntity);
+
+    connect(view_, &PatternView::entityMoved, this, &MainWindow::moveEntity);
+    connect(view_, &PatternView::measured, this, [this](qreal distance) {
+        statusBar()->showMessage(tr("Distance %1 mm").arg(QLocale().toString(distance, 'f', 3)));
+    });
+    auto* zoom = new QLabel(tr("1.00 px/mm"), statusBar());
+    statusBar()->addPermanentWidget(zoom);
+    connect(view_, &PatternView::zoomChanged, zoom, [zoom](qreal value) {
+        zoom->setText(tr("%1 px/mm").arg(QLocale().toString(value, 'g', 4)));
+    });
 
     const QString emptyCoordinates = tr("X: — mm  Y: — mm");
     auto* coordinates = new QLabel(emptyCoordinates, statusBar());
@@ -126,6 +236,30 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     connect(view_, &PatternView::cursorLeftCanvas, coordinates,
             [coordinates, emptyCoordinates] { coordinates->setText(emptyCoordinates); });
     statusBar()->showMessage(tr("Wheel: zoom | Middle drag: pan | Right click or Esc: cancel"));
+}
+
+void MainWindow::refreshObjects() {
+    const QSignalBlocker blocker(objects_);
+    objects_->clear();
+    const auto selected = view_->selectedIndex();
+    for (qsizetype index = 0; index < doc_.entities().size(); ++index) {
+        QString name;
+        switch (doc_.entities()[index].shape) {
+        case opc::Shape::Point: name = tr("Point"); break;
+        case opc::Shape::Line: name = tr("Line"); break;
+        case opc::Shape::Rectangle: name = tr("Rectangle"); break;
+        case opc::Shape::Circle: name = tr("Circle"); break;
+        case opc::Shape::Curve: name = tr("Curve"); break;
+        }
+        auto* item = new QTreeWidgetItem(objects_, {tr("%1 · %2").arg(index + 1).arg(name)});
+        item->setCheckState(1, view_->entityVisible(index) ? Qt::Checked : Qt::Unchecked);
+        if (index == selected)
+            objects_->setCurrentItem(item);
+    }
+}
+
+void MainWindow::moveEntity(qsizetype index, const QPointF& offset) {
+    undo_.push(new MoveCommand(doc_, *view_, index, offset, tr("Move Object")));
 }
 
 void MainWindow::addEntity(const opc::Entity& entity) {
@@ -143,10 +277,12 @@ void MainWindow::exactInput() {
     dialog.setWindowTitle(tr("Exact Input"));
     QFormLayout form(&dialog);
     auto* shape = new QComboBox(&dialog);
-    shape->addItems({tr("Point"), tr("Line"), tr("Rectangle")});
+    shape->addItems({tr("Point"), tr("Line"), tr("Rectangle"), tr("Circle"), tr("Curve")});
     switch (view_->tool()) {
     case PatternView::Tool::Point: shape->setCurrentIndex(0); break;
     case PatternView::Tool::Rectangle: shape->setCurrentIndex(2); break;
+    case PatternView::Tool::Circle: shape->setCurrentIndex(3); break;
+    case PatternView::Tool::Curve: shape->setCurrentIndex(4); break;
     default: shape->setCurrentIndex(1); break;
     }
     form.addRow(tr("Object"), shape);
@@ -168,6 +304,10 @@ void MainWindow::exactInput() {
     auto* y2 = field(tr("Y₂ (mm)"));
     auto* length = field(tr("Length (mm)"), 0.000001);
     length->setValue(10);
+    auto* radius = field(tr("Radius (mm)"), 0.000001);
+    radius->setValue(10);
+    auto* controlX = field(tr("Control X (mm)"));
+    auto* controlY = field(tr("Control Y (mm)"));
     auto* angle = field(tr("Angle (° clockwise from +X)"), -360, 360);
 
     QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
@@ -175,7 +315,12 @@ void MainWindow::exactInput() {
     const auto updateFields = [&] {
         const bool line = shape->currentIndex() == 1;
         const bool polar = line && mode->currentIndex() == 1;
-        const bool endpoint = shape->currentIndex() != 0 && !polar;
+        const bool circle = shape->currentIndex() == 3;
+        const bool curve = shape->currentIndex() == 4;
+        const bool endpoint = shape->currentIndex() != 0 && !polar && !circle;
+        form.setRowVisible(radius, circle);
+        form.setRowVisible(controlX, curve);
+        form.setRowVisible(controlY, curve);
         form.setRowVisible(mode, line);
         form.setRowVisible(x2, endpoint);
         form.setRowVisible(y2, endpoint);
@@ -211,6 +356,16 @@ void MainWindow::exactInput() {
             }
             addEntity({opc::Shape::Rectangle, a, b});
             break;
+        case 3:
+            addEntity({opc::Shape::Circle, a, a + QPointF(radius->value(), 0)});
+            break;
+        case 4:
+            if (a == b) {
+                QMessageBox::warning(&dialog, tr("Invalid Curve"), tr("Choose two different endpoints."));
+                return;
+            }
+            addEntity({opc::Shape::Curve, a, b, QPointF(controlX->value(), controlY->value())});
+            break;
         }
         dialog.accept();
     });
@@ -236,6 +391,7 @@ void MainWindow::replaceDocument(opc::PatternDocument document, const QString& p
     currentPath_ = path;
     setWindowFilePath(path);
     view_->setEntities(doc_.entities());
+    refreshObjects();
 }
 
 void MainWindow::newDocument() {
@@ -291,11 +447,23 @@ void MainWindow::exportSvg() {
         return;
     }
 
-    QRectF bounds(-500, -350, 1000, 700);
-    for (const auto& entity : doc_.entities()) {
-        const qreal margin = entity.shape == opc::Shape::Point ? 3 : 0.25;
-        bounds = bounds.united(QRectF(entity.a, entity.b).normalized().adjusted(-margin, -margin, margin, margin));
+    const auto& entities = doc_.entities();
+    QRectF bounds;
+    for (const auto& entity : entities) {
+        QRectF extent = QRectF(entity.a, entity.b).normalized();
+        if (entity.shape == opc::Shape::Circle) {
+            const auto radius = QLineF(entity.a, entity.b).length();
+            extent = QRectF(entity.a - QPointF(radius, radius), QSizeF(2 * radius, 2 * radius));
+        }
+        if (entity.shape == opc::Shape::Curve) {
+            QPainterPath curve(entity.a);
+            curve.quadTo(entity.control, entity.b);
+            extent = curve.boundingRect();
+        }
+        bounds = bounds.united(extent.adjusted(-5, -5, 5, 5));
     }
+    if (entities.isEmpty())
+        bounds = QRectF(-500, -350, 1000, 700);
     QXmlStreamWriter xml(&file);
     xml.setAutoFormatting(true);
     xml.writeStartDocument();
@@ -309,7 +477,7 @@ void MainWindow::exportSvg() {
     xml.writeAttribute("height", number(bounds.height()) + "mm");
     xml.writeAttribute("viewBox", QStringLiteral("%1 %2 %3 %4").arg(
         number(bounds.x()), number(bounds.y()), number(bounds.width()), number(bounds.height())));
-    for (const auto& entity : doc_.entities()) {
+    for (const auto& entity : entities) {
         switch (entity.shape) {
         case opc::Shape::Point:
             xml.writeStartElement("circle");
@@ -324,6 +492,21 @@ void MainWindow::exportSvg() {
             attribute("y1", entity.a.y());
             attribute("x2", entity.b.x());
             attribute("y2", entity.b.y());
+            break;
+        case opc::Shape::Circle:
+            xml.writeStartElement("circle");
+            attribute("cx", entity.a.x());
+            attribute("cy", entity.a.y());
+            attribute("r", QLineF(entity.a, entity.b).length());
+            xml.writeAttribute("fill", "none");
+            break;
+        case opc::Shape::Curve:
+            xml.writeStartElement("path");
+            xml.writeAttribute("d", QStringLiteral("M %1 %2 Q %3 %4 %5 %6")
+                .arg(number(entity.a.x()), number(entity.a.y()),
+                     number(entity.control.x()), number(entity.control.y()),
+                     number(entity.b.x()), number(entity.b.y())));
+            xml.writeAttribute("fill", "none");
             break;
         case opc::Shape::Rectangle: {
             const auto rect = QRectF(entity.a, entity.b).normalized();
