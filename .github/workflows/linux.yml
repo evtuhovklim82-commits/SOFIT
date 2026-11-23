@@ -2,7 +2,7 @@ name: Linux native build
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, 'ci/windows/**']
   pull_request:
     branches: [main]
 jobs:
@@ -10,10 +10,16 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Qt and build tools
+      - name: Install build tools and Qt runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build qt6-base-dev
+          sudo apt-get install -y cmake ninja-build libgl-dev libxkbcommon-dev libxcb-cursor0
+      - name: Install Qt 6.8.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: linux_gcc_64
+          cache: true
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
       - name: Build

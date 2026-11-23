@@ -43,7 +43,7 @@ struct Entity {
     QVector<double> seamNotches; // Arc-length fractions measured from a.
 };
 
-// A step addresses the full piece by its persistent formula object names.
+// A step addresses its inputs by persistent formula object names.
 struct ModelingStep {
     QVector<QString> objects;
     double axisFraction = 0;
@@ -55,6 +55,8 @@ struct ModelingStep {
     QVector<QString> topology;
     qsizetype secondPiece = -1;
     double lengthScale = 1;
+    QString rotationPivot;
+    double rotationDegrees = 0;
     bool operator==(const ModelingStep&) const = default;
 };
 
@@ -101,6 +103,8 @@ public:
     const QVector<ModelingStep>& modelingHistory() const { return history_; }
     bool appendSilhouette(qsizetype piece, double axisFraction, double topScale,
                           double bottomScale, QString* error = nullptr, double lengthScale = 1);
+    bool appendRotation(const QVector<qsizetype>& selection, qsizetype pivot,
+                        double degrees, QString* error = nullptr);
     // Change numeric settings while keeping the operation and all references intact.
     bool editModelingStep(qsizetype index, const ModelingStep& settings, QString* error = nullptr);
     bool appendContour(qsizetype piece, ContourOperation operation,

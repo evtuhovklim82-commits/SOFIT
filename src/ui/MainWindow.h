@@ -37,6 +37,7 @@ private:
     void splitSelectedEdge();
     void joinSelectedEdges();
     void shapeSilhouette();
+    void rotateConstruction();
     void showModelingHistory();
     void editSeamLink(qsizetype index);
     void editModelingStep(qsizetype index);

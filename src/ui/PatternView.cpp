@@ -284,11 +284,13 @@ void PatternView::replaceEntity(qsizetype index, const opc::Entity& entity) {
     item->setSelected(selected && item->isVisible());
 }
 
-void PatternView::selectEntity(qsizetype index) {
-    scene()->clearSelection();
-    if (index >= 0 && index < items_.size() && items_[index]->isVisible()) {
-        items_[index]->setSelected(true);
-        ensureVisible(items_[index]);
+void PatternView::selectEntities(const QVector<qsizetype>& indices) {
+    for (qsizetype i = 0; i < items_.size(); ++i)
+        items_[i]->setSelected(indices.contains(i) && items_[i]->isVisible());
+    if (indices.size() == 1) {
+        const auto index = indices.first();
+        if (index >= 0 && index < items_.size() && items_[index]->isVisible())
+            ensureVisible(items_[index]);
     }
 }
 
@@ -307,7 +309,9 @@ void PatternView::updateEntityStyle(qsizetype index) {
     const bool construction = entity.layer == opc::Layer::Construction;
     const auto& color = construction ? constructionColor : drawingColor;
     items_[index]->setPen(QPen(color, 0, construction ? Qt::DashLine : Qt::SolidLine));
-    items_[index]->setBrush(entity.shape == opc::Shape::Point ? QBrush(color) : QBrush(Qt::NoBrush));
+    const bool point = entity.shape == opc::Shape::Point;
+    items_[index]->setBrush(point ? QBrush(color) : QBrush(Qt::NoBrush));
+    items_[index]->setZValue(point ? 1 : 0);
     items_[index]->setVisible(entityVisibility_[index] && (construction ? constructionVisible_ : mainVisible_));
 }
 
@@ -350,11 +354,14 @@ void PatternView::setSizeOverlays(const QVector<QPair<QPainterPath, QColor>>& ov
     }
 }
 
-qsizetype PatternView::selectedIndex() const {
-    const auto selection = scene()->selectedItems();
-    if (selection.isEmpty())
-        return -1;
-    return items_.indexOf(static_cast<QGraphicsPathItem*>(selection.front()));
+QVector<qsizetype> PatternView::selectedIndices() const {
+    QVector<qsizetype> indices;
+    for (auto* item : scene()->selectedItems()) {
+        const auto index = items_.indexOf(static_cast<QGraphicsPathItem*>(item));
+        if (index >= 0)
+            indices.append(index);
+    }
+    return indices;
 }
 
 void PatternView::fitDrawing() {
@@ -425,13 +432,15 @@ void PatternView::mousePressEvent(QMouseEvent* event) {
     } else if (event->button() == Qt::LeftButton && !panning_) {
         const QPointF point = drawingPoint(cursorScenePosition_);
         if (tool_ == Tool::Select) {
-            scene()->clearSelection();
+            const bool toggle = event->modifiers().testFlag(Qt::ControlModifier);
+            if (!toggle)
+                scene()->clearSelection();
             const QRect hit(event->pos() - QPoint(5, 5), QSize(11, 11));
             for (auto* item : items(hit)) {
                 if (item->flags().testFlag(QGraphicsItem::ItemIsSelectable)) {
-                    item->setSelected(true);
-                    const auto index = selectedIndex();
-                    if (index >= 0 && entities_[index].draftName.isEmpty()) {
+                    item->setSelected(!toggle || !item->isSelected());
+                    const auto index = items_.indexOf(static_cast<QGraphicsPathItem*>(item));
+                    if (!toggle && index >= 0 && entities_[index].draftName.isEmpty()) {
                         dragPressPosition_ = event->pos();
                         dragIndex_ = index;
                         dragStart_ = drawingPoint(cursorScenePosition_);

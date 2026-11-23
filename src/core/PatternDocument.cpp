@@ -191,7 +191,11 @@ bool PatternDocument::save(const QString& path, QString* error) const {
                 return array;
             };
             QJsonObject record{{"objects", names(step.objects)}};
-            if (step.contour) {
+            if (!step.rotationPivot.isEmpty()) {
+                record.insert("operation", "rotate-construction");
+                record.insert("pivot", step.rotationPivot);
+                record.insert("degrees", step.rotationDegrees);
+            } else if (step.contour) {
                 record.insert("operation", contourOperationKey(*step.contour));
                 record.insert("guides", names(step.guides));
                 record.insert("width", step.spreadMm);
@@ -408,7 +412,12 @@ bool PatternDocument::load(const QString& path, QString* error) {
             };
             if (!readNames(entry.value("objects"), step.objects))
                 return fail(QStringLiteral("Invalid modeling object names"));
-            if (operation == "silhouette" || operation == "silhouette-length") {
+            if (operation == "rotate-construction") {
+                step.rotationPivot = entry.value("pivot").toString();
+                if (step.rotationPivot.isEmpty() || !entry.value("degrees").isDouble())
+                    return fail(QStringLiteral("Invalid construction rotation step"));
+                step.rotationDegrees = entry.value("degrees").toDouble();
+            } else if (operation == "silhouette" || operation == "silhouette-length") {
                 if (operation == "silhouette-length")
                     step.lengthScale = entry.value("length").toDouble(-1);
                 step.axisFraction = entry.value("axis").toDouble(-1);
@@ -428,6 +437,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
                 step.secondPiece = static_cast<qsizetype>(panel);
             }
             if (topologyFormat) {
+                step.rotationPivot = canonicalContourName(step.rotationPivot);
                 for (auto& name : step.objects)
                     name = canonicalContourName(name);
                 for (auto& name : step.guides)

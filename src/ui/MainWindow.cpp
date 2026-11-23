@@ -81,6 +81,8 @@ QString describeSeamLink(const opc::SeamLinkCheck& check, double target) {
 QString modelingStepName(const opc::ModelingStep& step) {
     using C = opc::ContourOperation;
     const auto text = [](const char* label) { return QCoreApplication::translate("MainWindow", label); };
+    if (!step.rotationPivot.isEmpty())
+        return text("Rotate Construction");
     if (!step.contour)
         return text("Shape Silhouette");
     switch (*step.contour) {
@@ -276,9 +278,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     dock->setWidget(objects_);
     addDockWidget(Qt::RightDockWidgetArea, dock);
     connect(objects_, &QTreeWidget::itemSelectionChanged, this, [this] {
-        const auto selected = objects_->selectedItems();
         const QSignalBlocker blocker(objects_);
-        view_->selectEntity(selected.size() == 1 ? objects_->indexOfTopLevelItem(selected.front()) : -1);
+        view_->selectEntities(selectedObjects());
     });
     connect(objects_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
         if (column == 1) {
@@ -290,13 +291,14 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         if (objects_->signalsBlocked())
             return;
         const QSignalBlocker blocker(objects_);
-        const auto index = view_->selectedIndex();
+        const auto selected = view_->selectedIndices();
         objects_->clearSelection();
-        if (index >= 0 && index < objects_->topLevelItemCount()) {
-            auto* item = objects_->topLevelItem(index);
-            objects_->setCurrentItem(item);
-            objects_->scrollToItem(item);
+        for (const auto index : selected) {
+            if (auto* item = objects_->topLevelItem(index))
+                item->setSelected(true);
         }
+        if (selected.size() == 1 && selected.first() < objects_->topLevelItemCount())
+            objects_->scrollToItem(objects_->topLevelItem(selected.first()));
     });
     connect(&undo_, &QUndoStack::indexChanged, this, &MainWindow::refreshObjects);
 
@@ -346,6 +348,9 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         join->setEnabled(edges && selected.size() == 2);
     });
 
+    auto* rotate = modeling->addAction(tr("Rotate Construction…"), this, &MainWindow::rotateConstruction);
+    rotate->setToolTip(tr("Select formula points, lines or curves on the Construction layer. Choose a pivot and angle."));
+    modeling->setToolTipsVisible(true);
     modeling->addSeparator();
     modeling->addAction(tr("Cut Piece…"), this, [this] {
         modelPiece(opc::ContourOperation::Cut, tr("Cut Piece"));
@@ -693,8 +698,8 @@ void MainWindow::refreshObjects() {
     for (int index = 0; index < static_cast<int>(layerActions_.size()); ++index)
         layerActions_[index]->setChecked(doc_.layerVisible(static_cast<opc::Layer>(index)));
 
+    const auto selected = view_->selectedIndices();
     objects_->clear();
-    const auto selected = view_->selectedIndex();
     for (qsizetype index = 0; index < doc_.entities().size(); ++index) {
         QString name;
         const auto& entity = doc_.entities()[index];
@@ -712,8 +717,8 @@ void MainWindow::refreshObjects() {
             item->setText(2, doc_.pieces()[entity.piece].name);
         item->setText(3, entity.layer == opc::Layer::Main ? tr("Main") : tr("Construction"));
         item->setCheckState(1, view_->entityVisible(index) ? Qt::Checked : Qt::Unchecked);
-        if (index == selected)
-            objects_->setCurrentItem(item);
+        if (selected.contains(index))
+            item->setSelected(true);
     }
 }
 
@@ -1669,6 +1674,64 @@ void MainWindow::editSeamLink(qsizetype index) {
     dialog.exec();
 }
 
+void MainWindow::rotateConstruction() {
+    const auto title = tr("Rotate Construction");
+    const auto selection = selectedObjects();
+    const auto& entities = doc_.entities();
+    if (selection.isEmpty() || std::ranges::any_of(selection, [&](auto index) {
+            const auto& entity = entities[index];
+            return entity.draftName.isEmpty() || entity.layer != opc::Layer::Construction
+                || (entity.shape != opc::Shape::Point && entity.shape != opc::Shape::Line
+                    && entity.shape != opc::Shape::Curve);
+        })) {
+        QMessageBox::information(this, title,
+            tr("Select named formula points, lines or curves on the Construction layer."));
+        return;
+    }
+    const auto piece = entities[selection.first()].piece;
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    QFormLayout form(&dialog);
+    QComboBox pivots(&dialog);
+    pivots.setObjectName(QStringLiteral("rotationPivot"));
+    for (qsizetype i = 0; i < entities.size(); ++i) {
+        const auto& entity = entities[i];
+        if (entity.shape != opc::Shape::Point || entity.draftName.isEmpty() || selection.contains(i))
+            continue;
+        if (entity.piece >= 0 && (entity.piece != piece
+            || std::ranges::any_of(selection, [&](auto index) { return entities[index].piece != piece; })))
+            continue;
+        pivots.addItem(entity.draftName, QVariant::fromValue(i));
+    }
+    if (pivots.count() == 0) {
+        QMessageBox::information(this, title, tr("Keep one named formula point outside the selection to use as the pivot."));
+        return;
+    }
+    QDoubleSpinBox angle(&dialog);
+    angle.setDecimals(6);
+    angle.setRange(-360, 360);
+    angle.setSuffix(tr("°"));
+    angle.setValue(15);
+    form.addRow(tr("Pivot point"), &pivots);
+    form.addRow(tr("Angle (positive clockwise)"), &angle);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        auto updated = doc_;
+        QString error;
+        if (!updated.appendRotation(selection, pivots.currentData().toLongLong(), angle.value(), &error)) {
+            QMessageBox::warning(&dialog, title, error);
+            return;
+        }
+        view_->cancelDrawing();
+        undo_.push(new PatternCommand(doc_, std::move(updated), title, view_));
+        dialog.accept();
+    });
+    if (dialog.exec() == QDialog::Accepted)
+        showModelingHistory();
+}
+
 void MainWindow::editModelingStep(qsizetype index) {
     auto settings = doc_.modelingHistory()[index];
     QDialog dialog(this);
@@ -1689,7 +1752,13 @@ void MainWindow::editModelingStep(qsizetype index) {
     QDoubleSpinBox* bottom = nullptr;
     QDoubleSpinBox* length = nullptr;
     QDoubleSpinBox* spread = nullptr;
-    if (settings.contour) {
+    QDoubleSpinBox* angle = nullptr;
+    if (!settings.rotationPivot.isEmpty()) {
+        auto* pivot = new QLabel(settings.rotationPivot, &dialog);
+        pivot->setTextFormat(Qt::PlainText);
+        form.addRow(tr("Pivot point"), pivot);
+        angle = number(tr("Angle (positive clockwise)"), settings.rotationDegrees, -360, 360, tr("°"));
+    } else if (settings.contour) {
         spread = number(tr("Added width"), settings.spreadMm, 0.000001,
                         std::max(100000., settings.spreadMm), tr(" mm"));
     } else {
@@ -1707,7 +1776,9 @@ void MainWindow::editModelingStep(qsizetype index) {
                 ? original : field->value() / factor;
         };
         auto revised = settings;
-        if (spread) {
+        if (angle) {
+            revised.rotationDegrees = read(angle, settings.rotationDegrees, 1);
+        } else if (spread) {
             revised.spreadMm = read(spread, settings.spreadMm, 1);
         } else {
             revised.axisFraction = read(axis, settings.axisFraction, 100);
@@ -1801,7 +1872,9 @@ void MainWindow::refreshModelingHistory() {
             item->setData(0, Qt::UserRole + 1, QVariant::fromValue(i));
             item->setToolTip(0, tr("Double-click to edit step parameters."));
         }
-        if (!step.contour)
+        if (!step.rotationPivot.isEmpty())
+            item->setText(1, tr("%L1° around %2").arg(step.rotationDegrees).arg(step.rotationPivot));
+        else if (!step.contour)
             item->setText(1, tr("Width %L1% / %L2% · Length %L3%")
                 .arg(step.topScale * 100).arg(step.bottomScale * 100).arg(step.lengthScale * 100));
         else if (step.secondPiece >= 0)

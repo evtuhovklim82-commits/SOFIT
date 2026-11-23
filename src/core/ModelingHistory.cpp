@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QLineF>
 #include <QSet>
+#include <QTransform>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -167,6 +168,35 @@ bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
     return true;
 }
 
+bool PatternDocument::appendRotation(const QVector<qsizetype>& selection, qsizetype pivot,
+                                     double degrees, QString* error) {
+    const auto fail = [error](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!production_.placements.isEmpty())
+        return fail(QStringLiteral("Clear the fabric layout before adding a rotation."));
+    if (pivot < 0 || pivot >= entities_.size() || entities_[pivot].draftName.isEmpty())
+        return fail(QStringLiteral("Choose a named formula point as the rotation pivot."));
+
+    ModelingStep step;
+    step.rotationPivot = entities_[pivot].draftName;
+    step.rotationDegrees = degrees;
+    for (const auto index : selection) {
+        if (index < 0 || index >= entities_.size() || entities_[index].draftName.isEmpty())
+            return fail(QStringLiteral("Select named formula construction objects to rotate."));
+        step.objects.append(entities_[index].draftName);
+    }
+    std::ranges::sort(step.objects);
+    auto candidate = *this;
+    candidate.history_.append(std::move(step));
+    if (!candidate.setParametricDraft(draft_, error))
+        return false;
+    *this = std::move(candidate);
+    return true;
+}
+
 bool PatternDocument::editModelingStep(qsizetype index, const ModelingStep& settings, QString* error) {
     const auto fail = [error](const QString& message) {
         if (error)
@@ -177,7 +207,9 @@ bool PatternDocument::editModelingStep(qsizetype index, const ModelingStep& sett
         return fail(QStringLiteral("Choose a modeling step."));
     auto candidate = *this;
     auto& step = candidate.history_[index];
-    if (!step.contour) {
+    if (!step.rotationPivot.isEmpty()) {
+        step.rotationDegrees = settings.rotationDegrees;
+    } else if (!step.contour) {
         step.axisFraction = settings.axisFraction;
         step.topScale = settings.topScale;
         step.bottomScale = settings.bottomScale;
@@ -208,6 +240,11 @@ bool PatternDocument::removeLastModelingStep(QString* error) {
     }
     auto candidate = *this;
     const auto removed = candidate.history_.takeLast();
+    if (!removed.rotationPivot.isEmpty() && !production_.placements.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("Clear the fabric layout before removing the rotation.");
+        return false;
+    }
     if (removed.secondPiece >= 0) {
         const auto piece = removed.secondPiece;
         const bool occupied = placed(production_, piece)
@@ -254,7 +291,8 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
         const auto fail = [&](const QString& detail) {
             if (error)
                 *error = QStringLiteral("Modeling step %1 (%2): %3").arg(i + 1)
-                    .arg(step.contour ? contourOperationKey(*step.contour) : QStringLiteral("silhouette"), detail);
+                    .arg(!step.rotationPivot.isEmpty() ? QStringLiteral("rotate-construction")
+                         : step.contour ? contourOperationKey(*step.contour) : QStringLiteral("silhouette"), detail);
             return false;
         };
         if (step.objects.isEmpty())
@@ -264,6 +302,41 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
             if (!entities[j].draftName.isEmpty())
                 objects.insert(entities[j].draftName, j);
         }
+        if (!step.rotationPivot.isEmpty()) {
+            if (!std::isfinite(step.rotationDegrees) || std::abs(step.rotationDegrees) > 360)
+                return fail(QStringLiteral("Enter an angle from −360 to 360 degrees."));
+            const auto pivotIndex = objects.value(step.rotationPivot, -1);
+            if (pivotIndex < 0 || entities[pivotIndex].shape != Shape::Point)
+                return fail(QStringLiteral("Rotation pivot '%1' is missing or is no longer a point.")
+                            .arg(step.rotationPivot));
+            const auto pivot = entities[pivotIndex];
+            QTransform rotation;
+            rotation.rotate(step.rotationDegrees);
+            const auto map = [&](QPointF point) { return pivot.a + rotation.map(point - pivot.a); };
+            QSet<QString> rotated;
+            for (const auto& name : step.objects) {
+                const auto index = objects.value(name, -1);
+                if (index < 0 || name == step.rotationPivot || rotated.contains(name))
+                    return fail(QStringLiteral("Invalid rotation target '%1'.").arg(name));
+                auto& entity = entities[index];
+                if (entity.layer != Layer::Construction
+                    || (entity.shape != Shape::Point && entity.shape != Shape::Line && entity.shape != Shape::Curve))
+                    return fail(QStringLiteral("'%1' must be a construction point, line or curve.").arg(name));
+                if (pivot.piece >= 0 && entity.piece != pivot.piece)
+                    return fail(QStringLiteral("Choose an unassigned pivot or a pivot on the target's piece."));
+                if (std::ranges::any_of(production.rules, [&](const auto& rule) {
+                        return rule.piece == entity.piece || rule.piece == pivot.piece;
+                    }))
+                    return fail(QStringLiteral("Use measurement grading for the pivot and the rotated objects."));
+                entity.a = map(entity.a);
+                entity.b = entity.shape == Shape::Point ? entity.a : map(entity.b);
+                if (entity.shape == Shape::Curve)
+                    entity.control = map(entity.control);
+                rotated.insert(name);
+            }
+            continue;
+        }
+
         const auto anchor = objects.value(step.objects.first(), -1);
         if (anchor < 0)
             return fail(QStringLiteral("Source object '%1' is missing.").arg(step.objects.first()));

@@ -335,6 +335,11 @@ void testStageNavigationAndPreferences() {
         auto* guide = dialog.findChild<QTextBrowser*>("grafisWorkflowGuide");
         check(guide && guide->toHtml().contains("help.grafis.de"), "Guide links to GRAFIS publisher documentation");
         check(guide->toPlainText().contains("Layout → Fabric Layout"), "Guide names the working SOFIT command");
+        check(guide->toPlainText().contains("Rotate Construction")
+              && guide->toPlainText().contains("Move Open Contour Dart")
+              && guide->toHtml().contains("Tools/Drehen.htm")
+              && guide->toHtml().contains("Tools/Abnaeherr.htm"),
+              "Guide maps working modeling commands to the official GRAFIS references");
         dialog.reject();
     });
 
@@ -730,6 +735,63 @@ int main(int argc, char** argv) {
     chooseFile(action(draftWindow, "&Open"), draftFile);
     check(draftTree.topLevelItemCount() == 4 && draftTree.topLevelItem(3)->text(0).contains("AB"),
           "Open a parametric project through the UI");
+
+    draftTree.topLevelItem(3)->setSelected(true);
+    action(draftWindow, "Move Selection to Construction Layer").trigger();
+    const auto canvasClick = [&](QPointF point, Qt::KeyboardModifiers modifiers) {
+        const auto local = draftView.mapFromScene(point);
+        QMouseEvent click(QEvent::MouseButtonPress, local, draftView.viewport()->mapToGlobal(local),
+                          Qt::LeftButton, Qt::LeftButton, modifiers);
+        QApplication::sendEvent(draftView.viewport(), &click);
+    };
+    canvasClick({65, 0}, Qt::NoModifier);
+    canvasClick({130, 0}, Qt::ControlModifier);
+    check(draftTree.selectedItems().size() == 2 && draftView.selectedIndices().size() == 2,
+          "Ctrl-click adds a construction point to the selected line on canvas and in the Objects dock");
+    canvasClick({130, 0}, Qt::ControlModifier);
+    check(draftTree.selectedItems().size() == 1 && draftView.selectedIndices().size() == 1,
+          "Ctrl-click deselects only the targeted point");
+    draftTree.topLevelItem(2)->setSelected(true);
+    check(draftView.selectedIndices().size() == 2, "Multiple Objects dock selections highlight on the canvas");
+
+    runDialog<QDialog>(action(draftWindow, "Rotate Construction…"), [](QDialog& dialog) {
+        auto* pivot = dialog.findChild<QComboBox*>("rotationPivot");
+        check(pivot && pivot->count() == 1 && pivot->currentText() == "A",
+              "Offer the unselected named point as the pivot");
+        dialog.findChild<QDoubleSpinBox*>()->setValue(90);
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    const auto verifyRotation = [&](double angle, QPointF endpoint) {
+        action(draftWindow, "&Save").trigger();
+        check(loaded.load(draftFile) && loaded.entities().last().b == endpoint,
+              "Save and reload rotated line geometry");
+        check(angle == 0 ? loaded.modelingHistory().isEmpty()
+                         : loaded.modelingHistory().size() == 1 && loaded.modelingHistory()[0].rotationDegrees == angle,
+              "Save and reload rotation history in the same undo action");
+    };
+    verifyRotation(90, {0, 130});
+    action(draftWindow, "Undo Rotate Construction").trigger();
+    verifyRotation(0, {130, 0});
+    action(draftWindow, "Redo Rotate Construction").trigger();
+    verifyRotation(90, {0, 130});
+    const auto draftDocks = draftWindow.findChildren<QDockWidget*>();
+    const auto historyDock = std::ranges::find_if(draftDocks, [](const QDockWidget* dock) {
+        return dock->windowTitle() == "Construction Tree";
+    });
+    check(historyDock != draftDocks.end(), "Rotation opens the construction tree");
+    auto* rotationTree = (*historyDock)->findChild<QTreeWidget*>();
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(dialog && dialog->windowTitle() == "Edit Rotate Construction", "Edit rotation from history");
+        dialog->findChild<QDoubleSpinBox*>()->setValue(-90);
+        dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    rotationTree->itemActivated(rotationTree->topLevelItem(0)->child(0), 0);
+    verifyRotation(-90, {0, -130});
+    action(draftWindow, "Undo Edit Modeling Step").trigger();
+    verifyRotation(90, {0, 130});
+    action(draftWindow, "Redo Edit Modeling Step").trigger();
+    verifyRotation(-90, {0, -130});
 
     const auto seamFile = temp.filePath("seam-workflow.sofit");
     opc::PatternDocument seamFixture;
