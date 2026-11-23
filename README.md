@@ -1,4 +1,4 @@
-# SOFIT 0.8 — independent CAD prototype
+# SOFIT 0.9 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -41,8 +41,20 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
 - Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
-- Save patterns in `.sofit` version 6. SOFIT opens versions 1–5 and legacy version 1 `.opcad` drawings. SVG export includes enabled layers and uses millimeters.
+- Save patterns in `.sofit` format 8 when they contain a parametric draft, or format 7 otherwise. SOFIT opens formats 1–8 and legacy format 1 `.opcad` drawings. SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
+
+## Parametric drafting
+
+1. Open **Pattern → Parametric Draft…**. In **Measurements**, add `chest` with value `920` mm. In **Parameters**, add `ease` with formula `15`.
+2. In **Points**, enter `A` with X and Y formulas `0`, `B` with X `chest / 4 + ease` and Y `A.y`, and `C` with X `B.x / 2` and Y `-25`.
+3. In **Lines and curves**, enter `AB` with start `A` and end `B`. Leave the control point blank for a straight line, or enter `C` for a quadratic Bézier curve.
+4. Click **Validate**, then **Apply**. Reopen the draft and change `chest` to `1000`. The X coordinate of `B` increases from 245 to 265 mm. Undo and Redo restore the inputs and geometry together.
+5. Save and reopen the project to continue editing the formulas.
+
+Identifiers are case-sensitive and use ASCII letters, digits and underscores, with a letter or underscore first. Measurements and parameters share one namespace. Formulas can use `+`, `-`, `*`, `/`, parentheses, a decimal point, scientific notation and named point coordinates such as `B.x` and `B.y`. Coordinates are in mm and Y increases downwards. Points start on the Construction layer and edges on the Main layer.
+
+Edit or delete generated objects in the draft editor. Piece and layer assignments are retained when a generated object's name stays the same. Renaming a point also requires updating formulas and edges that reference it. Parametric measurements are project-wide. Size grading uses its existing coordinate-based offsets, so review the grade rules and fabric layout after changing the base contour.
 
 ## Pattern pieces
 
@@ -66,7 +78,7 @@ SOFIT 5 saves piece names, membership, layer assignments, layer visibility and a
 5. Choose a cut mode before adding copies. **Left + right pair** adds one original and one mirrored contour per unit of quantity. You can also add either hand by itself. The reflection preserves the lengthwise grain direction.
 6. For on-fold pieces, enter the working width of the folded fabric and select the side with a straight outer cutting edge parallel to the grain. Use a finished cutting contour with a zero automatic allowance. Dragging is restricted to movement along the fold.
 7. Enable **One-way nap or print** to require the original grain direction across the layout. Use **Fix orientation for new copies** to apply the same restriction to individual copies. Otherwise an aligned 180° turn is available. **Auto arrange** tries three deterministic orders with up to 200 plotted copies, places fold copies along their assigned edge, and checks the outlines for overlap and fit.
-8. Open **Cutting report…** to review counts by piece and size, working width, used length, utilization, and warnings. Counts refer to plotted copies per cutting layer. Each on-fold entry yields one unfolded piece. SOFIT 0.8 saves these settings in format 7 and opens older SOFIT projects, including format 6.
+8. Open **Cutting report…** to review counts by piece and size, working width, used length, utilization, and warnings. Counts refer to plotted copies per cutting layer. Each on-fold entry yields one unfolded piece. The project file retains these settings.
 9. Use **Export layout DXF…** to export a valid layout in millimeters with separate CUT, FOLD, GRAINLINE and FABRIC layers. On-fold CUT paths are open along the marked fold. For cutting, use the CUT layer.
 5. Read the length from the fabric start to the furthest cut edge. Resolve reported overlaps and pieces outside the fabric before using the estimate. Click **OK** and save the pattern to retain the width and positions.
 

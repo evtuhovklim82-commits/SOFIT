@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 0.8.0 LANGUAGES CXX)
+project(SOFIT VERSION 0.9.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -14,6 +14,7 @@ add_library(sofit_core STATIC
     src/core/Production.cpp
     src/core/PieceMarkings.cpp
     src/core/PatternDxf.cpp
+    src/core/ParametricDraft.cpp
     src/core/PatternDocument.cpp
     src/core/PatternDocument.h
     src/core/PieceGeometry.cpp
@@ -23,6 +24,7 @@ target_link_libraries(sofit_core PUBLIC Qt6::Gui)
 target_include_directories(sofit_core PUBLIC src/core)
 
 add_library(sofit_widgets STATIC
+    src/ui/ParametricDialog.cpp
     src/ui/MainWindow.cpp
     src/ui/ProductionDialogs.cpp
     src/ui/MainWindow.h
@@ -46,6 +48,10 @@ if(BUILD_TESTING)
     add_executable(sofit_production_tests tests/ProductionTest.cpp)
     target_link_libraries(sofit_production_tests PRIVATE sofit_core)
     add_test(NAME sofit_production COMMAND sofit_production_tests)
+
+    add_executable(sofit_parametric_tests tests/ParametricDraftTest.cpp)
+    target_link_libraries(sofit_parametric_tests PRIVATE sofit_core)
+    add_test(NAME sofit_parametric COMMAND sofit_parametric_tests)
 
     add_executable(sofit_ui_tests tests/PatternWorkflowTest.cpp)
     target_link_libraries(sofit_ui_tests PRIVATE sofit_widgets)

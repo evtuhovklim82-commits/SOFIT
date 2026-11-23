@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "PatternView.h"
+#include "ParametricDialog.h"
 #include "PatternPdf.h"
 #include "PatternDxf.h"
 #include "PieceMarkings.h"
@@ -14,6 +15,7 @@
 #include <QCloseEvent>
 #include <QDockWidget>
 #include <QHeaderView>
+#include <QHash>
 #include <QInputDialog>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -36,6 +38,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <utility>
 
 namespace {
 QColor sizeColor(qsizetype index) {
@@ -50,15 +53,45 @@ void fillExportSizes(QComboBox& box, const opc::PatternDocument& document) {
 
 class PatternCommand : public QUndoCommand {
 public:
-    PatternCommand(opc::PatternDocument& document, opc::PatternDocument after, const QString& text)
-        : QUndoCommand(text), document_(document), before_(document), after_(std::move(after)) {}
+    PatternCommand(opc::PatternDocument& document, opc::PatternDocument after, const QString& text,
+                   PatternView* redraw = nullptr)
+        : QUndoCommand(text), document_(document), before_(document), after_(std::move(after)), redraw_(redraw) {}
 
-    void undo() override { document_ = before_; }
-    void redo() override { document_ = after_; }
+    void undo() override { apply(before_); }
+    void redo() override { apply(after_); }
 
 private:
+    void apply(const opc::PatternDocument& updated) {
+        if (!redraw_) {
+            document_ = updated;
+            return;
+        }
+
+        // A draft edit leaves the order of manually drawn objects intact.
+        QVector<bool> manualVisibility;
+        QHash<QString, bool> draftVisibility;
+        for (qsizetype i = 0; i < document_.entities().size(); ++i) {
+            const auto& name = document_.entities()[i].draftName;
+            const auto visible = redraw_->entityVisible(i);
+            if (name.isEmpty())
+                manualVisibility.append(visible);
+            else
+                draftVisibility.insert(name, visible);
+        }
+        document_ = updated;
+        redraw_->setEntities(document_.entities());
+        qsizetype manualIndex = 0;
+        for (qsizetype i = 0; i < document_.entities().size(); ++i) {
+            const auto& name = document_.entities()[i].draftName;
+            const bool visible = name.isEmpty() ? manualVisibility[manualIndex++] : draftVisibility.value(name, true);
+            if (!visible)
+                redraw_->setEntityVisible(i, false);
+        }
+    }
+
     opc::PatternDocument& document_;
     opc::PatternDocument before_, after_;
+    PatternView* redraw_;
 };
 
 class MoveCommand : public QUndoCommand {
@@ -123,7 +156,7 @@ private:
 }
 
 MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
-    setWindowTitle(QStringLiteral("SOFIT 0.8[*]"));
+    setWindowTitle(QStringLiteral("SOFIT 0.9[*]"));
     resize(1100, 750);
     setCentralWidget(view_);
     setStyleSheet(QStringLiteral(
@@ -217,6 +250,15 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Remove Objects from Piece"));
     });
     pattern->addAction(tr("Piece, Contour and Allowance…"), this, &MainWindow::managePiece);
+    pattern->addAction(tr("Parametric Draft…"), this, [this] {
+        if (auto updated = editParametricDraft(this, doc_)) {
+            view_->cancelDrawing();
+            const bool firstDrawing = doc_.entities().isEmpty();
+            undo_.push(new PatternCommand(doc_, std::move(*updated), tr("Edit Parametric Draft"), view_));
+            if (firstDrawing && !doc_.entities().isEmpty())
+                view_->fitDrawing();
+        }
+    });
     pattern->addAction(tr("Sizes, Measurements and Grade Rules…"), this, [this] {
         if (auto production = editGrading(this, doc_)) {
             if (opc::saveProduction(*production) == opc::saveProduction(doc_.production()))
@@ -431,6 +473,8 @@ void MainWindow::refreshObjects() {
         case opc::Shape::Circle: name = tr("Circle"); break;
         case opc::Shape::Curve: name = tr("Curve"); break;
         }
+        if (!entity.draftName.isEmpty())
+            name = tr("%1 (%2)").arg(name, entity.draftName);
         auto* item = new QTreeWidgetItem(objects_, {tr("%1 · %2").arg(index + 1).arg(name)});
         if (entity.piece >= 0)
             item->setText(2, doc_.pieces()[entity.piece].name);
@@ -680,6 +724,8 @@ void MainWindow::managePiece() {
 }
 
 void MainWindow::moveEntity(qsizetype index, const QPointF& offset) {
+    if (!doc_.entities()[index].draftName.isEmpty())
+        return;
     undo_.push(new MoveCommand(doc_, *view_, index, offset, tr("Move Object")));
 }
 
@@ -691,6 +737,12 @@ void MainWindow::deleteSelection() {
     auto selected = selectedObjects();
     if (selected.isEmpty())
         return;
+    if (std::ranges::any_of(selected, [this](qsizetype index) {
+            return !doc_.entities()[index].draftName.isEmpty();
+        })) {
+        statusBar()->showMessage(tr("To remove a formula-driven object, edit Pattern → Parametric Draft."), 5000);
+        return;
+    }
     std::sort(selected.begin(), selected.end(), std::greater<>());
     undo_.beginMacro(tr("Delete Objects"));
     for (const auto index : selected)

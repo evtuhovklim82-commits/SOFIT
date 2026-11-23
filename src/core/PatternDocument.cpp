@@ -5,6 +5,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QSet>
+#include <utility>
 #include <cmath>
 
 namespace opc {
@@ -32,15 +34,66 @@ QJsonArray coordinates(const Entity& entity) {
     }
     return result;
 }
+QJsonObject saveDraft(const ParametricDraft& draft) {
+    QJsonArray measurements, parameters, points, edges;
+    for (const auto& entry : draft.measurements)
+        measurements.append(QJsonObject{{"name", entry.name}, {"mm", entry.mm}});
+    for (const auto& entry : draft.parameters)
+        parameters.append(QJsonObject{{"name", entry.name}, {"formula", entry.formula}});
+    for (const auto& entry : draft.points)
+        points.append(QJsonObject{{"name", entry.name}, {"x", entry.x}, {"y", entry.y}});
+    for (const auto& entry : draft.edges)
+        edges.append(QJsonObject{{"name", entry.name}, {"start", entry.start}, {"end", entry.end},
+                                 {"control", entry.control}});
+    return {{"measurements", measurements}, {"parameters", parameters}, {"points", points}, {"edges", edges}};
+}
+
+bool loadDraft(const QJsonObject& data, ParametricDraft& draft) {
+    const auto measurements = data.value("measurements");
+    const auto parameters = data.value("parameters");
+    const auto points = data.value("points");
+    const auto edges = data.value("edges");
+    if (!measurements.isArray() || !parameters.isArray() || !points.isArray() || !edges.isArray())
+        return false;
+    for (const auto& value : measurements.toArray()) {
+        const auto row = value.toObject();
+        if (!row.value("name").isString() || !row.value("mm").isDouble())
+            return false;
+        draft.measurements.append({row.value("name").toString(), row.value("mm").toDouble()});
+    }
+    for (const auto& value : parameters.toArray()) {
+        const auto row = value.toObject();
+        if (!row.value("name").isString() || !row.value("formula").isString())
+            return false;
+        draft.parameters.append({row.value("name").toString(), row.value("formula").toString()});
+    }
+    for (const auto& value : points.toArray()) {
+        const auto row = value.toObject();
+        if (!row.value("name").isString() || !row.value("x").isString() || !row.value("y").isString())
+            return false;
+        draft.points.append({row.value("name").toString(), row.value("x").toString(), row.value("y").toString()});
+    }
+    for (const auto& value : edges.toArray()) {
+        const auto row = value.toObject();
+        if (!row.value("name").isString() || !row.value("start").isString()
+            || !row.value("end").isString() || !row.value("control").isString())
+            return false;
+        draft.edges.append({row.value("name").toString(), row.value("start").toString(),
+                            row.value("end").toString(), row.value("control").toString()});
+    }
+    return true;
+}
+
 }
 
 bool PatternDocument::save(const QString& path, QString* error) const {
     QJsonArray objects;
     for (const auto& entity : entities_) {
-        objects.append(QJsonObject{{"type", shapeName(entity.shape)},
-                                   {"coordinates", coordinates(entity)},
-                                   {"piece", entity.piece},
-                                   {"layer", entity.layer == Layer::Main ? "main" : "construction"}});
+        QJsonObject object{{"type", shapeName(entity.shape)}, {"coordinates", coordinates(entity)},
+                           {"piece", entity.piece}, {"layer", entity.layer == Layer::Main ? "main" : "construction"}};
+        if (!entity.draftName.isEmpty())
+            object.insert("draftName", entity.draftName);
+        objects.append(object);
     }
     QJsonArray pieces;
     for (const auto& piece : pieces_) {
@@ -57,9 +110,12 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     QJsonArray layerVisibility;
     for (bool visible : layerVisibility_)
         layerVisibility.append(visible);
-    const QJsonObject root{{"format", "SOFIT"}, {"version", 7}, {"objects", objects},
-                           {"pieces", pieces}, {"layerVisibility", layerVisibility},
-                           {"production", saveProduction(production_)}};
+    const bool parametric = draft_ != ParametricDraft{};
+    QJsonObject root{{"format", "SOFIT"}, {"version", parametric ? 8 : 7}, {"objects", objects},
+                     {"pieces", pieces}, {"layerVisibility", layerVisibility},
+                     {"production", saveProduction(production_)}};
+    if (parametric)
+        root.insert("parametricDraft", saveDraft(draft_));
     ProductionData validated;
     if (!loadProduction(root.value("production").toObject(), pieces_.size(), validated)) {
         if (error) *error = QStringLiteral("Invalid grading or fabric layout data");
@@ -90,7 +146,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto format = root.value("format").toString();
     const auto version = root.value("version").toDouble();
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
-    const bool current = (version == 2 || version == 3 || version == 4 || version == 5 || version == 6 || version == 7) && format == "SOFIT";
+    const bool current = (version == 2 || version == 3 || version == 4 || version == 5 || version == 6 || version == 7 || version == 8) && format == "SOFIT";
     const auto objects = root.value(legacy ? "segments" : "objects");
     if ((!legacy && !current) || !objects.isArray())
         return fail(QStringLiteral("Unsupported document format"));
@@ -144,6 +200,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
     }
 
     QVector<Entity> parsed;
+    QSet<QString> draftNames;
     for (const auto& object : objects.toArray()) {
         const auto fields = object.toObject();
         const auto type = fields.value("type").toString();
@@ -179,16 +236,41 @@ bool PatternDocument::load(const QString& path, QString* error) {
             entity.piece = static_cast<qsizetype>(piece);
             entity.layer = layer == "main" ? Layer::Main : Layer::Construction;
         }
+        if (version == 8 && fields.contains("draftName")) {
+            entity.draftName = fields.value("draftName").toString();
+            if (entity.draftName.isEmpty() || draftNames.contains(entity.draftName))
+                return fail(QStringLiteral("Invalid or duplicate parametric object name"));
+            draftNames.insert(entity.draftName);
+        }
         parsed.append(entity);
     }
     ProductionData production;
     if (version >= 6 && !loadProduction(root.value("production").toObject(), pieces.size(), production))
         return fail(QStringLiteral("Invalid grading or fabric layout data"));
 
-    production_ = std::move(production);
-    entities_ = std::move(parsed);
-    pieces_ = std::move(pieces);
-    layerVisibility_ = layerVisibility;
+    PatternDocument loaded;
+    loaded.production_ = std::move(production);
+    loaded.entities_ = std::move(parsed);
+    loaded.pieces_ = std::move(pieces);
+    loaded.layerVisibility_ = layerVisibility;
+    if (version == 8) {
+        ParametricDraft draft;
+        if (!loadDraft(root.value("parametricDraft").toObject(), draft))
+            return fail(QStringLiteral("Invalid parametric draft"));
+        QString draftError;
+        const auto storedObjects = loaded.entities_;
+        if (!loaded.setParametricDraft(std::move(draft), &draftError))
+            return fail(draftError);
+        if (loaded.entities_.size() != storedObjects.size())
+            return fail(QStringLiteral("Parametric object list does not match the draft"));
+        for (qsizetype i = 0; i < storedObjects.size(); ++i) {
+            const auto& stored = storedObjects[i];
+            const auto& generated = loaded.entities_[i];
+            if (stored.draftName != generated.draftName || stored.shape != generated.shape)
+                return fail(QStringLiteral("Parametric object list does not match the draft"));
+        }
+    }
+    *this = std::move(loaded);
     return true;
 }
 }

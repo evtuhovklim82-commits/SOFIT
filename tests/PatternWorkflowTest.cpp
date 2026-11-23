@@ -18,6 +18,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QPushButton>
+#include <QStringList>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QTreeWidget>
@@ -342,4 +343,69 @@ int main(int argc, char** argv) {
     check(tree.topLevelItemCount() == 5 && tree.topLevelItem(4)->text(3) == "Construction"
           && overlayCount(view) == 1 && !action(window, "Construction Lines").isChecked(),
           "Restore group, layers and derived geometry when opening a pattern");
+
+    MainWindow draftWindow;
+    draftWindow.show();
+    auto& draftTree = *draftWindow.findChild<QTreeWidget*>();
+    auto& draftView = *draftWindow.findChild<PatternView*>();
+    draftView.entityDrawn({opc::Shape::Line, {0, 10}, {100, 10}});
+    draftTree.topLevelItem(0)->setCheckState(1, Qt::Unchecked);
+    auto& editDraft = action(draftWindow, "Parametric Draft…");
+    runDialog<QDialog>(editDraft, [](QDialog& dialog) {
+        auto& tabs = *dialog.findChild<QTabWidget*>();
+        const auto append = [&](int tab, const QStringList& values) {
+            tabs.setCurrentIndex(tab);
+            auto* page = tabs.currentWidget();
+            for (auto* button : page->findChildren<QPushButton*>()) {
+                if (button->text() == "Add row")
+                    button->click();
+            }
+            auto* table = page->findChild<QTableWidget*>();
+            check(table->rowCount() > 0, "Add a row in the draft editor");
+            for (int col = 0; col < values.size(); ++col)
+                table->item(table->rowCount() - 1, col)->setText(values[col]);
+        };
+        append(0, {"chest", "400"});
+        append(1, {"ease", "10"});
+        append(2, {"A", "0", "0"});
+        append(2, {"B", "unknown / 4 + ease", "0"});
+        append(3, {"AB", "A", "B", {}});
+        auto* apply = dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save);
+        apply->click();
+        check(dialog.isVisible(), "Invalid formula keeps the editor open");
+        bool hasError = false;
+        for (const auto* label : dialog.findChildren<QLabel*>())
+            hasError |= label->isVisible() && label->text().contains("Unknown variable");
+        check(hasError, "Display the reason for an invalid formula");
+        tabs.widget(2)->findChild<QTableWidget*>()->item(1, 1)->setText("chest / 4 + ease");
+        apply->click();
+    });
+    check(draftTree.topLevelItemCount() == 4 && draftTree.topLevelItem(3)->text(0).contains("AB")
+          && draftTree.topLevelItem(0)->checkState(1) == Qt::Unchecked,
+          "Display generated geometry and preserve manual object visibility");
+
+    runDialog<QDialog>(editDraft, [](QDialog& dialog) {
+        auto* tabs = dialog.findChild<QTabWidget*>();
+        auto* table = tabs->widget(0)->findChild<QTableWidget*>();
+        check(table->item(0, 0)->text() == "chest", "Restore measurements in the editor");
+        table->item(0, 1)->setText("480");
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+    });
+    const auto draftFile = temp.filePath("draft.sofit");
+    chooseFile(action(draftWindow, "&Save"), draftFile);
+    check(loaded.load(draftFile) && loaded.entities().last().b == QPointF(130, 0),
+          "Update the generated line after editing a measurement through the UI");
+    action(draftWindow, "Undo Edit Parametric Draft").trigger();
+    action(draftWindow, "&Save").trigger();
+    check(loaded.load(draftFile) && loaded.entities().last().b == QPointF(110, 0)
+          && loaded.parametricDraft().measurements[0].mm == 400, "Undo restores the formula inputs and geometry");
+    action(draftWindow, "Redo Edit Parametric Draft").trigger();
+    action(draftWindow, "&Save").trigger();
+    check(loaded.load(draftFile) && loaded.entities().last().b == QPointF(130, 0),
+          "Redo restores the changed geometry");
+    action(draftWindow, "&New").trigger();
+    chooseFile(action(draftWindow, "&Open"), draftFile);
+    check(draftTree.topLevelItemCount() == 4 && draftTree.topLevelItem(3)->text(0).contains("AB"),
+          "Open a parametric project through the UI");
+
 }

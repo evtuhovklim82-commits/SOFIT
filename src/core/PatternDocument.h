@@ -5,6 +5,7 @@
 #include <array>
 #include <optional>
 #include "ProductionData.h"
+#include "ParametricDraft.h"
 
 namespace opc {
 enum class Shape { Point, Line, Rectangle, Circle, Curve };
@@ -28,6 +29,7 @@ struct Entity {
     QPointF control{};
     qsizetype piece = -1;
     Layer layer = Layer::Main;
+    QString draftName{};
 };
 
 class PatternDocument {
@@ -42,11 +44,14 @@ public:
     const ProductionData& production() const { return production_; }
     bool layerVisible(Layer layer) const { return layerVisibility_[static_cast<int>(layer)]; }
     void setLayerVisible(Layer layer, bool visible) { layerVisibility_[static_cast<int>(layer)] = visible; }
+    const ParametricDraft& parametricDraft() const { return draft_; }
+    bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
     bool save(const QString& path, QString* error = nullptr) const;
     bool load(const QString& path, QString* error = nullptr);
 
 private:
     ProductionData production_;
+    ParametricDraft draft_;
     QVector<Entity> entities_;
     QVector<Piece> pieces_;
     std::array<bool, 3> layerVisibility_{true, true, true};

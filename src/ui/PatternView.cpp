@@ -421,9 +421,12 @@ void PatternView::mousePressEvent(QMouseEvent* event) {
             for (auto* item : items(hit)) {
                 if (item->flags().testFlag(QGraphicsItem::ItemIsSelectable)) {
                     item->setSelected(true);
-                    dragPressPosition_ = event->pos();
-                    dragIndex_ = selectedIndex();
-                    dragStart_ = drawingPoint(cursorScenePosition_);
+                    const auto index = selectedIndex();
+                    if (index >= 0 && entities_[index].draftName.isEmpty()) {
+                        dragPressPosition_ = event->pos();
+                        dragIndex_ = index;
+                        dragStart_ = drawingPoint(cursorScenePosition_);
+                    }
                     break;
                 }
             }
