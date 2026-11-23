@@ -6,6 +6,8 @@ set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 
 add_library(sofit_core STATIC
+    src/core/EntityPath.cpp
+    src/core/PatternPdf.cpp
     src/core/PatternDocument.cpp
     src/core/PatternDocument.h
     src/core/PieceGeometry.cpp

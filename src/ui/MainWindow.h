@@ -28,6 +28,7 @@ private:
     void refreshObjects();
     void moveEntity(qsizetype index, const QPointF& offset);
     void exportSvg();
+    void exportPdf();
     void createPiece();
     void assignPiece();
     void managePiece();

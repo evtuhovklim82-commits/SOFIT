@@ -1,3 +1,4 @@
+#include "EntityPath.h"
 #include "PatternView.h"
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
@@ -15,34 +16,10 @@ const QColor constructionColor(161, 173, 200);
 const QColor allowanceColor(255, 185, 104);
 const QRectF initialBounds(-500, -350, 1000, 700);
 
-QPainterPath entityPath(const opc::Entity& entity) {
-    QPainterPath path;
-    switch (entity.shape) {
-    case opc::Shape::Point:
-        path.addEllipse(QPointF(), 3, 3);
-        break;
-    case opc::Shape::Line:
-        if (entity.a.x() == entity.b.x() && entity.a.y() == entity.b.y())
-            path.addEllipse(entity.a, 0.25, 0.25);
-        else {
-            path.moveTo(entity.a);
-            path.lineTo(entity.b);
-        }
-        break;
-    case opc::Shape::Rectangle:
-        path.addRect(QRectF(entity.a, entity.b).normalized());
-        break;
-    case opc::Shape::Circle: {
-        const qreal radius = QLineF(entity.a, entity.b).length();
-        path.addEllipse(entity.a, radius, radius);
-        break;
-    }
-    case opc::Shape::Curve:
-        path.moveTo(entity.a);
-        path.quadTo(entity.control, entity.b);
-        break;
-    }
-    return path;
+QPainterPath viewEntityPath(opc::Entity entity) {
+    if (entity.shape == opc::Shape::Point)
+        entity.a = {};
+    return opc::entityPath(entity);
 }
 }
 
@@ -236,7 +213,7 @@ void PatternView::cancelDrawing() {
 
 void PatternView::updatePreview() {
     if (preview_) {
-        preview_->setPath(entityPath(draftEntity(drawingPoint(cursorScenePosition_))));
+        preview_->setPath(viewEntityPath(draftEntity(drawingPoint(cursorScenePosition_))));
     }
 }
 
@@ -266,7 +243,7 @@ void PatternView::setEntities(const QVector<opc::Entity>& entities) {
 }
 
 void PatternView::insertEntity(qsizetype index, const opc::Entity& entity) {
-    auto* item = scene()->addPath(entityPath(entity));
+    auto* item = scene()->addPath(viewEntityPath(entity));
     item->setFlag(QGraphicsItem::ItemIsSelectable);
     if (entity.shape == opc::Shape::Point) {
         item->setPos(entity.a);
@@ -291,7 +268,7 @@ void PatternView::replaceEntity(qsizetype index, const opc::Entity& entity) {
     const bool selected = items_[index]->isSelected();
     auto* item = items_[index];
     entities_[index] = entity;
-    item->setPath(entityPath(entity));
+    item->setPath(viewEntityPath(entity));
     item->setPos(entity.shape == opc::Shape::Point ? entity.a : QPointF());
     updateEntityStyle(index);
     item->setSelected(selected && item->isVisible());

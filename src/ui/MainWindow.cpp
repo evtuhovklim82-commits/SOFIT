@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "PatternView.h"
+#include "PatternPdf.h"
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
@@ -158,6 +159,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     file->addAction(tr("&Open"), QKeySequence::Open, this, &MainWindow::openDocument);
     file->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::saveDocument);
     file->addAction(tr("Export &SVG"), this, &MainWindow::exportSvg);
+    file->addAction(tr("Export &PDF for Printing…"), this, &MainWindow::exportPdf);
 
     auto* edit = menuBar()->addMenu(tr("&Edit"));
     auto* undoAction = undo_.createUndoAction(this, tr("Undo"));
@@ -708,6 +710,54 @@ bool MainWindow::saveDocument() {
     setWindowFilePath(path);
     undo_.setClean();
     return true;
+}
+
+void MainWindow::exportPdf() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Export PDF for Printing"));
+    QFormLayout form(&dialog);
+    QComboBox paper;
+    paper.addItem(QStringLiteral("A4"), QPageSize::A4);
+    paper.addItem(QStringLiteral("A3"), QPageSize::A3);
+    form.addRow(tr("Paper"), &paper);
+    QComboBox orientation;
+    orientation.addItem(tr("Portrait"), QPageLayout::Portrait);
+    orientation.addItem(tr("Landscape"), QPageLayout::Landscape);
+    form.addRow(tr("Orientation"), &orientation);
+    QLabel instructions(tr("Print at actual size (100%). Large drawings span multiple sheets with 10 mm overlap."));
+    instructions.setWordWrap(true);
+    form.addRow(&instructions);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    auto path = QFileDialog::getSaveFileName(this, tr("Export PDF for Printing"), {}, tr("PDF (*.pdf)"));
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(".pdf", Qt::CaseInsensitive))
+        path += ".pdf";
+
+    QVector<bool> visibility;
+    visibility.reserve(doc_.entities().size());
+    for (qsizetype i = 0; i < doc_.entities().size(); ++i)
+        visibility.append(view_->entityVisible(i));
+    QVector<QPolygonF> allowances;
+    allowances.reserve(pieces_.size());
+    for (const auto& geometry : pieces_)
+        allowances.append(geometry.allowance);
+
+    const opc::PatternPdfOptions options{
+        static_cast<QPageSize::PageSizeId>(paper.currentData().toInt()),
+        static_cast<QPageLayout::Orientation>(orientation.currentData().toInt())
+    };
+    QString error;
+    if (!opc::exportPatternPdf(path, doc_, visibility, allowances, options, error))
+        QMessageBox::warning(this, tr("Export failed"), error);
+    else
+        statusBar()->showMessage(tr("PDF exported"), 3000);
 }
 
 void MainWindow::exportSvg() {

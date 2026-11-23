@@ -1,0 +1,200 @@
+#include "PatternPdf.h"
+#include "EntityPath.h"
+
+#include <QCoreApplication>
+#include <QPainter>
+#include <QPdfWriter>
+#include <QSaveFile>
+#include <algorithm>
+#include <cmath>
+
+namespace {
+constexpr double marginMm = 10;
+constexpr double footerMm = 18;
+constexpr double overlapMm = 10;
+constexpr double paddingMm = 2;
+constexpr int dpi = 254;
+constexpr double pixelsPerMm = dpi / 25.4;
+constexpr int maxPages = 200;
+
+QString tr(const char* text) {
+    return QCoreApplication::translate("PatternPdf", text);
+}
+
+struct Stroke {
+    QPainterPath path;
+    QRectF bounds;
+    opc::Layer layer;
+    bool filled = false;
+};
+
+double tileCount(double length, double span) {
+    return 1 + std::ceil(std::max(0.0, length - span) / (span - overlapMm));
+}
+
+void drawRegistration(QPainter& painter, const QRectF& frame, int row, int column,
+                      int rows, int columns) {
+    QPen pen(Qt::black, 0.18);
+    pen.setStyle(Qt::DashLine);
+    painter.setPen(pen);
+    painter.drawRect(frame);
+    pen.setStyle(Qt::SolidLine);
+    painter.setPen(pen);
+    const auto cross = [&painter](QPointF center) {
+        const QPointF horizontal(2, 0);
+        const QPointF vertical(0, 2);
+        painter.drawLine(center - horizontal, center + horizontal);
+        painter.drawLine(center - vertical, center + vertical);
+    };
+    const double halfOverlap = overlapMm / 2;
+    if (column > 0)
+        cross({frame.left() + halfOverlap, frame.center().y()});
+    if (column + 1 < columns)
+        cross({frame.right() - halfOverlap, frame.center().y()});
+    if (row > 0)
+        cross({frame.center().x(), frame.top() + halfOverlap});
+    if (row + 1 < rows)
+        cross({frame.center().x(), frame.bottom() - halfOverlap});
+}
+
+void drawFooter(QPainter& painter, const QRectF& frame, int row, int column,
+                int rows, int columns) {
+    const double left = frame.left();
+    const double top = frame.bottom();
+    QFont font = painter.font();
+    font.setPixelSize(int(3 * pixelsPerMm));
+    painter.save();
+    // Use an integer font size in device pixels, then keep placement in mm.
+    painter.scale(1 / pixelsPerMm, 1 / pixelsPerMm);
+    painter.setFont(font);
+    painter.drawText(QPointF(left + 60, top + 7) * pixelsPerMm,
+                     tr("Row %1/%2, column %3/%4").arg(row + 1).arg(rows).arg(column + 1).arg(columns));
+    painter.drawText(QPointF(left + 60, top + 12) * pixelsPerMm,
+                     tr("Actual size (100%)  |  10 mm overlap"));
+    painter.drawText(QPointF(left, top + 12) * pixelsPerMm, tr("50 mm"));
+    painter.restore();
+    painter.drawLine(QLineF(left, top + 6, left + 50, top + 6));
+    painter.drawLine(QLineF(left, top + 4, left, top + 8));
+    painter.drawLine(QLineF(left + 50, top + 4, left + 50, top + 8));
+}
+}
+
+namespace opc {
+bool exportPatternPdf(const QString& path, const PatternDocument& document,
+                      const QVector<bool>& objectVisibility,
+                      const QVector<QPolygonF>& allowances,
+                      const PatternPdfOptions& options, QString& error) {
+    error.clear();
+    if (objectVisibility.size() != document.entities().size()) {
+        error = tr("Object visibility does not match the drawing.");
+        return false;
+    }
+
+    QVector<Stroke> strokes;
+    QRectF bounds;
+    const auto append = [&strokes, &bounds](QPainterPath outline, Layer layer, bool filled = false) {
+        if (outline.isEmpty())
+            return;
+        const auto extent = outline.boundingRect().adjusted(-paddingMm, -paddingMm, paddingMm, paddingMm);
+        bounds = bounds.united(extent);
+        strokes.append({std::move(outline), extent, layer, filled});
+    };
+    for (qsizetype i = 0; i < document.entities().size(); ++i) {
+        const auto& entity = document.entities()[i];
+        if (objectVisibility[i] && document.layerVisible(entity.layer))
+            append(entityPath(entity), entity.layer, entity.shape == Shape::Point);
+    }
+    if (document.layerVisible(Layer::Allowance)) {
+        for (const auto& polygon : allowances) {
+            if (polygon.isEmpty())
+                continue;
+            QPainterPath outline;
+            outline.addPolygon(polygon);
+            outline.closeSubpath();
+            append(std::move(outline), Layer::Allowance);
+        }
+    }
+    if (strokes.isEmpty()) {
+        error = tr("There is no visible geometry to export.");
+        return false;
+    }
+
+    QPageLayout layout(QPageSize(options.paper), options.orientation, QMarginsF(), QPageLayout::Millimeter);
+    layout.setMode(QPageLayout::FullPageMode);
+    const QSizeF paper = layout.fullRect(QPageLayout::Millimeter).size();
+    const QRectF frame(marginMm, marginMm,
+                       paper.width() - 2 * marginMm, paper.height() - 2 * marginMm - footerMm);
+    if (!layout.isValid() || frame.width() <= overlapMm || frame.height() <= overlapMm) {
+        error = tr("The selected paper size cannot fit the print area.");
+        return false;
+    }
+
+    const double columnCount = tileCount(bounds.width(), frame.width());
+    const double rowCount = tileCount(bounds.height(), frame.height());
+    if (!std::isfinite(bounds.left()) || !std::isfinite(bounds.top()) ||
+        !std::isfinite(columnCount * rowCount) || columnCount * rowCount > maxPages) {
+        error = tr("The drawing exceeds the PDF export limit of %1 pages.").arg(maxPages);
+        return false;
+    }
+    const int columns = int(columnCount);
+    const int rows = int(rowCount);
+
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        error = file.errorString();
+        return false;
+    }
+    {
+        QPdfWriter writer(&file);
+        writer.setCreator(QStringLiteral("SOFIT"));
+        writer.setResolution(dpi);
+        QPainter painter;
+        if (!writer.setPageLayout(layout) || !painter.begin(&writer)) {
+            error = tr("Could not start PDF export.");
+            return false;
+        }
+
+        for (int row = 0; row < rows; ++row) {
+            for (int column = 0; column < columns; ++column) {
+                if ((row != 0 || column != 0) && !writer.newPage()) {
+                    error = tr("Could not add a PDF page.");
+                    return false;
+                }
+                const QPointF origin = bounds.topLeft() +
+                    QPointF(column * (frame.width() - overlapMm), row * (frame.height() - overlapMm));
+                painter.save();
+                painter.scale(pixelsPerMm, pixelsPerMm);
+                painter.save();
+                painter.setClipRect(frame);
+                painter.translate(frame.topLeft() - origin);
+                const QRectF tile(origin, frame.size());
+                for (const auto& stroke : strokes) {
+                    if (!tile.intersects(stroke.bounds))
+                        continue;
+                    Qt::PenStyle style = Qt::SolidLine;
+                    if (stroke.layer == Layer::Construction)
+                        style = Qt::DotLine;
+                    if (stroke.layer == Layer::Allowance)
+                        style = Qt::DashLine;
+                    painter.setPen(QPen(Qt::black, 0.28, style));
+                    painter.setBrush(stroke.filled ? QBrush(Qt::black) : QBrush(Qt::NoBrush));
+                    painter.drawPath(stroke.path);
+                }
+                painter.restore();
+                drawRegistration(painter, frame, row, column, rows, columns);
+                drawFooter(painter, frame, row, column, rows, columns);
+                painter.restore();
+            }
+        }
+        if (!painter.end()) {
+            error = tr("Could not finish the PDF.");
+            return false;
+        }
+    }
+    if (file.error() != QFileDevice::NoError || !file.commit()) {
+        error = file.errorString();
+        return false;
+    }
+    return true;
+}
+}

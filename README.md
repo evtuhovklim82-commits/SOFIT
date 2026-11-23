@@ -57,6 +57,21 @@ A piece has a single allowance width. Straight sections are offset by that dista
 
 SOFIT 4 saves piece names, membership, layer assignments, layer visibility and allowance widths. Contours, measurements and allowance geometry are rebuilt on load. Individual object visibility is a session setting.
 
+## Full-scale printing
+
+Choose **File → Export PDF for Printing…** and select A4 or A3 in portrait or landscape.
+The PDF uses the drawing's millimeter coordinates at 1:1. It includes visible objects and
+allowances enabled in **View → Layers**. Main lines are solid, construction lines are
+dotted, and seam allowances are dashed.
+
+Print at **Actual size (100%)** with fit-to-page disabled. Measure the 50 mm scale on
+a printed sheet before assembling the pattern. Large drawings span numbered rows and
+columns with 10 mm overlap. Match the crosses and overlapping drawing lines on
+adjacent sheets. The dashed frames mark each sheet's drawing area.
+
+PDF export tiles the drawing as arranged on the canvas. It supports up to 200 sheets
+with fixed margins and overlap.
+
 ## Tests
 
 ```bash
