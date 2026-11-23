@@ -42,6 +42,8 @@
 #include <QMessageBox>
 #include <QPainterPath>
 #include <QSaveFile>
+#include <QSettings>
+#include <QFileInfo>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QXmlStreamWriter>
@@ -275,11 +277,20 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     objects_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     objects_->setRootIsDecorated(false);
     objects_->setAlternatingRowColors(true);
-    dock->setWidget(objects_);
+    auto* objectPanel = new QWidget(dock);
+    auto* objectLayout = new QVBoxLayout(objectPanel);
+    objectLayout->addWidget(objects_);
+    selectionProperties_ = new QLabel(objectPanel);
+    selectionProperties_->setTextFormat(Qt::PlainText);
+    selectionProperties_->setWordWrap(true);
+    selectionProperties_->setObjectName(QStringLiteral("selectionProperties"));
+    objectLayout->addWidget(selectionProperties_);
+    dock->setWidget(objectPanel);
     addDockWidget(Qt::RightDockWidgetArea, dock);
     connect(objects_, &QTreeWidget::itemSelectionChanged, this, [this] {
         const QSignalBlocker blocker(objects_);
         view_->selectEntities(selectedObjects());
+        refreshSelectionProperties();
     });
     connect(objects_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
         if (column == 1) {
@@ -299,6 +310,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         }
         if (selected.size() == 1 && selected.first() < objects_->topLevelItemCount())
             objects_->scrollToItem(objects_->topLevelItem(selected.first()));
+        refreshSelectionProperties();
     });
     connect(&undo_, &QUndoStack::indexChanged, this, &MainWindow::refreshObjects);
 
@@ -306,6 +318,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     auto* newAction = file->addAction(tr("&New"), QKeySequence::New, this, &MainWindow::newDocument);
     auto* openAction = file->addAction(tr("&Open"), QKeySequence::Open, this, &MainWindow::openDocument);
     auto* saveAction = file->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::saveDocument);
+    file->addAction(tr("Save &As…"), QKeySequence::SaveAs, this, &MainWindow::saveDocumentAs);
     file->addAction(tr("Export &SVG"), this, &MainWindow::exportSvg);
     file->addAction(tr("Export &DXF…"), this, &MainWindow::exportDxf);
     file->addAction(tr("Export &PDF for Printing…"), this, &MainWindow::exportPdf);
@@ -318,13 +331,18 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     redoAction->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Y),
                               QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z)});
     edit->addAction(redoAction);
-    edit->addAction(tr("Edit Geometry…"), this, &MainWindow::editSelectedGeometry);
+    auto* editGeometry = edit->addAction(tr("Edit Geometry…"), this, &MainWindow::editSelectedGeometry);
+    editGeometry->setShortcut(QKeySequence(Qt::Key_F2));
+    connect(view_, &PatternView::geometryEditRequested, this, &MainWindow::editSelectedGeometry);
     auto* deleteAction = edit->addAction(tr("Delete Selection"), QKeySequence(Qt::Key_Delete),
                                          this, &MainWindow::deleteSelection);
     deleteAction->setEnabled(false);
-    const auto updateDelete = [this, deleteAction] {
-        deleteAction->setEnabled(!objects_->selectedItems().isEmpty());
+    const auto updateDelete = [this, deleteAction, editGeometry] {
+        const auto selected = selectedObjects();
+        deleteAction->setEnabled(!selected.isEmpty());
+        editGeometry->setEnabled(selected.size() == 1 && canEditGeometry(selected.front()));
     };
+    updateDelete();
     connect(objects_, &QTreeWidget::itemSelectionChanged, this, updateDelete);
     connect(&scene_, &QGraphicsScene::selectionChanged, this, updateDelete);
     connect(&undo_, &QUndoStack::indexChanged, this, updateDelete);
@@ -557,7 +575,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
 
     auto* toolbar = new QToolBar(tr("Drawing Tools"), this);
     addToolBar(Qt::LeftToolBarArea, toolbar);
-    toolbar->setMovable(false);
+    toolbar->setObjectName(QStringLiteral("drawingTools"));
+    viewMenu->addAction(toolbar->toggleViewAction());
     toolbar->setAllowedAreas(Qt::LeftToolBarArea | Qt::RightToolBarArea);
     auto* tools = new QActionGroup(this);
     const auto addTool = [this, toolbar, tools](const QString& text, PatternView::Tool tool, const QString& hint) {
@@ -584,7 +603,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     drawing->addActions(toolbar->actions());
 
     auto* projectToolbar = addToolBar(tr("Project and View"));
-    projectToolbar->setMovable(false);
+    projectToolbar->setObjectName(QStringLiteral("projectAndView"));
+    viewMenu->addAction(projectToolbar->toggleViewAction());
     projectToolbar->addActions({newAction, openAction, saveAction});
     projectToolbar->addSeparator();
     projectToolbar->addAction(undoAction);
@@ -600,8 +620,33 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     installWorkflow(*this, {construction, modeling, grading, pieces, layout}, *viewMenu, {
         {"template", templateAction}, {"draft", draftAction}, {"spread", spreadAction},
         {"sizes", sizesAction}, {"createPiece", createPieceAction}, {"allowance", allowanceAction},
-        {"layout", layoutAction}, {"exactInput", exactAction}, {"fit", fitAction}
+        {"layout", layoutAction}, {"exactInput", exactAction}, {"fit", fitAction},
+        {"editGeometry", editGeometry}
     });
+    connect(view_, &PatternView::selectionMenuRequested, this,
+            [this, editGeometry, deleteAction, fitAction](const QPoint& position) {
+        QMenu context(this);
+        context.addActions({editGeometry, deleteAction, fitAction});
+        context.exec(position);
+    });
+    const auto defaultWorkspace = saveState(1);
+    viewMenu->addAction(tr("Reset Panel Layout"), this, [this, defaultWorkspace] {
+        restoreState(defaultWorkspace, 1);
+        if (auto* workflow = findChild<QToolBar*>(QStringLiteral("workflowToolbar")))
+            workflow->show();
+        QSettings().setValue(QStringLiteral("workflow/showToolbar"), true);
+        if (modelingDock_) {
+            modelingDock_->setFloating(false);
+            addDockWidget(Qt::RightDockWidgetArea, modelingDock_);
+            modelingDock_->hide();
+        }
+    });
+    const QSettings settings;
+    restoreGeometry(settings.value(QStringLiteral("workspace/geometry")).toByteArray());
+    restoreState(settings.value(QStringLiteral("workspace/layout")).toByteArray(), 1);
+    if (settings.value(QStringLiteral("workspace/showConstructionTree"), false).toBool())
+        showModelingHistory();
+    refreshSelectionProperties();
     connect(view_, &PatternView::entityDrawn, this, &MainWindow::addEntity);
     connect(view_, &PatternView::dartDrawn, this, [this](const opc::Entity& first, const opc::Entity& second) {
         undo_.beginMacro(tr("Draw Dart"));
@@ -637,7 +682,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
     connect(view_, &PatternView::cursorLeftCanvas, coordinates,
             [coordinates, emptyCoordinates] { coordinates->setText(emptyCoordinates); });
-    statusBar()->showMessage(tr("Wheel: zoom | Middle drag: pan | Right click or Esc: cancel"));
+    statusBar()->showMessage(tr("Wheel: zoom | Middle drag: pan | Drag empty space: select area | Ctrl: extend selection"));
 }
 
 void MainWindow::refreshPieceDisplay() {
@@ -720,6 +765,51 @@ void MainWindow::refreshObjects() {
         if (selected.contains(index))
             item->setSelected(true);
     }
+    refreshSelectionProperties();
+}
+
+void MainWindow::refreshSelectionProperties() {
+    const auto selected = selectedObjects();
+    if (selected.size() != 1) {
+        selectionProperties_->setText(selected.isEmpty() ? tr("No objects selected")
+                                                         : tr("%1 objects selected").arg(selected.size()));
+        return;
+    }
+    const auto index = selected.front();
+    if (index >= doc_.entities().size())
+        return;
+    const auto& entity = doc_.entities()[index];
+    const auto* row = objects_->topLevelItem(index);
+    const QLocale locale;
+    const auto coordinates = [&locale](const QPointF& point) {
+        return tr("X %1 mm, Y %2 mm").arg(locale.toString(point.x(), 'f', 2),
+                                         locale.toString(point.y(), 'f', 2));
+    };
+    QStringList lines{row->text(0), tr("Layer: %1").arg(row->text(3))};
+    if (!row->text(2).isEmpty())
+        lines.append(tr("Piece: %1").arg(row->text(2)));
+    lines.append(tr("Start: %1").arg(coordinates(entity.a)));
+    if (entity.shape == opc::Shape::Circle)
+        lines.append(tr("Radius: %1 mm").arg(locale.toString(QLineF(entity.a, entity.b).length(), 'f', 2)));
+    else if (entity.shape != opc::Shape::Point)
+        lines.append(tr("End: %1").arg(coordinates(entity.b)));
+    if (entity.shape == opc::Shape::Curve)
+        lines.append(tr("Control: %1").arg(coordinates(entity.control)));
+    if (canEditGeometry(index))
+        lines.append(tr("Double-click to edit geometry"));
+    selectionProperties_->setText(lines.join(QLatin1Char('\n')));
+}
+
+bool MainWindow::canEditGeometry(qsizetype index) const {
+    if (index < 0 || index >= doc_.entities().size())
+        return false;
+    const auto& entity = doc_.entities()[index];
+    return entity.draftName.isEmpty()
+        && (entity.shape == opc::Shape::Point || entity.shape == opc::Shape::Line
+            || entity.shape == opc::Shape::Curve)
+        && (entity.piece < 0 || std::ranges::none_of(doc_.production().rules, [&entity](const auto& rule) {
+            return rule.piece == entity.piece;
+        }));
 }
 
 QVector<qsizetype> MainWindow::selectedObjects() const {
@@ -1387,14 +1477,20 @@ void MainWindow::managePiece() {
 }
 
 void MainWindow::moveEntity(qsizetype index, const QPointF& offset) {
-    if (!doc_.entities()[index].draftName.isEmpty())
+    if (!canModelEdge(doc_.entities()[index]))
         return;
     auto moved = doc_.entities()[index];
     moved.a += offset;
     moved.b += offset;
     if (moved.shape == opc::Shape::Curve)
         moved.control += offset;
-    undo_.push(new ReplaceEntityCommand(doc_, *view_, index, moved, tr("Move Object")));
+    if (!doc_.modelingHistory().isEmpty() || !doc_.seamLinks().isEmpty()) {
+        auto updated = doc_;
+        updated.replace(index, moved);
+        applyPatternEdit(std::move(updated), tr("Move Object"), true);
+    } else {
+        undo_.push(new ReplaceEntityCommand(doc_, *view_, index, moved, tr("Move Object")));
+    }
 }
 
 void MainWindow::addEntity(const opc::Entity& entity) {
@@ -1577,6 +1673,7 @@ void MainWindow::shapeSilhouette() {
 void MainWindow::showModelingHistory() {
     if (!modelingDock_) {
         modelingDock_ = new QDockWidget(tr("Construction Tree"), this);
+        modelingDock_->setObjectName(QStringLiteral("constructionTree"));
         auto* panel = new QWidget(modelingDock_);
         auto* layout = new QVBoxLayout(panel);
         modelingTree_ = new QTreeWidget(panel);
@@ -1591,7 +1688,8 @@ void MainWindow::showModelingHistory() {
         layout->addWidget(modelingError_);
         layout->addWidget(removeModelingStep_);
         modelingDock_->setWidget(panel);
-        addDockWidget(Qt::RightDockWidgetArea, modelingDock_);
+        if (!restoreDockWidget(modelingDock_))
+            addDockWidget(Qt::RightDockWidgetArea, modelingDock_);
         connect(modelingTree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem* item) {
             const auto pair = item->data(0, Qt::UserRole).toList();
             if (pair.size() == 2)
@@ -2192,7 +2290,15 @@ bool MainWindow::confirmDiscard() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    event->setAccepted(confirmDiscard());
+    const bool closing = confirmDiscard();
+    event->setAccepted(closing);
+    if (closing) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("workspace/geometry"), saveGeometry());
+        settings.setValue(QStringLiteral("workspace/layout"), saveState(1));
+        settings.setValue(QStringLiteral("workspace/showConstructionTree"),
+                          modelingDock_ && !modelingDock_->isHidden());
+    }
 }
 
 void MainWindow::replaceDocument(opc::PatternDocument document, const QString& path) {
@@ -2218,24 +2324,40 @@ void MainWindow::openDocument() {
                                                   tr("Patterns (*.sofit *.opcad);;All files (*)"));
     if (path.isEmpty())
         return;
-    opc::PatternDocument document;
     QString error;
-    if (!document.load(path, &error)) {
+    if (!openProject(path, &error))
         QMessageBox::warning(this, tr("Open failed"), error);
-        return;
-    }
-    replaceDocument(std::move(document), path);
+}
+
+bool MainWindow::openProject(const QString& path, QString* error) {
+    opc::PatternDocument document;
+    if (!document.load(path, error))
+        return false;
+    replaceDocument(std::move(document), QFileInfo(path).absoluteFilePath());
+    return true;
 }
 
 bool MainWindow::saveDocument() {
-    QString path = currentPath_;
+    if (currentPath_.endsWith(".sofit", Qt::CaseInsensitive))
+        return saveProject(currentPath_);
+    return saveDocumentAs();
+}
+
+bool MainWindow::saveDocumentAs() {
+    auto path = QFileDialog::getSaveFileName(this, tr("Save pattern"), currentPath_, tr("SOFIT (*.sofit)"));
+    if (path.isEmpty())
+        return false;
     if (!path.endsWith(".sofit", Qt::CaseInsensitive)) {
-        path = QFileDialog::getSaveFileName(this, tr("Save pattern"), path, tr("SOFIT (*.sofit)"));
-        if (path.isEmpty())
+        path += ".sofit";
+        if (QFileInfo::exists(path)
+            && QMessageBox::question(this, tr("Replace pattern"),
+                tr("Replace the existing file %1?").arg(QFileInfo(path).fileName())) != QMessageBox::Yes)
             return false;
-        if (!path.endsWith(".sofit", Qt::CaseInsensitive))
-            path += ".sofit";
     }
+    return saveProject(path);
+}
+
+bool MainWindow::saveProject(const QString& path) {
     QString error;
     if (!doc_.save(path, &error)) {
         QMessageBox::warning(this, tr("Save failed"), error);

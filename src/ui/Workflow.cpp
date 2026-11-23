@@ -79,7 +79,10 @@ void showGuide(QMainWindow& window) {
         "<tr><td>Prepare an outline and seam allowance</td><td><a href='https://help.grafis.de/en-gb/Content/Verarbeitung/Der_Teile-Assistent.htm'>Part assistant</a></td>"
         "<td>Pieces → Create Piece from Selection…, then Piece, Contour and Allowance…</td></tr>"
         "<tr><td>Place pieces on fabric</td><td><a href='https://www.grafis.com/marker'>Marker making</a></td>"
-        "<td>Layout → Fabric Layout…; set fabric width, add copies by piece and size, and place them manually.</td></tr>");
+        "<td>Layout → Fabric Layout…; set fabric width, add copies by piece and size, and place them manually.</td></tr>"
+        "<tr><td>Exchange a single size</td><td><a href='https://help.grafis.de/en-gb/Content/ExportIImport/Import_von_Sprungwertschnitten.htm'>Import as AutoCAD DXF</a></td>"
+        "<td>File → Export DXF…; choose the size, then check a known dimension and contours in GRAFIS. "
+        "Keep the SOFIT project for editing. SOFIT currently exports DXF and PDF.</td></tr>");
     const auto footer = tr("</tbody></table><p>Exact GRAFIS keystrokes and click-by-click sequences "
                            "require verification with an experienced GRAFIS 26 operator.</p>");
     guide->setHtml(header + content + footer);

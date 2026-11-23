@@ -1,11 +1,25 @@
-# SOFIT 2.3 Professional
+# SOFIT 2.4 Windows Professional
 
-Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
+Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native Linux build remains available.
 
 ## Windows .exe via GitHub Actions
 1. In the SOFIT repository, open **Actions → Windows portable build → Run workflow**.
 2. After completion, download the `SOFIT-Windows-x64` artifact and unpack the ZIP inside it.
-3. Run `SOFIT.exe` on Windows. Qt runtime DLLs and plugins are included by `windeployqt`.
+3. Run `SOFIT.exe` on Windows. Keep it alongside the bundled Qt DLLs, platform plugins and `examples` folder.
+4. Open a bundled example from **File → Open**, or pass a quoted project path to `SOFIT.exe`. **Save As** makes an editable copy at a new location.
+
+### Canvas and workspace
+
+- Drag from empty space left to right to select objects fully enclosed by the rectangle. Drag right to left to select intersecting objects. Hold **Ctrl** to add the rectangle results or toggle an individual object.
+- Right-click an object in Select mode for geometry editing, deletion and Fit Drawing. A right-click on a selected object preserves the current selection. In drawing tools it cancels the active drawing.
+- Inspect the selection in **Drawing Objects**. Double-click a free point, line or curve, or use **F2**, to open exact geometry editing. Change the shortcut under **View → Keyboard Shortcuts**.
+- Move or hide toolbars and panels, then close SOFIT to save the workspace. **View → Reset Panel Layout** restores the default arrangement.
+
+### Exchange with GRAFIS
+
+Use `.sofit` as the editable SOFIT master. For SOFIT → GRAFIS, export the required size from **File → Export DXF** and use the **AutoCAD DXF** option in a new GRAFIS style. Check a known dimension and inspect contours and markings after import. GRAFIS documents that DXF without RUL enters the first size. [GRAFIS DXF import](https://help.grafis.de/en-gb/Content/ExportIImport/Import_von_Sprungwertschnitten.htm)
+
+For GRAFIS → SOFIT, retain the original GRAFIS model and export production pieces for the required sizes. SOFIT 2.4 can export DXF. Import of DXF and AAMA/ASTM grading rules into SOFIT remains pending. Use PDF for printing and review. Print at actual size and measure the calibration mark. [GRAFIS export steps](https://help.grafis.de/en-gb/Content/ExportIImport/Schrittfolge_fuer_den_Export.htm)
 
 The workflow uses Qt 6.8.3 and MSVC 2022 x64 and runs CTest before packaging. The executable also requires the Microsoft Visual C++ x64 runtime.
 

@@ -9,6 +9,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QRegularExpression>
@@ -104,6 +105,94 @@ int overlayCount(const PatternView& view) {
             ++count;
     }
     return count;
+}
+
+void testCanvasAndWorkspace() {
+    MainWindow window;
+    window.show();
+    QApplication::processEvents();
+    auto& view = *window.findChild<PatternView*>();
+    auto& tree = *window.findChild<QTreeWidget*>();
+    auto* properties = window.findChild<QLabel*>("selectionProperties");
+    view.entityDrawn({opc::Shape::Line, {0, 0}, {100, 0}});
+    view.entityDrawn({opc::Shape::Line, {0, 40}, {100, 40}});
+    view.entityDrawn({opc::Shape::Line, {0, 20}, {100, 20}});
+    tree.topLevelItem(2)->setCheckState(1, Qt::Unchecked);
+    view.fitDrawing();
+    const auto mouse = [&view](QEvent::Type type, QPointF position,
+                               Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+        const QPoint local = view.mapFromScene(position);
+        const auto button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
+        const auto buttons = type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton;
+        QMouseEvent event(type, local, view.viewport()->mapToGlobal(local), button, buttons, modifiers);
+        QApplication::sendEvent(view.viewport(), &event);
+    };
+    const auto marquee = [&mouse](QPointF from, QPointF to, Qt::KeyboardModifiers modifiers = Qt::NoModifier) {
+        mouse(QEvent::MouseButtonPress, from, modifiers);
+        mouse(QEvent::MouseMove, to, modifiers);
+        mouse(QEvent::MouseButtonRelease, to, modifiers);
+    };
+    marquee({30, -10}, {70, 55});
+    check(tree.selectedItems().isEmpty(), "Left-to-right marquee requires the entire object");
+    marquee({70, 55}, {30, -10});
+    check(tree.selectedItems().size() == 2 && !tree.topLevelItem(2)->isSelected()
+          && properties->text().contains("2 objects selected"), "Crossing marquee excludes hidden objects");
+    const QPoint contextPosition = view.mapFromScene({50, 40});
+    QTimer::singleShot(0, [&] {
+        auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        check(menu && menu->actions().size() == 3 && tree.selectedItems().size() == 2,
+              "Context menu on a selected edge preserves the multiple selection");
+        menu->close();
+    });
+    QContextMenuEvent context(QContextMenuEvent::Mouse, contextPosition,
+                              view.viewport()->mapToGlobal(contextPosition));
+    QApplication::sendEvent(view.viewport(), &context);
+    mouse(QEvent::MouseButtonPress, {50, 40}, Qt::ControlModifier);
+    mouse(QEvent::MouseButtonRelease, {50, 40}, Qt::ControlModifier);
+    check(tree.selectedItems().size() == 1 && properties->text().contains("End: X 100"),
+          "Ctrl toggles an object and updates the properties");
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(dialog && dialog->windowTitle() == "Edit Geometry", "Double-click opens exact geometry");
+        dialog->reject();
+    });
+    mouse(QEvent::MouseButtonDblClick, {50, 0});
+
+    QTemporaryDir projects;
+    const auto original = projects.filePath("original.sofit");
+    const auto copy = projects.filePath("working copy.sofit");
+    chooseFile(action(window, "&Save"), original);
+    mouse(QEvent::MouseButtonPress, {50, 0});
+    mouse(QEvent::MouseMove, {65, -10});
+    mouse(QEvent::MouseButtonRelease, {65, -10});
+    chooseFile(action(window, "Save &As…"), copy);
+    opc::PatternDocument document;
+    check(document.load(original) && document.entities()[0].a == QPointF(),
+          "Save As keeps the original project");
+    check(document.load(copy) && document.entities()[0].a != QPointF(), "Save As writes the moved geometry");
+    const auto moved = document.entities()[0].a;
+    action(window, "Undo Move Object").trigger();
+    action(window, "&Save").trigger();
+    check(document.load(copy) && document.entities()[0].a == QPointF(), "Undo drag");
+    action(window, "Redo Move Object").trigger();
+    action(window, "&Save").trigger();
+    check(document.load(copy) && document.entities()[0].a == moved, "Redo drag");
+
+    auto* dock = window.findChild<QDockWidget*>("drawingObjects");
+    window.addDockWidget(Qt::LeftDockWidgetArea, dock);
+    window.findChild<QToolBar*>("projectAndView")->hide();
+    check(window.close(), "Close the saved project");
+    MainWindow restored;
+    restored.show();
+    check(restored.dockWidgetArea(restored.findChild<QDockWidget*>("drawingObjects")) == Qt::LeftDockWidgetArea
+          && restored.findChild<QToolBar*>("projectAndView")->isHidden(), "Restore panel position and toolbar visibility");
+    action(restored, "Reset Panel Layout").trigger();
+    check(restored.dockWidgetArea(restored.findChild<QDockWidget*>("drawingObjects")) == Qt::RightDockWidgetArea
+          && !restored.findChild<QToolBar*>("projectAndView")->isHidden(), "Restore default workspace");
+    QString error;
+    check(restored.openProject(copy, &error) && restored.windowFilePath() == copy,
+          "Open a project with a space in its path");
+    QSettings().clear();
 }
 
 void testGeometryEditing() {
@@ -405,6 +494,7 @@ int main(int argc, char** argv) {
     app.setOrganizationName("SOFIT Workflow Test");
     app.setApplicationName("Preferences");
     testStageNavigationAndPreferences();
+    testCanvasAndWorkspace();
     testGeometryEditing();
     testModelingWorkflow();
     testContourModelingWorkflow();

@@ -1,7 +1,10 @@
 #include "Modeling.h"
 #include "EntityPath.h"
 #include "PatternView.h"
+#include <QApplication>
+#include <QContextMenuEvent>
 #include <QGraphicsPathItem>
+#include <QRubberBand>
 #include <QGraphicsScene>
 #include <QMouseEvent>
 #include <QPainter>
@@ -25,7 +28,8 @@ QPainterPath viewEntityPath(opc::Entity entity) {
 }
 
 PatternView::PatternView(QGraphicsScene* scene, QWidget* parent)
-    : QGraphicsView(scene, parent) {
+    : QGraphicsView(scene, parent),
+      selectionBand_(new QRubberBand(QRubberBand::Rectangle, viewport())) {
     setRenderHint(QPainter::Antialiasing);
     setBackgroundBrush(QColor("#141a22"));
     setMouseTracking(true);
@@ -162,7 +166,15 @@ void PatternView::mouseMoveEvent(QMouseEvent* event) {
 
     updateCursorPosition(event->pos());
 
-    if (dragStart_ && (event->buttons() & Qt::LeftButton)) {
+    if (selectionStart_ && (event->buttons() & Qt::LeftButton)) {
+        if ((event->pos() - *selectionStart_).manhattanLength() >= QApplication::startDragDistance()) {
+            selectionBand_->setGeometry(QRect(*selectionStart_, event->pos()).normalized());
+            selectionBand_->show();
+        }
+        event->accept();
+    } else if (dragStart_ && (event->buttons() & Qt::LeftButton)) {
+        if ((event->pos() - dragPressPosition_).manhattanLength() < QApplication::startDragDistance())
+            return;
         const auto offset = drawingPoint(cursorScenePosition_) - *dragStart_;
         const auto& entity = entities_[dragIndex_];
         items_[dragIndex_]->setPos(entity.shape == opc::Shape::Point ? entity.a + offset : offset);
@@ -180,8 +192,22 @@ void PatternView::mouseReleaseEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
+    if (event->button() == Qt::LeftButton && selectionStart_) {
+        const QPoint origin = *selectionStart_;
+        cancelDrawing();
+        if ((event->pos() - origin).manhattanLength() >= QApplication::startDragDistance()) {
+            const auto mode = event->pos().x() < origin.x() ? Qt::IntersectsItemShape : Qt::ContainsItemShape;
+            QPainterPath area;
+            area.addPolygon(mapToScene(QRect(origin, event->pos()).normalized()));
+            area.closeSubpath();
+            scene()->setSelectionArea(area, Qt::AddToSelection, mode, viewportTransform());
+        }
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && dragStart_) {
-        const bool dragged = (event->pos() - dragPressPosition_).manhattanLength() >= 3;
+        const bool dragged = (event->pos() - dragPressPosition_).manhattanLength()
+            >= QApplication::startDragDistance();
         const auto offset = dragged ? drawingPoint(mapToScene(event->pos())) - *dragStart_ : QPointF();
         const auto index = dragIndex_;
         cancelDrawing();
@@ -200,6 +226,8 @@ void PatternView::setTool(Tool tool) {
 }
 
 void PatternView::cancelDrawing() {
+    selectionStart_.reset();
+    selectionBand_->hide();
     if (dragStart_) {
         const auto& entity = entities_[dragIndex_];
         items_[dragIndex_]->setPos(entity.shape == opc::Shape::Point ? entity.a : QPointF());
@@ -412,12 +440,13 @@ void PatternView::zoomAt(qreal factor, const QPoint& anchor) {
 }
 
 void PatternView::wheelEvent(QWheelEvent* event) {
-    const int delta = event->angleDelta().y();
-    if (!delta) {
+    const int angle = event->angleDelta().y();
+    const qreal steps = angle ? angle / 120.0 : event->pixelDelta().y() / 60.0;
+    if (!steps) {
         QGraphicsView::wheelEvent(event);
         return;
     }
-    zoomAt(std::pow(1.2, delta / 120.0), event->position().toPoint());
+    zoomAt(std::pow(1.2, steps), event->position().toPoint());
     event->accept();
 }
 
@@ -433,19 +462,19 @@ void PatternView::mousePressEvent(QMouseEvent* event) {
         const QPointF point = drawingPoint(cursorScenePosition_);
         if (tool_ == Tool::Select) {
             const bool toggle = event->modifiers().testFlag(Qt::ControlModifier);
-            if (!toggle)
+            auto* item = objectAt(event->pos());
+            if (!toggle && (!item || !item->isSelected()))
                 scene()->clearSelection();
-            const QRect hit(event->pos() - QPoint(5, 5), QSize(11, 11));
-            for (auto* item : items(hit)) {
-                if (item->flags().testFlag(QGraphicsItem::ItemIsSelectable)) {
-                    item->setSelected(!toggle || !item->isSelected());
-                    const auto index = items_.indexOf(static_cast<QGraphicsPathItem*>(item));
-                    if (!toggle && index >= 0 && entities_[index].draftName.isEmpty()) {
-                        dragPressPosition_ = event->pos();
-                        dragIndex_ = index;
-                        dragStart_ = drawingPoint(cursorScenePosition_);
-                    }
-                    break;
+            if (!item) {
+                selectionStart_ = event->pos();
+            } else {
+                item->setSelected(!toggle || !item->isSelected());
+                const auto index = items_.indexOf(static_cast<QGraphicsPathItem*>(item));
+                if (!toggle && scene()->selectedItems().size() == 1 && index >= 0
+                    && entities_[index].draftName.isEmpty()) {
+                    dragPressPosition_ = event->pos();
+                    dragIndex_ = index;
+                    dragStart_ = drawingPoint(cursorScenePosition_);
                 }
             }
         } else if (tool_ == Tool::Point) {
@@ -484,4 +513,40 @@ void PatternView::mousePressEvent(QMouseEvent* event) {
         return;
     }
     event->accept();
+}
+
+QGraphicsItem* PatternView::objectAt(const QPoint& position) const {
+    const QRect hit(position - QPoint(5, 5), QSize(11, 11));
+    for (auto* item : items(hit)) {
+        if (item->flags().testFlag(QGraphicsItem::ItemIsSelectable))
+            return item;
+    }
+    return nullptr;
+}
+
+void PatternView::contextMenuEvent(QContextMenuEvent* event) {
+    if (tool_ == Tool::Select) {
+        if (event->reason() == QContextMenuEvent::Mouse) {
+            if (auto* item = objectAt(event->pos()); item && !item->isSelected()) {
+                scene()->clearSelection();
+                item->setSelected(true);
+            }
+        }
+        emit selectionMenuRequested(event->globalPos());
+    }
+    event->accept();
+}
+
+void PatternView::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (tool_ == Tool::Select && event->button() == Qt::LeftButton) {
+        cancelDrawing();
+        if (auto* item = objectAt(event->pos())) {
+            scene()->clearSelection();
+            item->setSelected(true);
+            emit geometryEditRequested();
+        }
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseDoubleClickEvent(event);
 }

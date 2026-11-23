@@ -7,6 +7,7 @@
 #include <QPainterPath>
 
 class QGraphicsPathItem;
+class QRubberBand;
 
 class PatternView : public QGraphicsView {
     Q_OBJECT
@@ -40,6 +41,8 @@ signals:
     void cursorLeftCanvas();
     void zoomChanged(qreal pixelsPerMillimeter);
     void measured(qreal distance);
+    void geometryEditRequested();
+    void selectionMenuRequested(const QPoint& globalPosition);
     void entityMoved(qsizetype index, const QPointF& offset);
 
 protected:
@@ -48,9 +51,12 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
 
 private:
+    QGraphicsItem* objectAt(const QPoint& position) const;
     QPointF drawingPoint(QPointF scenePoint) const;
     void updateCursorPosition(const QPoint& viewportPoint);
     void updatePreview();
@@ -63,6 +69,8 @@ private:
     bool snapToGrid_ = false;
     bool snapToObjects_ = true;
     bool panning_ = false;
+    QRubberBand* selectionBand_;
+    std::optional<QPoint> selectionStart_;
     QPoint lastPanPosition_;
     QPointF cursorScenePosition_;
     std::optional<QPointF> start_;

@@ -23,6 +23,11 @@ jobs:
         run: cmake --build build --config Release
       - name: Run all SOFIT tests
         run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+      - name: Run GUI workflow at 150% scaling
+        shell: pwsh
+        env:
+          QT_SCALE_FACTOR: '1.5'
+        run: ctest --test-dir build -C Release -R '^sofit_pattern_workflow$' --output-on-failure --no-tests=error
       - name: Bundle Qt runtime
         shell: pwsh
         run: |
@@ -34,7 +39,27 @@ jobs:
             if (!(Test-Path "dist/SOFIT/$file")) { throw "Missing runtime file $file" }
           }
           Copy-Item README.md, LICENSE-NOTICE.txt dist/SOFIT
+          Copy-Item -Recurse examples dist/SOFIT/examples
           Compress-Archive -Path dist/SOFIT -DestinationPath SOFIT-Windows-x64.zip
+      - name: Launch the extracted portable package
+        shell: pwsh
+        run: |
+          Expand-Archive SOFIT-Windows-x64.zip -DestinationPath package-smoke
+          $package = (Resolve-Path package-smoke/SOFIT).Path
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:QT_PLUGIN_PATH, Env:QT_QPA_PLATFORM_PLUGIN_PATH -ErrorAction SilentlyContinue
+          $env:QT_QPA_PLATFORM = 'windows'
+          foreach ($name in @('bib-apron', 'graded-skirt', 'linked-trousers')) {
+            $project = Join-Path $package "examples/$name.sofit"
+            if (!(Test-Path $project)) { throw "Missing example $name" }
+            $process = Start-Process -FilePath (Join-Path $package 'SOFIT.exe') `
+              -WorkingDirectory $env:RUNNER_TEMP -ArgumentList '--packaging-smoke', ('"' + $project + '"') -PassThru
+            if (!$process.WaitForExit(30000)) {
+              $process.Kill()
+              throw "Portable SOFIT did not exit for $name"
+            }
+            if ($process.ExitCode -ne 0) { throw "Portable SOFIT failed for ${name}: $($process.ExitCode)" }
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: SOFIT-Windows-x64

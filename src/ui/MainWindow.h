@@ -19,6 +19,7 @@ class MainWindow : public QMainWindow {
 public:
     MainWindow();
     ~MainWindow() override;
+    bool openProject(const QString& path, QString* error);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -27,6 +28,10 @@ private:
     void newDocument();
     void openDocument();
     bool saveDocument();
+    bool saveDocumentAs();
+    bool saveProject(const QString& path);
+    void refreshSelectionProperties();
+    bool canEditGeometry(qsizetype index) const;
     bool confirmDiscard();
     void replaceDocument(opc::PatternDocument document, const QString& path);
     void addEntity(const opc::Entity& entity);
@@ -71,6 +76,7 @@ private:
     PatternView* view_;
     QUndoStack undo_;
     QTreeWidget* objects_;
+    QLabel* selectionProperties_;
     QDockWidget* modelingDock_ = nullptr;
     QTreeWidget* modelingTree_ = nullptr;
     QLabel* modelingError_ = nullptr;
