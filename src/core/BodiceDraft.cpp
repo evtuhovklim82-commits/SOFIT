@@ -1,5 +1,6 @@
 #include "BodiceDraft.h"
 #include "PieceGeometry.h"
+#include "NeckFinish.h"
 
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@ namespace opc {
 
 static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements& m,
                                                        const DressSkirtMeasurements* skirt,
+                                                       const BodiceOptions& options,
                                                        QString* error) {
     const auto fail = [error](const QString& message) -> std::optional<PatternDocument> {
         if (error)
@@ -24,6 +26,15 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
     if (!std::ranges::all_of(bodiceLengths, positive) || !ease(m.bustEase) || !ease(m.waistEase)
         || (!skirt && (!std::ranges::all_of(sleeveLengths, positive) || !ease(m.upperArmEase))))
         return fail(QStringLiteral("Enter positive lengths and nonnegative wearing ease within the supported ranges."));
+
+    const bool wide = !skirt && options.sleeveStyle == SleeveStyle::Wide;
+    const bool puff = !skirt && options.sleeveStyle == SleeveStyle::Puff;
+    const auto inRange = [](double value, double min, double max) { return value >= min && value <= max; };
+    if ((options.neckFinish != NeckFinish::None && !inRange(options.finishDepth, 10, 120))
+        || ((wide || puff) && !inRange(options.extraWidth, 10, 500))
+        || (puff && (!inRange(options.crownRise, 5, 150) || !inRange(options.gatherPerCapSection, 0, 200)
+                     || m.capHeight + options.crownRise + 20 >= m.sleeveLength)))
+        return fail(QStringLiteral("Check finish depth, added sleeve width, crown rise and gathering targets."));
 
     const double chest = (m.bust + m.bustEase) / 4;
     const double suppression = chest - (m.waist + m.waistEase) / 4;
@@ -88,18 +99,28 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             {"upper_arm", m.upperArm}, {"upper_arm_ease", m.upperArmEase}, {"cuff", m.cuff},
             {"sleeve_length", m.sleeveLength}, {"cap_height", m.capHeight}
         });
+        if (wide || puff)
+            draft.measurements.append({"sleeve_extra_width", options.extraWidth});
+        if (puff)
+            draft.measurements.append({{"sleeve_crown_rise", options.crownRise},
+                                       {"sleeve_cap_gather", options.gatherPerCapSection}});
         draft.parameters.append({
-            {"sleeve_half", "(upper_arm + upper_arm_ease) / 2"},
-            {"sleeve_center", "2 * (chest + 40) + sleeve_half"}
+            {"sleeve_half", puff ? "(upper_arm + upper_arm_ease + sleeve_extra_width) / 2"
+                                 : "(upper_arm + upper_arm_ease) / 2"},
+            {"sleeve_hem_width", wide || puff ? "cuff + sleeve_extra_width" : "cuff"},
+            {"sleeve_crown", puff ? "-sleeve_crown_rise" : "0"},
+            {"sleeve_hem_y", "sleeve_length + sleeve_crown"},
+            {"sleeve_center", wide || puff ? "2 * (chest + 40) + sleeve_half + sleeve_hem_width / 2"
+                                         : "2 * (chest + 40) + sleeve_half"}
         });
         draft.points.append({
             {"SFront", "sleeve_center - sleeve_half", "cap_height"},
             {"SBack", "sleeve_center + sleeve_half", "cap_height"},
-            {"SCrown", "sleeve_center", "0"},
-            {"SFrontControl", "sleeve_center - sleeve_half * 0.70", "0"},
-            {"SBackControl", "sleeve_center + sleeve_half * 0.55", "0"},
-            {"SHemFront", "sleeve_center - cuff / 2", "sleeve_length"},
-            {"SHemBack", "sleeve_center + cuff / 2", "sleeve_length"}
+            {"SCrown", "sleeve_center", "sleeve_crown"},
+            {"SFrontControl", "sleeve_center - sleeve_half * 0.70", "sleeve_crown"},
+            {"SBackControl", "sleeve_center + sleeve_half * 0.55", "sleeve_crown"},
+            {"SHemFront", "sleeve_center - sleeve_hem_width / 2", "sleeve_hem_y"},
+            {"SHemBack", "sleeve_center + sleeve_hem_width / 2", "sleeve_hem_y"}
         });
         draft.edges.append({
             {"sleeve_front_cap", "SFront", "SCrown", "SFrontControl"},
@@ -109,7 +130,25 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             {"sleeve_front_seam", "SHemFront", "SFront", {}}
         });
 
-        document.pieces().append({"One-piece sleeve (mirror pair)", 0, 2, {}, true, 90});
+        const auto* sleeveName = puff ? "Puff sleeve (mirror pair)"
+                                       : wide ? "Wide-hem sleeve (mirror pair)" : "One-piece sleeve (mirror pair)";
+        document.pieces().append({sleeveName, 0, 2, {}, true, 90});
+        if (puff) {
+            draft.measurements.append({"sleeve_band_depth", 30});
+            draft.points.append({
+                {"SCuffA", "sleeve_center - cuff / 2", "sleeve_hem_y + 40"},
+                {"SCuffB", "sleeve_center + cuff / 2", "SCuffA.y"},
+                {"SCuffC", "SCuffB.x", "SCuffB.y + sleeve_band_depth"},
+                {"SCuffD", "SCuffA.x", "SCuffC.y"}
+            });
+            draft.edges.append({
+                {"band_attach", "SCuffB", "SCuffA", {}},
+                {"band_front", "SCuffA", "SCuffD", {}},
+                {"band_outer", "SCuffD", "SCuffC", {}},
+                {"band_back", "SCuffC", "SCuffB", {}}
+            });
+            document.pieces().append({"Puff sleeve band (cut in pairs)", 0, 4, {}, true, 0});
+        }
     } else {
         const double hip = (skirt->hip + skirt->hipEase) / 4;
         const double suppression = hip - (m.waist + m.waistEase) / 4;
@@ -166,6 +205,8 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             {"Dress skirt back half (center fold)", 0, 1, {}, true, 90}
         });
     }
+    const auto finishStart = document.pieces().size();
+    addNeckFinish(draft, document, options);
     if (!document.setParametricDraft(std::move(draft), error))
         return std::nullopt;
     for (qsizetype i = 0; i < document.entities().size(); ++i) {
@@ -176,9 +217,18 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             edge.piece = 0;
         else if (edge.draftName.startsWith("back_"))
             edge.piece = 1;
+        else if (edge.draftName.startsWith("finish_"))
+            edge.piece = finishStart + (edge.draftName.startsWith("finish_back_") ? 1 : 0);
+        else if (edge.draftName.startsWith("band_") || edge.draftName.startsWith("skirt_back_"))
+            edge.piece = 3;
         else
-            edge.piece = edge.draftName.startsWith("skirt_back_") ? 3 : 2;
-        if (edge.draftName.contains("_dart_"))
+            edge.piece = 2;
+        if (puff && (edge.draftName == "sleeve_hem" || edge.draftName == "band_attach"))
+            edge.seamNotches = {0.25, 0.5, 0.75};
+        if (puff && (edge.draftName == "sleeve_front_cap" || edge.draftName == "sleeve_back_cap"
+                     || edge.draftName == "front_armhole" || edge.draftName == "back_armhole"))
+            edge.seamNotches = {0.5};
+        if (edge.draftName.contains("_dart_") || edge.draftName.contains("_guide_"))
             edge.layer = Layer::Construction;
         document.replace(i, edge);
     }
@@ -190,12 +240,23 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
 }
 
 std::optional<PatternDocument> draftBodiceAndSleeve(const BodiceMeasurements& m, QString* error) {
-    return draftBodiceBlock(m, nullptr, error);
+    return draftBodiceAndSleeve(m, BodiceOptions{}, error);
 }
 
 std::optional<PatternDocument> draftDress(const BodiceMeasurements& bodice,
                                           const DressSkirtMeasurements& skirt, QString* error) {
-    return draftBodiceBlock(bodice, &skirt, error);
+    return draftDress(bodice, skirt, BodiceOptions{}, error);
+}
+
+std::optional<PatternDocument> draftBodiceAndSleeve(const BodiceMeasurements& m,
+                                                   const BodiceOptions& options, QString* error) {
+    return draftBodiceBlock(m, nullptr, options, error);
+}
+
+std::optional<PatternDocument> draftDress(const BodiceMeasurements& bodice,
+                                          const DressSkirtMeasurements& skirt,
+                                          const BodiceOptions& options, QString* error) {
+    return draftBodiceBlock(bodice, &skirt, options, error);
 }
 
 std::optional<BodiceSeams> measureBodiceSeams(const PatternDocument& document) {

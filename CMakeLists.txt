@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 1.5.0 LANGUAGES CXX)
+project(SOFIT VERSION 1.6.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -10,6 +10,7 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 
 add_library(sofit_core STATIC
     src/core/BodiceDraft.cpp
+    src/core/NeckFinish.cpp
     src/core/FittingBlocks.cpp
     src/core/ContourModeling.cpp
     src/core/EntityPath.cpp
@@ -65,6 +66,11 @@ if(BUILD_TESTING)
     add_executable(sofit_parametric_tests tests/ParametricDraftTest.cpp)
     target_link_libraries(sofit_parametric_tests PRIVATE sofit_core)
     add_test(NAME sofit_parametric COMMAND sofit_parametric_tests)
+
+    add_executable(sofit_professional_tests tests/ProfessionalModelingTest.cpp)
+    target_link_libraries(sofit_professional_tests PRIVATE sofit_core)
+    add_test(NAME sofit_professional_modeling COMMAND sofit_professional_tests)
+    set_tests_properties(sofit_professional_modeling PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(sofit_ui_tests tests/PatternWorkflowTest.cpp)
     target_link_libraries(sofit_ui_tests PRIVATE sofit_widgets)

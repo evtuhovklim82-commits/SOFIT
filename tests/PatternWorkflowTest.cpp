@@ -170,9 +170,30 @@ void testContourModelingWorkflow() {
     tree.topLevelItem(0)->setCheckState(1, Qt::Checked);
     action(window, "Undo Slash and Spread").trigger();
     check(view.entityVisible(1), "Undo keeps later visibility changes to surviving objects");
+    tree.topLevelItem(2)->setSelected(true);
+    runDialog<QInputDialog>(action(window, "Add Box Pleat…"), [](QInputDialog& dialog) {
+        dialog.setDoubleValue(24);
+        dialog.accept();
+    });
+    check(tree.topLevelItemCount() == 12 && tree.topLevelItem(11)->text(3) == "Construction",
+          "Add fullness and fold guides from the Modeling menu");
+    action(window, "Undo Add Box Pleat").trigger();
+    check(tree.topLevelItemCount() == 3 && tree.topLevelItem(2)->text(3) == "Construction",
+          "Undo pleat restores the source slash");
+    action(window, "Redo Add Box Pleat").trigger();
+    check(tree.topLevelItemCount() == 12, "Redo restores pleat guides");
+    action(window, "Undo Add Box Pleat").trigger();
+
     tree.clearSelection();
     tree.topLevelItem(2)->setSelected(true);
     action(window, "Delete Selection").trigger();
+    runDialog<QDialog>(action(window, "Shape Silhouette…"), [](QDialog& dialog) { dialog.accept(); });
+    check(tree.topLevelItemCount() == 5, "Shape a rectangle into a four-edge silhouette");
+    action(window, "Undo Shape Silhouette").trigger();
+    check(tree.topLevelItemCount() == 2, "Undo restores the rectangle");
+    action(window, "Redo Shape Silhouette").trigger();
+    check(tree.topLevelItemCount() == 5, "Redo restores the changed contour");
+    action(window, "Undo Shape Silhouette").trigger();
 
     const QPointF apex(50, 35);
     view.dartDrawn({opc::Shape::Line, {40, 0}, apex, {}, -1, opc::Layer::Construction},
@@ -181,7 +202,9 @@ void testContourModelingWorkflow() {
     tree.clearSelection();
     for (int i = 2; i < 5; ++i)
         tree.topLevelItem(i)->setSelected(true);
-    action(window, "Close and Transfer Dart…").trigger();
+    runDialog<QInputDialog>(action(window, "Close and Transfer Dart…"), [](QInputDialog& dialog) {
+        dialog.accept();
+    });
     check(tree.topLevelItemCount() == 9 && tree.topLevelItem(8)->text(3) == "Main",
           "Dart transfer replaces the original outline and construction guides");
 

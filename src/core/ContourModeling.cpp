@@ -1,4 +1,5 @@
 #include "ContourModeling.h"
+#include "Production.h"
 
 #include <QCoreApplication>
 #include <QSet>
@@ -119,13 +120,19 @@ void appendRing(PatternDocument& document, qsizetype piece, const QPolygonF& rin
 ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
                                ContourOperation operation, const QVector<qsizetype>& guides,
                                double spreadMm) {
-    const bool dart = operation == ContourOperation::TransferDart;
+    const bool openDart = operation == ContourOperation::MoveOpenDart;
+    const bool explicitOutlet = openDart || operation == ContourOperation::TransferDartToOutlet;
+    const bool dart = explicitOutlet || operation == ContourOperation::TransferDart;
+    const bool pleat = operation == ContourOperation::Pleat;
+    const bool gather = operation == ContourOperation::Gather;
+    const bool spread = pleat || gather || operation == ContourOperation::Spread;
+    const qsizetype guideCount = dart ? 3 : 1;
     if (piece < 0 || piece >= document.pieces().size())
         return failure("Choose a piece.");
-    if (guides.size() != (dart ? 3 : 1))
+    if (guides.size() != guideCount)
         return failure(dart ? "Select two dart legs and an outlet line on the Construction layer."
                             : "Select one cut line on the Construction layer.");
-    if (operation == ContourOperation::Spread && (!std::isfinite(spreadMm) || spreadMm <= tolerance))
+    if (spread && (!std::isfinite(spreadMm) || spreadMm <= tolerance))
         return failure("Enter a positive spread width.");
     const auto& metadata = document.pieces()[piece];
     if (!metadata.notches.isEmpty()
@@ -141,14 +148,18 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
         }))
         return failure("Clear edge allowances and automatic notches before modeling this piece.");
     QSet<qsizetype> guideSet;
-    for (const auto index : guides) {
+    for (qsizetype i = 0; i < guides.size(); ++i) {
+        const auto index = guides[i];
         if (index < 0 || index >= entities.size() || guideSet.contains(index))
-            return failure("Select distinct construction lines.");
+            return failure("Select distinct lines for the modeling operation.");
         const auto& guide = entities[index];
-        if (guide.shape != Shape::Line || guide.layer != Layer::Construction || !guide.draftName.isEmpty()
-            || (guide.piece != -1 && guide.piece != piece)
-            || !std::isfinite(length(guide.b - guide.a)) || near(guide.a, guide.b))
-            return failure("Use nonzero manual construction lines assigned to this piece or unassigned.");
+        const bool contourLeg = openDart && i < 2;
+        const bool assigned = contourLeg ? guide.piece == piece : guide.piece == -1 || guide.piece == piece;
+        const auto layer = contourLeg ? Layer::Main : Layer::Construction;
+        if (guide.shape != Shape::Line || guide.layer != layer || !guide.draftName.isEmpty()
+            || !assigned || !std::isfinite(length(guide.b - guide.a)) || near(guide.a, guide.b))
+            return failure(openDart ? "Use two straight main-contour dart legs and one manual construction outlet."
+                                    : "Use nonzero manual construction lines assigned to this piece or unassigned.");
         guideSet.insert(index);
     }
 
@@ -174,6 +185,7 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
 
     QPolygonF first;
     QPolygonF second;
+    QVector<QLineF> markings;
     if (dart) {
         const auto& leg = entities[guides.first()];
         auto apex = leg.a;
@@ -185,8 +197,8 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
         };
         if (!sharedByAll(apex))
             apex = leg.b;
-        if (!sharedByAll(apex) || !ring.containsPoint(apex, Qt::OddEvenFill))
-            return failure("The three lines must share an apex inside the piece.");
+        if (!sharedByAll(apex) || (!openDart && !ring.containsPoint(apex, Qt::OddEvenFill)))
+            return failure("The selected lines must share a dart apex.");
 
         QVector<QPointF> mouths;
         for (const auto index : guides) {
@@ -194,22 +206,27 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
             const auto mouth = near(line.a, apex) ? line.b : line.a;
             const auto vertex = insertBoundaryPoint(ring, mouth);
             if (vertex < 0 || mouths.contains(ring[vertex]))
-                return failure("The three lines must end at distinct points on the contour.");
+                return failure("The selected lines must end at distinct points on the contour.");
             mouths.append(ring[vertex]);
         }
         QVector<qsizetype> vertices;
-        for (const auto mouth : mouths) {
-            if (!interiorSegment(ring, apex, mouth))
+        for (qsizetype i = 0; i < mouths.size(); ++i) {
+            const auto mouth = mouths[i];
+            if ((!openDart || i == 2) && !interiorSegment(ring, apex, mouth))
                 return failure("The dart and outlet lines must stay inside the piece.");
             vertices.append(ring.indexOf(mouth));
         }
         qsizetype a = -1, b = -1, outlet = -1;
-        for (qsizetype i = 0; i < 3; ++i) {
-            for (qsizetype j = 0; j < 3; ++j) {
-                if (i == j)
+        for (qsizetype i = 0; i < guideCount; ++i) {
+            for (qsizetype j = 0; j < guideCount; ++j) {
+                if (i == j || (explicitOutlet && (i == 2 || j == 2)))
                     continue;
                 const auto candidate = arc(ring, vertices[i], vertices[j]);
-                if (!straight(candidate) || candidate.contains(mouths[3 - i - j]))
+                const bool isMouth = openDart
+                    ? candidate.size() == 3 && near(candidate[1], apex)
+                        && !ring.containsPoint((apex + candidate.first() + candidate.last()) / 3, Qt::OddEvenFill)
+                    : straight(candidate);
+                if (!isMouth || candidate.contains(mouths[3 - i - j]))
                     continue;
                 if (a >= 0)
                     return failure("Use two dart legs on one straight edge and an outlet on a different edge.");
@@ -219,9 +236,8 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
             }
         }
         if (a < 0)
-            return failure("The old dart mouth must lie on a straight edge, with the outlet on a different edge.");
-        // The straight arc a->b is the old mouth. Rotate b->outlet toward a
-        // and connect both positions of the outlet to the shared apex.
+            return failure(openDart ? "The two dart legs must form an inward V in the contour."
+                                    : "The old dart mouth must lie on a straight edge, with the outlet on a different edge.");
         const auto fixed = ring[a] - apex;
         const auto moving = ring[b] - apex;
         if (std::abs(length(fixed) - length(moving)) > tolerance)
@@ -254,7 +270,7 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
         const auto startIndex = ring.indexOf(a);
         first = arc(ring, startIndex, end);
         second = arc(ring, end, startIndex);
-        if (operation == ContourOperation::Spread) {
+        if (spread) {
             const auto cut = b - a;
             const QPointF left(-cut.y(), cut.x());
             const auto midpoint = (a + b) / 2;
@@ -265,8 +281,15 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
                 twiceArea += cross(second[i] - midpoint, second[i + 1] - midpoint);
             if (twiceArea < 0)
                 normal = -normal;
+            const auto shift = spreadMm * normal;
             for (auto& point : second)
-                point += spreadMm * normal;
+                point += shift;
+            if (pleat || gather) {
+                markings.append({a, b});
+                markings.append({a + shift, b + shift});
+            }
+            if (pleat)
+                markings.append({a + shift / 2, b + shift / 2});
             first += second;
             second.clear();
         }
@@ -276,6 +299,10 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
     for (auto i = removed.size(); i > 0; --i)
         edit.document.remove(removed[i - 1]);
     appendRing(edit.document, piece, first);
+    for (const auto& mark : markings) {
+        edit.document.insert(edit.document.entities().size(),
+                             {Shape::Line, mark.p1(), mark.p2(), {}, piece, Layer::Construction});
+    }
     if (!second.isEmpty()) {
         auto other = metadata;
         edit.document.pieces()[piece].name += QStringLiteral(" A");
@@ -295,4 +322,83 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
     }
     return {std::move(edit), {}};
 }
+
+ContourEditResult shapeSilhouette(const PatternDocument& document, qsizetype piece,
+                                 double axisX, double topScale, double bottomScale) {
+    if (piece < 0 || piece >= document.pieces().size())
+        return failure("Choose a piece.");
+    const auto validScale = [](double scale) { return scale >= 0.2 && scale <= 5; };
+    if (!std::isfinite(axisX) || !validScale(topScale) || !validScale(bottomScale))
+        return failure("Use a finite axis and widths between 20% and 500%.");
+    const auto source = analyzePiece(document, piece);
+    if (source.error != ContourError::None)
+        return invalidContour(source.error);
+    if (!document.pieces()[piece].notches.isEmpty())
+        return failure("Remove perimeter-percentage notches or replace them with edge notches before shaping.");
+    if (std::ranges::any_of(document.production().placements, [piece](const auto& placement) {
+            return placement.piece == piece;
+        }))
+        return failure("Remove fabric placements for this piece before shaping.");
+    const auto transform = [&](QPointF point) {
+        const double level = std::clamp((point.y() - source.bounds.top()) / source.bounds.height(), 0., 1.);
+        const double scale = std::lerp(topScale, bottomScale, level);
+        return QPointF(axisX + (point.x() - axisX) * scale, point.y());
+    };
+
+    auto updated = document;
+    QVector<qsizetype> rectangles;
+    QVector<QPolygonF> rectangularOutlines;
+    for (qsizetype i = 0; i < document.entities().size(); ++i) {
+        auto entity = document.entities()[i];
+        if (entity.piece != piece)
+            continue;
+        if (!entity.draftName.isEmpty())
+            return failure("Adjust this piece in its parametric draft. This tool edits manually drawn pieces.");
+        if (entity.layer == Layer::Allowance)
+            return failure("Use calculated seam allowances for the piece before shaping.");
+        if (entity.shape == Shape::Rectangle && entity.layer == Layer::Main) {
+            if (entity.seamAllowanceMm || !entity.seamNotches.isEmpty())
+                return failure("Set rectangle allowances on the piece before shaping.");
+            const auto [a, b] = std::pair(entity.a, entity.b);
+            rectangularOutlines.append(QPolygonF{transform(a), transform({a.x(), b.y()}),
+                                                 transform(b), transform({b.x(), a.y()})});
+            rectangles.append(i);
+            continue;
+        }
+        if (entity.shape != Shape::Point && entity.shape != Shape::Line && entity.shape != Shape::Curve)
+            return failure("Use lines or curves for construction guides before shaping.");
+        entity.a = transform(entity.a);
+        entity.b = entity.shape == Shape::Point ? entity.a : transform(entity.b);
+        if (entity.shape == Shape::Curve)
+            entity.control = transform(entity.control);
+        updated.replace(i, entity);
+    }
+    for (auto i = rectangles.size(); i > 0; --i)
+        updated.remove(rectangles[i - 1]);
+    for (const auto& ring : rectangularOutlines)
+        appendRing(updated, piece, ring);
+
+    QSet<QString> changedSizes;
+    for (auto& rule : updated.production().rules) {
+        if (rule.piece != piece)
+            continue;
+        const auto moved = transform(rule.point + rule.offset);
+        rule.point = transform(rule.point);
+        rule.offset = moved - rule.point;
+        changedSizes.insert(rule.size);
+    }
+    const auto result = analyzePiece(updated, piece);
+    if (result.error != ContourError::None)
+        return invalidContour(result.error);
+    if (result.allowanceFailed)
+        return failure("The existing seam allowance cannot be rebuilt on the new contour.");
+    for (const auto& size : changedSizes) {
+        const auto geometry = analyzePiece(gradedPattern(updated, size), piece);
+        if (geometry.error != ContourError::None || geometry.allowanceFailed)
+            return {{}, QCoreApplication::translate("ContourModeling",
+                "Shaping would invalidate the contour or seam allowance for size %1.").arg(size)};
+    }
+    return {ContourEdit{std::move(updated), std::move(rectangles)}, {}};
+}
+
 }

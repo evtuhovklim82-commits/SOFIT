@@ -175,10 +175,34 @@ FittingCheck checkFittingBlock(const PatternDocument& document, const QString& s
         compare("Bodice side seam (front, back)", sum({"front_side"}), sum({"back_side"}));
         compare("Shoulder seam (front, back)", sum({"front_shoulder"}), sum({"back_shoulder"}));
     }
+    const auto measurement = [&](const QString& name) {
+        const auto& values = document.parametricDraft().measurements;
+        const auto base = std::ranges::find(values, name, &Measurement::name);
+        const double fallback = base != values.end() ? base->mm : 0;
+        const auto& production = document.production();
+        const auto target = std::ranges::find(production.sizes, size, &PatternSize::name);
+        return !size.isEmpty() && production.useDraftMeasurements && target != production.sizes.end()
+            ? target->measurements.value(name, fallback) : fallback;
+    };
+
+    if (hasEdge("finish_collar_back_neck")) {
+        compare("Back neckline and collar", sum({"back_neck"}), sum({"finish_collar_back_neck"}));
+        compare("Front neckline and collar", sum({"front_neck"}), sum({"finish_collar_front_neck"}));
+    }
+    if (hasEdge("finish_front_neck")) {
+        compare("Front neckline and facing", sum({"front_neck"}), sum({"finish_front_neck"}));
+        compare("Back neckline and facing", sum({"back_neck"}), sum({"finish_back_neck"}));
+        compare("Facing shoulder (front, back)", sum({"finish_front_shoulder"}), sum({"finish_back_shoulder"}));
+    }
     if (hasEdge("sleeve_front_cap")) {
-        compare("Front armhole and sleeve cap", sum({"front_armhole"}), sum({"sleeve_front_cap"}), capEase);
-        compare("Back armhole and sleeve cap", sum({"back_armhole"}), sum({"sleeve_back_cap"}), capEase);
+        const double targetCap = capEase + measurement("sleeve_cap_gather");
+        compare("Front armhole and sleeve cap", sum({"front_armhole"}), sum({"sleeve_front_cap"}), targetCap);
+        compare("Back armhole and sleeve cap", sum({"back_armhole"}), sum({"sleeve_back_cap"}), targetCap);
         compare("Sleeve underarm seam (front, back)", sum({"sleeve_front_seam"}), sum({"sleeve_back_seam"}));
+    }
+    if (hasEdge("band_attach")) {
+        compare("Sleeve band and gathered hem", sum({"band_attach"}), sum({"sleeve_hem"}),
+                measurement("sleeve_extra_width"));
     }
     if (hasEdge("skirt_front_waist")) {
         compare("Front dress waist (bodice, skirt)",

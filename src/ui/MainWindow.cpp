@@ -300,7 +300,18 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         modelPiece(opc::ContourOperation::Spread, tr("Slash and Spread"));
     });
     modeling->addAction(tr("Close and Transfer Dart…"), this, [this] {
-        modelPiece(opc::ContourOperation::TransferDart, tr("Close and Transfer Dart"));
+        modelPiece(opc::ContourOperation::TransferDartToOutlet, tr("Close and Transfer Dart"));
+    });
+    modeling->addAction(tr("Move Open Contour Dart…"), this, [this] {
+        modelPiece(opc::ContourOperation::MoveOpenDart, tr("Move Open Contour Dart"));
+    });
+    modeling->addSeparator();
+    modeling->addAction(tr("Shape Silhouette…"), this, &MainWindow::shapeSilhouette);
+    modeling->addAction(tr("Add Box Pleat…"), this, [this] {
+        modelPiece(opc::ContourOperation::Pleat, tr("Add Box Pleat"));
+    });
+    modeling->addAction(tr("Add Gathering Fullness…"), this, [this] {
+        modelPiece(opc::ContourOperation::Gather, tr("Add Gathering Fullness"));
     });
 
     auto* pattern = menuBar()->addMenu(tr("&Pattern"));
@@ -1233,22 +1244,86 @@ void MainWindow::joinSelectedEdges() {
     undo_.endMacro();
 }
 
+void MainWindow::shapeSilhouette() {
+    const auto title = tr("Shape Silhouette");
+    const auto piece = choosePiece(title);
+    if (piece < 0)
+        return;
+    const auto geometry = opc::analyzePiece(doc_, piece);
+    if (geometry.error != opc::ContourError::None) {
+        QMessageBox::warning(this, title, tr("The piece needs one closed, simple contour."));
+        return;
+    }
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    auto* form = new QFormLayout(&dialog);
+    auto* axis = new QComboBox(&dialog);
+    axis->addItems({tr("Center of piece"), tr("Left edge of bounds"), tr("Right edge of bounds")});
+    form->addRow(tr("Vertical axis"), axis);
+    const auto width = [&](const QString& label, double value) {
+        auto* input = new QDoubleSpinBox(&dialog);
+        input->setRange(20, 500);
+        input->setSuffix(tr(" %"));
+        input->setValue(value);
+        form->addRow(label, input);
+        return input;
+    };
+    const auto* top = width(tr("Top width"), 100);
+    const auto* bottom = width(tr("Bottom width"), 125);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    const double axes[]{geometry.bounds.center().x(), geometry.bounds.left(), geometry.bounds.right()};
+    auto result = opc::shapeSilhouette(doc_, piece, axes[axis->currentIndex()], top->value() / 100,
+                                       bottom->value() / 100);
+    if (!result.edit) {
+        QMessageBox::warning(this, title, result.error);
+        return;
+    }
+    undo_.push(new PatternCommand(doc_, std::move(*result.edit), title, *view_));
+}
+
 void MainWindow::modelPiece(opc::ContourOperation operation, const QString& title) {
-    const auto guides = selectedObjects();
-    const bool dart = operation == opc::ContourOperation::TransferDart;
+    using opc::ContourOperation;
+    auto guides = selectedObjects();
+    const bool openDart = operation == ContourOperation::MoveOpenDart;
+    const bool dart = openDart || operation == ContourOperation::TransferDartToOutlet;
     if (guides.size() != (dart ? 3 : 1)) {
-        QMessageBox::information(this, title, dart
-            ? tr("Select both dart legs and the outlet line on the Construction layer.")
-            : tr("Select one construction line with both ends on the piece contour."));
+        QMessageBox::information(this, title, openDart
+            ? tr("Select two main-contour dart legs and one construction outlet.")
+            : dart ? tr("Select two dart legs and an outlet on the Construction layer.")
+                   : tr("Select one construction line with both ends on the piece contour."));
         return;
     }
     const auto piece = choosePiece(title);
     if (piece < 0)
         return;
-    double width = 0;
-    if (operation == opc::ContourOperation::Spread) {
+    if (openDart) {
+        std::stable_partition(guides.begin(), guides.end(), [this](qsizetype index) {
+            return doc_.entities()[index].layer == opc::Layer::Main;
+        });
+    } else if (dart) {
+        QStringList lines;
+        for (const auto index : guides) {
+            const auto& line = doc_.entities()[index];
+            lines.append(tr("Object %1   (%2, %3) to (%4, %5)").arg(index + 1)
+                         .arg(line.a.x()).arg(line.a.y()).arg(line.b.x()).arg(line.b.y()));
+        }
         bool accepted = false;
-        width = QInputDialog::getDouble(this, title, tr("Spread width perpendicular to the cut (mm)"),
+        const auto outlet = QInputDialog::getItem(this, title, tr("Choose the new outlet among the selected lines"),
+                                                  lines, 2, false, &accepted);
+        if (!accepted)
+            return;
+        guides.move(lines.indexOf(outlet), 2);
+    }
+    double width = 0;
+    if (operation == ContourOperation::Spread || operation == ContourOperation::Pleat
+        || operation == ContourOperation::Gather) {
+        bool accepted = false;
+        width = QInputDialog::getDouble(this, title, tr("Total added width perpendicular to the cut (mm)"),
                                         20, 0.01, 100000, 2, &accepted);
         if (!accepted)
             return;

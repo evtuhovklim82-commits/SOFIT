@@ -93,6 +93,19 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     const auto* capEase = measurement(tr("Target ease per cap section"), 4, 0, 30);
     const auto* tolerance = measurement(tr("Tolerance per cap section"), 3, 0, 30);
 
+    auto* sleeveStyle = new QComboBox;
+    sleeveStyle->addItems({tr("Fitted"), tr("Wide hem"), tr("Puff with gathered cap and hem band")});
+    form->addRow(tr("Sleeve style"), sleeveStyle);
+    auto* extraWidth = measurement(tr("Added hem width per sleeve"), 100, 10, 500);
+    auto* crownRise = measurement(tr("Added crown height"), 30, 5, 150);
+    auto* capGather = measurement(tr("Target gathering per cap section"), 65, 0, 200);
+
+    const int finishStart = form->rowCount();
+    auto* neckFinish = new QComboBox;
+    neckFinish->addItems({tr("None"), tr("Flat collar"), tr("Straight stand"), tr("Neck facing")});
+    form->addRow(tr("Neckline finish"), neckFinish);
+    auto* finishDepth = measurement(tr("Collar, stand or facing depth"), 35, 10, 120);
+
     const int hipStart = form->rowCount();
     const auto* fittedHip = measurement(tr("Hip circumference"), 1000, 350, 2500);
     const auto* hipEase = measurement(tr("Hip wearing ease"), 60, 0, 300);
@@ -115,7 +128,8 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
             const bool visible = row < fittingStart ? index < Bodice
                 : row < bodiceStart ? index >= Bodice
                 : row < sleeveStart ? index == Bodice || index == Dress
-                : row < hipStart ? index == Bodice
+                : row < finishStart ? index == Bodice
+                : row < hipStart ? index == Bodice || index == Dress
                 : row < trousersStart ? index == Trousers || index == Dress
                 : row < dressStart ? index == Trousers : index == Dress;
             form->setRowVisible(row, visible);
@@ -123,10 +137,16 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
         form->setRowVisible(waist, index >= Bodice);
         form->setRowVisible(waistEase, index >= Bodice);
         form->setRowVisible(flare, index == ALine);
+        form->setRowVisible(extraWidth, index == Bodice && sleeveStyle->currentIndex() > 0);
+        form->setRowVisible(crownRise, index == Bodice && sleeveStyle->currentIndex() == 2);
+        form->setRowVisible(capGather, index == Bodice && sleeveStyle->currentIndex() == 2);
+        form->setRowVisible(finishDepth, (index == Bodice || index == Dress) && neckFinish->currentIndex() > 0);
         if (index < Bodice)
             ease->setValue(index == ALine ? 80 : 350);
     };
     QObject::connect(style, &QComboBox::currentIndexChanged, &wizard, showFields);
+    QObject::connect(sleeveStyle, &QComboBox::currentIndexChanged, &wizard, [=] { showFields(style->currentIndex()); });
+    QObject::connect(neckFinish, &QComboBox::currentIndexChanged, &wizard, [=] { showFields(style->currentIndex()); });
     showFields(0);
     wizard.addPage(measurementsPage);
 
@@ -154,23 +174,30 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                 upperArm->value(), upperArmEase->value(), cuff->value(), sleeveLength->value(),
                 capHeight->value()
             };
+            const opc::BodiceOptions options{
+                static_cast<opc::NeckFinish>(neckFinish->currentIndex()), finishDepth->value(),
+                static_cast<opc::SleeveStyle>(sleeveStyle->currentIndex()), extraWidth->value(),
+                crownRise->value(), capGather->value()
+            };
             if (index == Dress) {
                 if (auto document = opc::draftDress(bodice, {
                         fittedHip->value(), hipEase->value(), hipDepth->value(), skirtLength->value(),
                         hemFlare->value(), lowerDart->value()
-                    }, &error))
+                    }, options, &error))
                     return document;
                 QMessageBox::warning(parent, wizard.windowTitle(), error);
                 continue;
             }
-            auto document = opc::draftBodiceAndSleeve(bodice, &error);
+            auto document = opc::draftBodiceAndSleeve(bodice, options, &error);
             if (document) {
                 const auto lengths = opc::measureBodiceSeams(*document);
                 if (lengths) {
                     const double front = lengths->frontCap - lengths->frontArmhole;
                     const double back = lengths->backCap - lengths->backArmhole;
-                    const bool within = std::abs(front - capEase->value()) <= tolerance->value()
-                        && std::abs(back - capEase->value()) <= tolerance->value();
+                    const double target = capEase->value() + (options.sleeveStyle == opc::SleeveStyle::Puff
+                        ? options.gatherPerCapSection : 0);
+                    const bool within = std::abs(front - target) <= tolerance->value()
+                        && std::abs(back - target) <= tolerance->value();
                     const auto mm = [](double value) { return QString::number(value, 'f', 2); };
                     const auto summary = tr("Front: armhole %1 mm, cap %2 mm, difference %3 mm.\n"
                                             "Back: armhole %4 mm, cap %5 mm, difference %6 mm.\n\n"
@@ -178,7 +205,7 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                                             "Open this fitting block?")
                         .arg(mm(lengths->frontArmhole), mm(lengths->frontCap), mm(front),
                              mm(lengths->backArmhole), mm(lengths->backCap), mm(back),
-                             mm(capEase->value()), mm(tolerance->value()),
+                             mm(target), mm(tolerance->value()),
                              within ? tr("Both sections are within tolerance.")
                                     : tr("At least one section is outside tolerance."));
                     if (QMessageBox::question(parent, wizard.windowTitle(), summary,

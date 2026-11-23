@@ -1,4 +1,7 @@
 #include "PatternDocument.h"
+#include "PieceGeometry.h"
+
+#include <array>
 
 #include <QHash>
 #include <QRegularExpression>
@@ -82,6 +85,11 @@ private:
             do {
                 ++pos_;
             } while (letter(peek()) || digit(peek()));
+            const auto name = source_.mid(start, pos_ - start);
+            const auto end = pos_;
+            if (name == u"quadlen" && take(u'('))
+                return quadraticLength(depth + 1);
+            pos_ = end;
             if (peek() == u'.') {
                 ++pos_;
                 if (peek() != u'x' && peek() != u'y')
@@ -112,6 +120,22 @@ private:
         if (!ok)
             fail(QStringLiteral("Invalid number"));
         return finite(number);
+    }
+
+    double quadraticLength(int depth) {
+        std::array<double, 6> coordinates;
+        for (std::size_t i = 0; i < coordinates.size(); ++i) {
+            if (i > 0 && !take(u','))
+                fail(QStringLiteral("Expected ',' between quadratic curve coordinates"));
+            coordinates[i] = expression(depth);
+        }
+        if (!take(u')'))
+            fail(QStringLiteral("Expected ')'"));
+        const auto length = seamLength({Shape::Curve, {coordinates[0], coordinates[1]},
+                                        {coordinates[4], coordinates[5]}, {coordinates[2], coordinates[3]}});
+        if (!length)
+            fail(QStringLiteral("Cannot measure the quadratic curve"));
+        return *length;
     }
 
     static bool letter(QChar c) {

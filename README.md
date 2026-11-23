@@ -1,4 +1,4 @@
-# SOFIT 1.5 Professional
+# SOFIT 1.6 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -73,12 +73,20 @@ Split and join work on manually drawn edges in pieces without point grading rule
 Start with a piece that has one closed outline of straight lines or a rectangle. Draw a line with **Exact Input** or with snapping, then select it and use **Pattern → Move Selection to Construction Layer**. For cuts and spreads, both endpoints must lie on the outline and the segment between them must stay inside the piece.
 
 - **Modeling → Cut Piece…** uses one selected construction line to make pieces A and B. Each receives a closed outline with its own copy of the cut edge. The panels keep their original positions, so the cut edges coincide on the canvas. Use the piece names in the objects list to distinguish them.
-- **Modeling → Slash and Spread…** uses one selected construction line. Enter the additional width in millimeters. One panel moves perpendicular to the cut, and the new outline bridges the gap at both ends. Use the added width for a pleat or gathering. Fold lines and gathering marks are added manually.
-- **Modeling → Close and Transfer Dart…** uses three selected construction lines. Draw two equal legs from an interior apex to the same straight edge with **Dart**. Draw an outlet from the same apex to a different edge. Select all three lines in the objects list. SOFIT rotates a section around the apex, closes the old dart, and opens the transferred dart in the main outline.
+- **Modeling → Slash and Spread…** uses one selected construction line. Enter the additional width in millimeters. One panel moves perpendicular to the cut, and the new outline bridges the gap at both ends. For built-in placement guides, use the pleat or gathering command.
+- **Modeling → Close and Transfer Dart…** uses three selected construction lines. Draw two equal legs from an interior apex to the same straight edge with **Dart**. Draw an outlet from the same apex to a different edge. Select all three lines in the objects list and identify the outlet in the dialog. SOFIT rotates a section around the apex, closes the old dart, and opens the transferred dart in the main outline.
 
-The commands consume the selected guides and replace the outline in one undoable action. SOFIT checks the source and result for closure, self-intersections and overlapping edges, and recalculates the stored seam allowance. If validation fails, the editor reports the reason and keeps the original geometry. New outlines use ordinary Main-layer line entities saved and exported through the existing SOFIT, PDF and DXF paths.
+- **Modeling → Move Open Contour Dart…** closes an inward V already cut into the main outline and transfers its angle to a new edge. Select the two main-layer legs and a construction line from their apex to the new outlet. The new legs retain equal lengths. This also works on the V made by the previous command.
+- **Modeling → Add Box Pleat…** adds the entered total intake and places construction lines at both sides and the center of the added strip. Bring the outside marks to the center and true the pleat at the joining edges for the intended fold direction.
+- **Modeling → Add Gathering Fullness…** adds the entered width and marks both sides of the gather zone on the Construction layer. Distribute the fullness to the joined seam length during assembly.
 
-This workflow supports one straight internal cut at a time, parallel spread, and dart closure with a transfer outlet. It requires manual geometry and one simple straight-sided outline. Curves, holes, multiple cuts, unequal or shaped dart mouths, and pivot spreading are outside this workflow. Unassign or remove other Construction and Allowance objects from the target piece before modeling. Pieces with generated geometry, point grading rules, notches, or saved fabric placements cannot be modeled with these commands.
+The cut, spread and dart commands consume the selected guides and replace the outline in one undoable action. SOFIT checks the source and result for closure, self-intersections and overlapping edges, and recalculates the stored seam allowance. If validation fails, the editor reports the reason and keeps the original geometry. New outlines use ordinary Main-layer line entities saved and exported through the existing SOFIT, PDF and DXF paths.
+
+The cut, spread and dart tools require manual geometry and one simple straight-sided outline. They support one cut at a time, parallel spread and equal-leg darts. Closing a dart requires an outlet for the displaced fullness. Curved or unequal dart legs, closing a dart without an outlet, multi-cut spreads and automatic seam truing are outside this workflow. Unassign unrelated Construction and Allowance objects from the target piece before modeling. Remove existing point grading rules, notches, edge-specific allowances and saved fabric placements before commands that replace edges. A piece-wide allowance carries over when the resulting offset validates. Add matched notches to the new edges with the Seams menu.
+
+**Modeling → Shape Silhouette…** scales the horizontal distance from a vertical axis at the center, left or right of the piece. Equal top and bottom percentages widen or narrow the piece uniformly. Different values taper or flare it. The operation keeps Y coordinates and uses the base outline's vertical bounds to interpolate scale between top and bottom. It transforms line endpoints and quadratic controls and converts a main-layer rectangle to four edges. A tapered quadratic uses transformed control points as a new quadratic. Check smooth joins and adjoining seam lengths after shaping.
+
+Silhouette shaping retains edge-specific allowances and arc-length notch fractions and remaps existing manual grade offsets. SOFIT rejects the edit if the resulting base or affected size has an invalid contour or allowance. Saved placements, perimeter-percentage notches and formula-generated entities on the selected piece require editing through their own tools. Keep Construction visible when exporting fold and gather guides. Undo and Redo restore the outline, guides and associated changes in a single step.
 
 ## Parametric drafting
 
@@ -88,7 +96,7 @@ This workflow supports one straight internal cut at a time, parallel spread, and
 4. Click **Validate**, then **Apply**. Reopen the draft and change `chest` to `1000`. The X coordinate of `B` increases from 245 to 265 mm. Undo and Redo restore the inputs and geometry together.
 5. Save and reopen the project to continue editing the formulas.
 
-Identifiers are case-sensitive and use ASCII letters, digits and underscores, with a letter or underscore first. Measurements and parameters share one namespace. Formulas can use `+`, `-`, `*`, `/`, parentheses, a decimal point, scientific notation and named point coordinates such as `B.x` and `B.y`. Coordinates are in mm and Y increases downwards. Points start on the Construction layer and edges on the Main layer.
+Identifiers are case-sensitive and use ASCII letters, digits and underscores, with a letter or underscore first. Measurements and parameters share one namespace. Formulas can use `+`, `-`, `*`, `/`, parentheses, a decimal point, scientific notation and named point coordinates such as `B.x` and `B.y`. The function `quadlen(ax, ay, cx, cy, bx, by)` measures a quadratic Bézier seam from start to end through its control point, using the same length calculation as the seam tools. Coordinates are in mm and Y increases downwards. Points start on the Construction layer and edges on the Main layer.
 
 Edit or delete generated objects in the draft editor. Piece and layer assignments are retained when a generated object's name stays the same. Renaming a point also requires updating formulas and edges that reference it. Review grade rules and fabric placements after editing the base contour.
 
@@ -152,6 +160,35 @@ through the usual PDF and DXF commands. Edit the base inputs in the parametric d
 per-size overrides under **Sizes, Measurements and Grade Rules…**. After changing measurements
 or grading, recheck piece contours and both cap sections with **Check Fitting Block by Size…**. The wizard's
 drafting checks, target and tolerance apply only at creation.
+
+### Neckline finishes and sleeve variants
+
+Choose a neckline finish in either the bodice or sleeveless dress wizard.
+
+- **Flat collar.** A half collar on the center-back fold, with exact copies of both neckline curves oriented into one sewing edge. The construction guide identifies the shoulder join. The outer curve widens toward the shoulder. Cut upper and undercollar layers, then adjust the roll and turn of cloth for the fabric.
+- **Straight stand.** A half stand on the center-back fold. Each straight sewing section equals the corresponding bodice neckline's measured arc length. The shoulder guide separates the front and back sections. This preset leaves closure overlap, shaping to the neck, interfacing and turn of cloth to the maker.
+- **Neck facing.** Separate front and back pieces on the fold with copied neckline curves. The shoulder edges extend along the same slope as the bodice shoulder and have equal length.
+
+The sleeve in the bodice wizard defaults to the fitted sleeve from 1.5. **Wide hem**
+adds width at the opening and keeps the original cap. **Puff** raises and widens
+the cap, adds width to the hem, and includes a straight sleeve band. The entered
+crown-to-hem length stays the same. The entered added width applies to both the
+upper arm and hem of the puff. The cuff measurement sets the band circumference.
+Quarter marks pair the hem with the band. Midpoint marks pair each cap section
+with its corresponding armhole section for distributing gathers.
+
+For the puff, the cap target is normal ease plus the intended gathering per
+section. The wizard and **Check Fitting Block by Size…** compare achieved and
+target lengths. Adjust the added width, crown rise or target for the desired
+gather distribution. The preset does not solve the cap shape for a target ease.
+That report also compares front and back neckline sections with their finish,
+and the puff hem with the band. The equations update with size measurements.
+Manual grade offsets are included in the report and can create mismatches.
+
+These are sewing-line patterns. Add allowances after checking the sample and
+keep fabric-fold edges at zero. Raglan, tailored collars, closure extensions
+and automatic sewing-seam truing are outside these presets. Opening a 1.5 project
+in 1.6 preserves its original draft. Projects using `quadlen` require 1.6 or newer.
 
 ### Trouser fitting block
 
