@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 0.4.0 LANGUAGES CXX)
+project(SOFIT VERSION 0.5.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -8,6 +8,8 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 add_library(sofit_core STATIC
     src/core/EntityPath.cpp
     src/core/PatternPdf.cpp
+    src/core/PieceMarkings.cpp
+    src/core/PatternDxf.cpp
     src/core/PatternDocument.cpp
     src/core/PatternDocument.h
     src/core/PieceGeometry.cpp

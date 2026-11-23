@@ -1,5 +1,6 @@
 #include "PatternPdf.h"
 #include "EntityPath.h"
+#include "PieceMarkings.h"
 
 #include <QCoreApplication>
 #include <QPainter>
@@ -99,10 +100,26 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
         bounds = bounds.united(extent);
         strokes.append({std::move(outline), extent, layer, filled});
     };
+    QVector<bool> visiblePieces(document.pieces().size(), false);
     for (qsizetype i = 0; i < document.entities().size(); ++i) {
         const auto& entity = document.entities()[i];
-        if (objectVisibility[i] && document.layerVisible(entity.layer))
+        if (objectVisibility[i] && document.layerVisible(entity.layer)) {
             append(entityPath(entity), entity.layer, entity.shape == Shape::Point);
+            if (entity.piece >= 0 && entity.layer == Layer::Main)
+                visiblePieces[entity.piece] = true;
+        }
+    }
+    for (qsizetype i = 0; i < visiblePieces.size(); ++i) {
+        if (!visiblePieces[i])
+            continue;
+        const auto& piece = document.pieces()[i];
+        if (!piece.showLabel && !piece.grainAngle && piece.notches.isEmpty())
+            continue;
+        const auto marks = buildPieceMarkings(piece, analyzePiece(document, i),
+                                              document.layerVisible(Layer::Allowance));
+        append(marks.notches, Layer::Main);
+        append(marks.grainline, Layer::Main);
+        append(marks.labelPath(), Layer::Main, true);
     }
     if (document.layerVisible(Layer::Allowance)) {
         for (const auto& polygon : allowances) {
@@ -177,6 +194,8 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
                     if (stroke.layer == Layer::Allowance)
                         style = Qt::DashLine;
                     painter.setPen(QPen(Qt::black, 0.28, style));
+                    if (stroke.filled)
+                        painter.setPen(Qt::NoPen);
                     painter.setBrush(stroke.filled ? QBrush(Qt::black) : QBrush(Qt::NoBrush));
                     painter.drawPath(stroke.path);
                 }

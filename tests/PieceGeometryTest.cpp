@@ -1,4 +1,6 @@
 #include "PieceGeometry.h"
+#include "PieceMarkings.h"
+#include "PatternDxf.h"
 
 #include <QFile>
 #include <QTemporaryDir>
@@ -128,8 +130,33 @@ void testFiles() {
     source.setLayerVisible(Layer::Construction, false);
     source.setLayerVisible(Layer::Allowance, false);
 
+    auto& marked = source.pieces()[0];
+    marked.cutCount = 2;
+    marked.size = QStringLiteral("48");
+    marked.showLabel = true;
+    marked.grainAngle = 135;
+    marked.notches = {12.5, 50, 75};
+
     PatternDocument loaded;
-    check(source.save(path) && loaded.load(path), "Round-trip SOFIT 4");
+    check(source.save(path) && loaded.load(path), "Round-trip SOFIT 5");
+    check(loaded.pieces() == source.pieces(), "Persist markings");
+    const QVector<PieceGeometry> geometry{analyzePiece(loaded, 0), analyzePiece(loaded, 1)};
+    const auto marks = buildPieceMarkings(loaded.pieces()[0], geometry[0]);
+    check(marks.notches.elementCount() == 6 && marks.grainline.elementCount() == 5
+          && marks.label.contains(QStringLiteral("48")), "Generate notch, grainline and label geometry");
+
+    QString error;
+    const auto dxfPath = temp.filePath("pattern.dxf");
+    check(exportPatternDxf(dxfPath, loaded, QVector<bool>(loaded.entities().size(), true), geometry, error),
+          "Write DXF");
+    QFile dxf(dxfPath);
+    check(dxf.open(QIODevice::ReadOnly), "Read DXF");
+    const auto contents = dxf.readAll();
+    check(contents.contains("$INSUNITS\n70\n4\n") && contents.contains("0\nSPLINE\n")
+          && contents.contains("8\nNOTCH\n") && contents.contains("8\nGRAINLINE\n")
+          && contents.contains("0\nTEXT\n") && contents.contains("\\U+0420")
+          && !contents.contains("8\nCONSTRUCTION\n") && !contents.contains("8\nALLOWANCE\n"),
+          "Export millimeters, curves and markings on visible layers");
     check(loaded.pieces().size() == 2 && loaded.pieces()[0].name == QStringLiteral("Рукав")
           && near(loaded.pieces()[0].allowanceMm, 8.125), "Persist piece name and width");
     check(loaded.entities()[0].piece == 1 && loaded.entities()[0].layer == Layer::Construction
@@ -141,6 +168,11 @@ void testFiles() {
         "objects":[{"type":"point","coordinates":[0,0],"piece":0,"layer":"main"}]})");
     check(!loaded.load(path) && loaded.pieces().size() == 2 && loaded.entities()[0].piece == 1,
           "Reject invalid piece references without overwriting the document");
+
+    writeFile(path, R"({"format":"SOFIT","version":4,"layerVisibility":[true,true,true],
+        "pieces":[{"name":"Front","allowanceMm":10}],"objects":[]})");
+    check(loaded.load(path) && loaded.pieces()[0] == Piece{QStringLiteral("Front"), 10},
+          "Open SOFIT 4 with default markings");
 
     const auto legacy = temp.filePath("legacy.opcad");
     writeFile(legacy, R"({"format":"OpenPatternCAD","version":1,"segments":[[0,0,15,9]]})");

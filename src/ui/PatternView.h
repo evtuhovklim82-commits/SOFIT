@@ -20,7 +20,8 @@ public:
     void selectEntity(qsizetype index);
     bool entityVisible(qsizetype index) const;
     void setEntityVisible(qsizetype index, bool visible);
-    void applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances);
+    void applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances,
+                     const QVector<QPainterPath>& markings = {});
     void setEntities(const QVector<opc::Entity>& entities);
     void insertEntity(qsizetype index, const opc::Entity& entity);
     void removeEntity(qsizetype index);

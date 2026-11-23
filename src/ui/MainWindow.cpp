@@ -1,6 +1,10 @@
 #include "MainWindow.h"
 #include "PatternView.h"
 #include "PatternPdf.h"
+#include "PatternDxf.h"
+#include "PieceMarkings.h"
+#include <QCheckBox>
+#include <QSpinBox>
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
@@ -105,7 +109,7 @@ private:
 }
 
 MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
-    setWindowTitle(QStringLiteral("SOFIT 0.4[*]"));
+    setWindowTitle(QStringLiteral("SOFIT 0.5[*]"));
     resize(1100, 750);
     setCentralWidget(view_);
     setStyleSheet(QStringLiteral(
@@ -137,8 +141,10 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         view_->selectEntity(selected.size() == 1 ? objects_->indexOfTopLevelItem(selected.front()) : -1);
     });
     connect(objects_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
-        if (column == 1)
+        if (column == 1) {
             view_->setEntityVisible(objects_->indexOfTopLevelItem(item), item->checkState(1) == Qt::Checked);
+            refreshPieceDisplay();
+        }
     });
     connect(&scene_, &QGraphicsScene::selectionChanged, this, [this] {
         if (objects_->signalsBlocked())
@@ -159,6 +165,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     file->addAction(tr("&Open"), QKeySequence::Open, this, &MainWindow::openDocument);
     file->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::saveDocument);
     file->addAction(tr("Export &SVG"), this, &MainWindow::exportSvg);
+    file->addAction(tr("Export &DXF…"), this, &MainWindow::exportDxf);
     file->addAction(tr("Export &PDF for Printing…"), this, &MainWindow::exportPdf);
 
     auto* edit = menuBar()->addMenu(tr("&Edit"));
@@ -302,17 +309,41 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     statusBar()->showMessage(tr("Wheel: zoom | Middle drag: pan | Right click or Esc: cancel"));
 }
 
+void MainWindow::refreshPieceDisplay() {
+    QVector<QPolygonF> allowances;
+    for (const auto& geometry : pieces_) {
+        if (!geometry.allowance.isEmpty())
+            allowances.append(geometry.allowance);
+    }
+    QVector<QPainterPath> markings;
+    if (doc_.layerVisible(opc::Layer::Main)) {
+        QVector<bool> visible(pieces_.size(), false);
+        for (qsizetype i = 0; i < doc_.entities().size(); ++i) {
+            const auto& entity = doc_.entities()[i];
+            if (entity.piece >= 0 && entity.layer == opc::Layer::Main && view_->entityVisible(i))
+                visible[entity.piece] = true;
+        }
+        for (qsizetype i = 0; i < pieces_.size(); ++i) {
+            if (!visible[i])
+                continue;
+            const auto marks = opc::buildPieceMarkings(doc_.pieces()[i], pieces_[i],
+                                                       doc_.layerVisible(opc::Layer::Allowance));
+            QPainterPath path = marks.notches;
+            path.addPath(marks.grainline);
+            path.addPath(marks.labelPath());
+            if (!path.isEmpty())
+                markings.append(std::move(path));
+        }
+    }
+    view_->applyLayers(doc_, allowances, markings);
+}
+
 void MainWindow::refreshObjects() {
     const QSignalBlocker blocker(objects_);
     pieces_.clear();
-    QVector<QPolygonF> allowances;
-    for (qsizetype index = 0; index < doc_.pieces().size(); ++index) {
-        auto geometry = opc::analyzePiece(doc_, index);
-        if (!geometry.allowance.isEmpty())
-            allowances.append(geometry.allowance);
-        pieces_.append(std::move(geometry));
-    }
-    view_->applyLayers(doc_, allowances);
+    for (qsizetype index = 0; index < doc_.pieces().size(); ++index)
+        pieces_.append(opc::analyzePiece(doc_, index));
+    refreshPieceDisplay();
     for (int index = 0; index < static_cast<int>(layerActions_.size()); ++index)
         layerActions_[index]->setChecked(doc_.layerVisible(static_cast<opc::Layer>(index)));
 
@@ -476,6 +507,38 @@ void MainWindow::managePiece() {
     width->setSuffix(tr(" mm"));
     width->setValue(original.allowanceMm);
     form->addRow(tr("Seam allowance"), width);
+    auto* label = new QCheckBox(tr("Show on piece"), &dialog);
+    label->setChecked(original.showLabel);
+    form->addRow(tr("Label"), label);
+    auto* count = new QSpinBox(&dialog);
+    count->setRange(1, 9999);
+    count->setValue(original.cutCount);
+    form->addRow(tr("Cut quantity"), count);
+    auto* size = new QLineEdit(original.size, &dialog);
+    form->addRow(tr("Size"), size);
+
+    auto* grain = new QCheckBox(tr("Show arrow"), &dialog);
+    grain->setChecked(original.grainAngle.has_value());
+    form->addRow(tr("Grainline"), grain);
+    auto* angle = new QDoubleSpinBox(&dialog);
+    angle->setDecimals(2);
+    angle->setRange(0, 359.99);
+    angle->setValue(original.grainAngle.value_or(90));
+    angle->setEnabled(grain->isChecked());
+    connect(grain, &QCheckBox::toggled, angle, &QWidget::setEnabled);
+    form->addRow(tr("Angle clockwise from right (°)"), angle);
+
+    auto* notches = new QLineEdit(&dialog);
+    QStringList positions;
+    for (double position : original.notches)
+        positions.append(QString::number(position, 'g', 17));
+    notches->setText(positions.join(' '));
+    notches->setPlaceholderText(tr("Example: 10 35.5 80"));
+    notches->setToolTip(tr("Enter up to 100 positions along the contour, in percent from 0 to below 100. "
+                           "Separate positions with spaces and use a decimal point."));
+    form->addRow(tr("Notches (% of perimeter)"), notches);
+    auto edited = original;
+
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     auto* remove = buttons->addButton(tr("Delete Piece…"), QDialogButtonBox::DestructiveRole);
     form->addRow(buttons);
@@ -502,6 +565,24 @@ void MainWindow::managePiece() {
                 return;
             }
         }
+        const auto fields = notches->text().simplified().split(' ', Qt::SkipEmptyParts);
+        QVector<double> values;
+        for (const auto& field : fields) {
+            bool ok = false;
+            const double position = field.toDouble(&ok);
+            if (!ok || !(position >= 0 && position < 100) || values.size() >= 100) {
+                QMessageBox::warning(&dialog, tr("Invalid notches"), notches->toolTip());
+                return;
+            }
+            values.append(position);
+        }
+        edited.name = name->text().trimmed();
+        edited.allowanceMm = width->value() == displayedWidth ? original.allowanceMm : width->value();
+        edited.cutCount = count->value();
+        edited.size = size->text().trimmed();
+        edited.showLabel = label->isChecked();
+        edited.grainAngle = grain->isChecked() ? std::optional<double>(angle->value()) : std::nullopt;
+        edited.notches = std::move(values);
         dialog.accept();
     });
 
@@ -519,13 +600,9 @@ void MainWindow::managePiece() {
             updated.replace(index, entity);
         }
         applyPatternEdit(std::move(updated), tr("Delete Piece"));
-    } else {
-        const auto newWidth = width->value() == displayedWidth ? original.allowanceMm : width->value();
-        const auto newName = name->text().trimmed();
-        if (newName != original.name || newWidth != original.allowanceMm) {
-            updated.pieces()[piece] = {newName, newWidth};
-            applyPatternEdit(std::move(updated), tr("Edit Piece"));
-        }
+    } else if (edited != original) {
+        updated.pieces()[piece] = std::move(edited);
+        applyPatternEdit(std::move(updated), tr("Edit Piece"));
     }
 }
 
@@ -710,6 +787,23 @@ bool MainWindow::saveDocument() {
     setWindowFilePath(path);
     undo_.setClean();
     return true;
+}
+
+void MainWindow::exportDxf() {
+    auto path = QFileDialog::getSaveFileName(this, tr("Export DXF"), {}, tr("DXF (*.dxf)"));
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(".dxf", Qt::CaseInsensitive))
+        path += ".dxf";
+    QVector<bool> visibility;
+    visibility.reserve(doc_.entities().size());
+    for (qsizetype i = 0; i < doc_.entities().size(); ++i)
+        visibility.append(view_->entityVisible(i));
+    QString error;
+    if (!opc::exportPatternDxf(path, doc_, visibility, pieces_, error))
+        QMessageBox::warning(this, tr("Export failed"), error);
+    else
+        statusBar()->showMessage(tr("DXF exported"), 3000);
 }
 
 void MainWindow::exportPdf() {

@@ -3,6 +3,8 @@
 #include <QString>
 #include <QVector>
 #include <array>
+#include <optional>
+#include <optional>
 
 namespace opc {
 enum class Shape { Point, Line, Rectangle, Circle, Curve };
@@ -12,6 +14,12 @@ enum class Layer { Main, Construction, Allowance };
 struct Piece {
     QString name;
     double allowanceMm = 0;
+    int cutCount = 1;
+    QString size;
+    bool showLabel = false;
+    std::optional<double> grainAngle;
+    QVector<double> notches;
+    bool operator==(const Piece&) const = default;
 };
 
 struct Entity {

@@ -285,6 +285,7 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
         geometry.allowance = offsetRing(ring, width);
         geometry.allowanceFailed = geometry.allowance.isEmpty();
     }
+    geometry.contour = std::move(ring);
     return geometry;
 }
 }

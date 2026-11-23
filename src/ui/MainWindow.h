@@ -26,9 +26,11 @@ private:
     void deleteSelection();
     void exactInput();
     void refreshObjects();
+    void refreshPieceDisplay();
     void moveEntity(qsizetype index, const QPointF& offset);
     void exportSvg();
     void exportPdf();
+    void exportDxf();
     void createPiece();
     void assignPiece();
     void managePiece();

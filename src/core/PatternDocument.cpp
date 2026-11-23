@@ -43,12 +43,20 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     }
     QJsonArray pieces;
     for (const auto& piece : pieces_) {
-        pieces.append(QJsonObject{{"name", piece.name}, {"allowanceMm", piece.allowanceMm}});
+        QJsonArray notches;
+        for (double position : piece.notches)
+            notches.append(position);
+        QJsonObject record{{"name", piece.name}, {"allowanceMm", piece.allowanceMm},
+                           {"cutCount", piece.cutCount}, {"size", piece.size},
+                           {"showLabel", piece.showLabel}, {"notches", notches}};
+        if (piece.grainAngle)
+            record.insert("grainAngle", *piece.grainAngle);
+        pieces.append(record);
     }
     QJsonArray layerVisibility;
     for (bool visible : layerVisibility_)
         layerVisibility.append(visible);
-    const QJsonObject root{{"format", "SOFIT"}, {"version", 4}, {"objects", objects},
+    const QJsonObject root{{"format", "SOFIT"}, {"version", 5}, {"objects", objects},
                            {"pieces", pieces}, {"layerVisibility", layerVisibility}};
     const auto data = QJsonDocument(root).toJson();
     QSaveFile file(path);
@@ -75,14 +83,14 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto format = root.value("format").toString();
     const auto version = root.value("version").toDouble();
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
-    const bool current = (version == 2 || version == 3 || version == 4) && format == "SOFIT";
+    const bool current = (version == 2 || version == 3 || version == 4 || version == 5) && format == "SOFIT";
     const auto objects = root.value(legacy ? "segments" : "objects");
     if ((!legacy && !current) || !objects.isArray())
         return fail(QStringLiteral("Unsupported document format"));
 
     std::array<bool, 3> layerVisibility{true, true, true};
     QVector<Piece> pieces;
-    if (version == 4) {
+    if (version >= 4) {
         const auto visibility = root.value("layerVisibility").toArray();
         if (visibility.size() != static_cast<qsizetype>(layerVisibility.size()))
             return fail(QStringLiteral("Invalid layer visibility"));
@@ -100,7 +108,31 @@ bool PatternDocument::load(const QString& path, QString* error) {
             const auto allowance = piece.value("allowanceMm").toDouble(-1);
             if (name.isEmpty() || !std::isfinite(allowance) || allowance < 0)
                 return fail(QStringLiteral("Invalid piece"));
-            pieces.append({name, allowance});
+            Piece parsedPiece{name, allowance};
+            if (version >= 5) {
+                const auto count = piece.value("cutCount").toInt();
+                const auto positions = piece.value("notches");
+                if (count < 1 || count > 9999 || !piece.value("size").isString()
+                    || !piece.value("showLabel").isBool() || !positions.isArray()
+                    || positions.toArray().size() > 100)
+                    return fail(QStringLiteral("Invalid piece markings"));
+                parsedPiece.cutCount = count;
+                parsedPiece.size = piece.value("size").toString();
+                parsedPiece.showLabel = piece.value("showLabel").toBool();
+                for (const auto& position : positions.toArray()) {
+                    const double percent = position.toDouble(-1);
+                    if (!(percent >= 0 && percent < 100))
+                        return fail(QStringLiteral("Invalid notch position"));
+                    parsedPiece.notches.append(percent);
+                }
+                if (piece.contains("grainAngle")) {
+                    const double angle = piece.value("grainAngle").toDouble(-1);
+                    if (!(angle >= 0 && angle < 360))
+                        return fail(QStringLiteral("Invalid grainline angle"));
+                    parsedPiece.grainAngle = angle;
+                }
+            }
+            pieces.append(std::move(parsedPiece));
         }
     }
 
@@ -131,7 +163,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
         if (shape == Shape::Curve)
             control = QPointF(values[4].toDouble(), values[5].toDouble());
         Entity entity{shape, a, b, control};
-        if (version == 4) {
+        if (version >= 4) {
             const auto piece = fields.value("piece").toDouble(-2);
             const auto layer = fields.value("layer").toString();
             if (!std::isfinite(piece) || piece < -1 || piece >= pieces.size()

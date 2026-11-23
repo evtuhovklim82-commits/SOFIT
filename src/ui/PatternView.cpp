@@ -301,7 +301,8 @@ void PatternView::updateEntityStyle(qsizetype index) {
     items_[index]->setVisible(entityVisibility_[index] && (construction ? constructionVisible_ : mainVisible_));
 }
 
-void PatternView::applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances) {
+void PatternView::applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances,
+                              const QVector<QPainterPath>& markings) {
     mainVisible_ = document.layerVisible(opc::Layer::Main);
     constructionVisible_ = document.layerVisible(opc::Layer::Construction);
     for (qsizetype index = 0; index < entities_.size(); ++index) {
@@ -310,6 +311,11 @@ void PatternView::applyLayers(const opc::PatternDocument& document, const QVecto
     }
     qDeleteAll(allowances_);
     allowances_.clear();
+    for (const auto& path : markings) {
+        auto* item = scene()->addPath(path, QPen(QColor("#489e79"), 0));
+        item->setZValue(-1);
+        allowances_.append(item);
+    }
     if (!document.layerVisible(opc::Layer::Allowance))
         return;
 

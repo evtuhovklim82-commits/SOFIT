@@ -16,6 +16,7 @@ struct PieceGeometry {
     double perimeterMm = 0;
     QRectF bounds;
     QPolygonF allowance;
+    QPolygonF contour;
     bool allowanceFailed = false;
 };
 
