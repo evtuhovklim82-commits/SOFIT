@@ -1,7 +1,9 @@
 #include "Production.h"
+#include "PatternDxf.h"
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <cstdlib>
@@ -118,20 +120,128 @@ int main(int argc, char** argv) {
     check(arrangeFabric(triangle, triangleBatch).error == FabricLayoutError::InvalidContour
           && arrangeFabric(triangle, triangleBatch).placements.isEmpty(), "Reject incomplete contours atomically");
 
+    triangleBatch.allowHalfTurns = true;
+    triangleBatch.fabricWidth = 160;
+    triangleBatch.directionalFabric = true;
+    triangleBatch.placements = {
+        {0, {}, {0, 90}, true, CutHand::Left},
+        {0, {}, {80, 90}, false, CutHand::Right, FoldEdge::None, true},
+        {0, {}, {4, 0}, false, CutHand::Single, FoldEdge::Left}
+    };
+    const auto left = fabricPiece(triangle, {0, {}, {}, false, CutHand::Left});
+    const auto right = fabricPiece(triangle, triangleBatch.placements[1]);
+    check(left.cut.size() == right.cut.size() && !left.cut.isEmpty(), "Build both hands");
+    for (qsizetype i = 0; i < left.cut.size(); ++i)
+        check(left.cut[i].x() + right.cut[i].x() == 80 && left.cut[i].y() == right.cut[i].y(),
+              "Reflect an asymmetric contour across the grain");
+    auto report = cuttingReport(triangle, triangleBatch);
+    check(report.orientationViolations == 1 && report.foldViolations == 1 && report.rows.size() == 1
+          && report.rows[0].left == 1 && report.rows[0].right == 1 && report.rows[0].onFold == 1,
+          "Group by piece and size and report rotation and fold violations");
+    const auto constrained = arrangeFabric(triangle, triangleBatch);
+    check(constrained.error == FabricLayoutError::None && constrained.placements.size() == 3
+          && constrained.placements[0].hand == CutHand::Left
+          && constrained.placements[1].hand == CutHand::Right
+          && constrained.placements[2].position.x() == 0, "Arrange hands and pin fold to left boundary");
+    auto onFabric = triangleBatch;
+    onFabric.placements = constrained.placements;
+    report = cuttingReport(triangle, onFabric);
+    check(!report.orientationViolations && !report.foldViolations && !report.usage.invalid
+          && !report.usage.outside && !report.usage.overlaps, "Verify actual arranged geometry and constraints");
+
+    auto locked = onFabric;
+    locked.fabricWidth = 80;
+    locked.directionalFabric = false;
+    locked.placements = {{0, {}, {}, false, CutHand::Single, FoldEdge::None, true},
+                         {0, {}, {}, true, CutHand::Single, FoldEdge::None, true}};
+    const auto fixed = arrangeFabric(triangle, locked);
+    check(fixed.error == FabricLayoutError::None && !fixed.placements[0].reversed && !fixed.placements[1].reversed
+          && cuttingReport(triangle, ProductionData{.fabricWidth = 80, .placements = fixed.placements}).usage.length > 159,
+          "Do not turn a fixed copy even if turning would allow nesting");
+
+    auto rightFold = onFabric;
+    rightFold.placements = {{0, {}, {}, false, CutHand::Single, FoldEdge::Right}};
+    check(arrangeFabric(triangle, rightFold).error == FabricLayoutError::InvalidContour,
+          "Reject a fold side with no straight outer edge");
+    rightFold.placements[0].piece = 1;
+    triangle.insert(triangle.entities().size(), {Shape::Rectangle, {0, 0}, {60, 20}, {}, 1});
+    const auto folded = arrangeFabric(triangle, rightFold);
+    check(folded.error == FabricLayoutError::None && folded.placements[0].position.x() == 100,
+          "Place a right fold at working width minus cut width");
+    triangle.pieces()[1].allowanceMm = 5;
+    check(arrangeFabric(triangle, rightFold).error == FabricLayoutError::InvalidContour,
+          "Reject added uniform allowance on a fold");
+    triangle.pieces()[1].allowanceMm = 0;
+
     production.allowHalfTurns = false;
     QTemporaryDir temp;
     check(temp.isValid(), "Create temporary directory");
     const auto file = temp.filePath("production.sofit");
-    check(base.save(file), "Save version 6 production data");
+    check(base.save(file), "Save version 7 production data");
     PatternDocument loaded;
     check(loaded.load(file) && saveProduction(loaded.production()) == saveProduction(production)
           && loaded.pieces() == base.pieces(), "Round-trip sizes, rules, placement, width, and piece metadata");
     auto json = saveProduction(production);
     auto version6 = json;
     version6.remove("allowHalfTurns");
+    version6.remove("directionalFabric");
+    QJsonArray oldPlacements;
+    for (const auto value : version6.value("placements").toArray()) {
+        auto row = value.toObject();
+        row.remove("hand");
+        row.remove("fold");
+        row.remove("fixedOrientation");
+        oldPlacements.append(row);
+    }
+    version6["placements"] = oldPlacements;
     ProductionData legacyProduction;
     check(loadProduction(version6, 2, legacyProduction) && legacyProduction.allowHalfTurns,
           "Keep legacy rotation behavior for version 6 files without the optional setting");
+    check(!legacyProduction.directionalFabric && legacyProduction.placements.front().reversed
+          && legacyProduction.placements.front().hand == CutHand::Single
+          && legacyProduction.placements.front().fold == FoldEdge::None
+          && !legacyProduction.placements.front().fixedOrientation, "Use compatible defaults for legacy copies");
+    QFile saved(file);
+    check(saved.open(QIODevice::ReadOnly), "Read saved fixture");
+    auto legacyRoot = QJsonDocument::fromJson(saved.readAll()).object();
+    saved.close();
+    legacyRoot["version"] = 6;
+    legacyRoot["production"] = version6;
+    QFile oldFile(temp.filePath("version6.sofit"));
+    check(oldFile.open(QIODevice::WriteOnly), "Create version 6 project");
+    oldFile.write(QJsonDocument(legacyRoot).toJson());
+    oldFile.close();
+    PatternDocument openedLegacy;
+    check(openedLegacy.load(oldFile.fileName())
+          && saveProduction(openedLegacy.production()) == saveProduction(legacyProduction),
+          "Open a complete version 6 project");
+
+    rightFold.placements = folded.placements;
+    QString dxfError;
+    const auto dxfPath = temp.filePath("marker.dxf");
+    check(exportFabricDxf(dxfPath, triangle, rightFold, dxfError), "Export a valid folded layout");
+    QFile dxf(dxfPath);
+    check(dxf.open(QIODevice::ReadOnly), "Read folded-layout DXF");
+    const auto dxfBytes = dxf.readAll();
+    check(dxfBytes.contains("8\nCUT\n100\nAcDbPolyline\n90\n4\n70\n0\n")
+          && dxfBytes.contains("8\nFOLD\n100\nAcDbLine\n10\n160\n"),
+          "Omit the fold side from the open CUT polyline and mark it separately in millimeters");
+    rightFold.placements[0].position.rx() -= 1;
+    check(!exportFabricDxf(temp.filePath("off-fold.dxf"), triangle, rightFold, dxfError),
+          "Reject off-fold paths before writing a DXF");
+
+    const auto marker = temp.filePath("marker.sofit");
+    check(triangle.save(marker), "Save new layout settings");
+    PatternDocument reopenedMarker;
+    check(reopenedMarker.load(marker)
+          && saveProduction(reopenedMarker.production()) == saveProduction(triangleBatch),
+          "Round-trip copied hand, fold, fixed rotation and directional material");
+    auto malformed = triangleBatch;
+    malformed.placements[0].fold = FoldEdge::Left;
+    check(!loadProduction(saveProduction(malformed), 2, reopenedMarker.production())
+          && saveProduction(reopenedMarker.production()) == saveProduction(triangleBatch),
+          "Reject incompatible hand and fold modes atomically");
+
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());
     check(!loadProduction(saveProduction(duplicate), 2, loaded.production())

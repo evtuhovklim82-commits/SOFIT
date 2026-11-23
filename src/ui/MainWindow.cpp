@@ -123,7 +123,7 @@ private:
 }
 
 MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
-    setWindowTitle(QStringLiteral("SOFIT 0.7[*]"));
+    setWindowTitle(QStringLiteral("SOFIT 0.8[*]"));
     resize(1100, 750);
     setCentralWidget(view_);
     setStyleSheet(QStringLiteral(

@@ -1,9 +1,16 @@
 #include "PatternDxf.h"
 #include "PieceMarkings.h"
+#include "Production.h"
 
 #include <QLineF>
+#include <QMap>
+#include <QPainterPath>
+#include <QPolygonF>
+#include <QRectF>
 #include <QSaveFile>
 #include <QTextStream>
+#include <cmath>
+#include <initializer_list>
 
 namespace opc {
 namespace {
@@ -60,6 +67,54 @@ private:
     QTextStream& stream_;
 };
 
+void writeHeader(DxfWriter& dxf, std::initializer_list<const char*> layers) {
+    dxf.section("HEADER");
+    dxf.group(9, "$ACADVER");
+    dxf.group(1, "AC1015");
+    dxf.group(9, "$INSUNITS");
+    dxf.group(70, 4);
+    dxf.group(9, "$MEASUREMENT");
+    dxf.group(70, 1);
+    dxf.group(0, "ENDSEC");
+
+    dxf.section("TABLES");
+    dxf.group(0, "TABLE");
+    dxf.group(2, "LAYER");
+    dxf.group(100, "AcDbSymbolTable");
+    dxf.group(70, layers.size());
+    for (const char* layer : layers) {
+        dxf.group(0, "LAYER");
+        dxf.group(100, "AcDbSymbolTableRecord");
+        dxf.group(100, "AcDbLayerTableRecord");
+        dxf.group(2, layer);
+        dxf.group(70, 0);
+        dxf.group(62, 7);
+        dxf.group(6, "CONTINUOUS");
+    }
+    dxf.group(0, "ENDTAB");
+    dxf.group(0, "ENDSEC");
+}
+
+// Start on the fold, traverse the cutting perimeter and stop on the fold.
+QPolygonF openFoldContour(QPolygonF cut, const QLineF& fold) {
+    if (cut.front() == cut.back())
+        cut.removeLast();
+    const auto onFold = [&](QPointF point) { return std::abs(point.x() - fold.x1()) <= 1e-7; };
+    QPolygonF outline;
+    for (qsizetype start = 0; start < cut.size(); ++start) {
+        if (!onFold(cut[start]) || onFold(cut[(start + 1) % cut.size()]))
+            continue;
+        outline.append(cut[start]);
+        for (qsizetype step = 1; step < cut.size(); ++step) {
+            const auto point = cut[(start + step) % cut.size()];
+            outline.append(point);
+            if (onFold(point))
+                return outline;
+        }
+    }
+    return {};
+}
+
 QString dxfText(const QString& text) {
     QString escaped;
     for (const QChar character : text) {
@@ -88,31 +143,7 @@ bool exportPatternDxf(const QString& path, const PatternDocument& document,
     QTextStream stream(&file);
     stream.setRealNumberPrecision(16);
     DxfWriter dxf(stream);
-    dxf.section("HEADER");
-    dxf.group(9, "$ACADVER");
-    dxf.group(1, "AC1015");
-    dxf.group(9, "$INSUNITS");
-    dxf.group(70, 4);
-    dxf.group(9, "$MEASUREMENT");
-    dxf.group(70, 1);
-    dxf.group(0, "ENDSEC");
-
-    dxf.section("TABLES");
-    dxf.group(0, "TABLE");
-    dxf.group(2, "LAYER");
-    dxf.group(100, "AcDbSymbolTable");
-    dxf.group(70, 7);
-    for (const char* layer : {"0", "MAIN", "CONSTRUCTION", "ALLOWANCE", "NOTCH", "GRAINLINE", "LABEL"}) {
-        dxf.group(0, "LAYER");
-        dxf.group(100, "AcDbSymbolTableRecord");
-        dxf.group(100, "AcDbLayerTableRecord");
-        dxf.group(2, layer);
-        dxf.group(70, 0);
-        dxf.group(62, 7);
-        dxf.group(6, "CONTINUOUS");
-    }
-    dxf.group(0, "ENDTAB");
-    dxf.group(0, "ENDSEC");
+    writeHeader(dxf, {"0", "MAIN", "CONSTRUCTION", "ALLOWANCE", "NOTCH", "GRAINLINE", "LABEL"});
 
     dxf.section("ENTITIES");
     QVector<bool> visiblePieces(geometry.size(), false);
@@ -186,4 +217,54 @@ bool exportPatternDxf(const QString& path, const PatternDocument& document,
     error.clear();
     return true;
 }
+bool exportFabricDxf(const QString& path, const PatternDocument& document,
+                     const ProductionData& data, QString& error) {
+    const auto report = cuttingReport(document, data);
+    const auto& usage = report.usage;
+    if (!(data.fabricWidth > 0) || !std::isfinite(data.fabricWidth)
+        || data.placements.isEmpty() || usage.invalid || usage.outside || usage.overlaps
+        || report.orientationViolations || report.foldViolations) {
+        error = QStringLiteral("The fabric layout must contain valid, non-overlapping copies within the fabric.");
+        return false;
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        error = file.errorString();
+        return false;
+    }
+    QTextStream stream(&file);
+    stream.setRealNumberPrecision(16);
+    DxfWriter dxf(stream);
+    writeHeader(dxf, {"0", "CUT", "FOLD", "GRAINLINE", "FABRIC"});
+    dxf.section("ENTITIES");
+    dxf.polyline("FABRIC", QPolygonF(QRectF(0, 0, data.fabricWidth, usage.length)), true);
+    QMap<QString, PatternDocument> graded;
+    for (const auto& placement : data.placements) {
+        if (!graded.contains(placement.size))
+            graded.insert(placement.size, gradedPattern(document, placement.size));
+        const auto geometry = fabricPiece(graded.constFind(placement.size).value(), placement);
+        const bool onFold = !geometry.fold.isNull();
+        auto outline = onFold ? openFoldContour(geometry.cut, geometry.fold) : geometry.cut;
+        if (outline.size() < 3) {
+            error = QStringLiteral("Could not separate a cutting contour from its fold line.");
+            return false;
+        }
+        if (!onFold && outline.front() == outline.back())
+            outline.removeLast();
+        dxf.polyline("CUT", outline.translated(placement.position), !onFold);
+        if (onFold)
+            dxf.line("FOLD", geometry.fold.p1() + placement.position, geometry.fold.p2() + placement.position);
+        if (document.pieces()[placement.piece].grainAngle)
+            dxf.line("GRAINLINE", geometry.grain.p1() + placement.position, geometry.grain.p2() + placement.position);
+    }
+    dxf.group(0, "ENDSEC");
+    dxf.group(0, "EOF");
+    stream.flush();
+    if (stream.status() != QTextStream::Ok || !file.commit()) {
+        error = file.errorString();
+        return false;
+    }
+    return true;
+}
+
 }

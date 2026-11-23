@@ -240,8 +240,10 @@ int main(int argc, char** argv) {
 
     runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
         dialog.findChild<QDoubleSpinBox*>()->setValue(1450);
-        const auto combos = dialog.findChildren<QComboBox*>();
-        combos.last()->setCurrentIndex(1);
+        for (auto* combo : dialog.findChildren<QComboBox*>()) {
+            if (combo->findText("Base pattern") >= 0)
+                combo->setCurrentIndex(combo->findData("L"));
+        }
         for (auto* button : dialog.findChildren<QPushButton*>()) {
             if (button->text() == "Add copy")
                 button->click();
@@ -268,7 +270,10 @@ int main(int argc, char** argv) {
           && loaded.production().placements.front().reversed, "Save grading and layout through the UI");
 
     runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
-        dialog.findChild<QCheckBox*>()->setChecked(false);
+        for (auto* option : dialog.findChildren<QCheckBox*>()) {
+            if (option->text() == "One-way nap or print")
+                option->setChecked(true);
+        }
         for (auto* button : dialog.findChildren<QPushButton*>()) {
             if (button->text() == "Auto arrange")
                 button->click();
@@ -280,10 +285,33 @@ int main(int argc, char** argv) {
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
     action(window, "&Save").trigger();
-    check(loaded.load(pattern) && !loaded.production().allowHalfTurns
+    check(loaded.load(pattern) && loaded.production().directionalFabric
           && loaded.production().placements.size() == 1 && !loaded.production().placements.front().reversed
           && loaded.production().placements.front().position == QPointF{},
           "Save and reload the automatic arrangement and directional fabric setting");
+
+    runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
+        for (auto* combo : dialog.findChildren<QComboBox*>()) {
+            const auto pairMode = combo->findText("Left + right pair");
+            if (pairMode >= 0)
+                combo->setCurrentIndex(pairMode);
+        }
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Add copy")
+                button->click();
+        }
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Auto arrange")
+                button->click();
+        }
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    action(window, "&Save").trigger();
+    check(loaded.load(pattern) && loaded.production().placements.size() == 3
+          && loaded.production().placements[1].hand == opc::CutHand::Left
+          && loaded.production().placements[2].hand == opc::CutHand::Right
+          && !loaded.production().placements[1].reversed && !loaded.production().placements[2].reversed,
+          "Add and arrange a mirror pair with one-way fabric through the UI");
 
     const auto gradedDxfPath = temp.filePath("graded.dxf");
     const auto gradedPdfPath = temp.filePath("graded.pdf");

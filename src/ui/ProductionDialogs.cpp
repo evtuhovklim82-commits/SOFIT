@@ -1,5 +1,6 @@
 #include "ProductionDialogs.h"
 #include "Production.h"
+#include "PatternDxf.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -7,19 +8,30 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QFileDialog>
 #include <QGraphicsItem>
+#include <QGraphicsLineItem>
+#include <QGraphicsPolygonItem>
+#include <QGraphicsSimpleTextItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineF>
+#include <QMap>
+#include <QPainter>
 #include <QMessageBox>
 #include <QPainterPath>
+#include <QPen>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
+#include <QVariant>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 
@@ -57,8 +69,10 @@ QDialogButtonBox* dialogButtons(QVBoxLayout* layout, QDialog& dialog) {
 
 class PlacementItem : public QGraphicsPolygonItem {
 public:
-    PlacementItem(qsizetype index, const QPolygonF& cut, std::function<void()> moved)
-        : QGraphicsPolygonItem(cut), index(index), valid(!cut.isEmpty()), moved_(std::move(moved)) {
+    PlacementItem(qsizetype index, const QPolygonF& cut, std::optional<double> lockedX,
+                  std::function<void()> moved)
+        : QGraphicsPolygonItem(cut), index(index), valid(!cut.isEmpty()), lockedX_(lockedX),
+          moved_(std::move(moved)) {
         if (!valid)
             setPolygon(QPolygonF(QRectF(0, 0, 100, 40)));
         setFlags(ItemIsSelectable | ItemIsMovable | ItemSendsGeometryChanges);
@@ -68,12 +82,18 @@ public:
 
 protected:
     QVariant itemChange(GraphicsItemChange change, const QVariant& value) override {
+        if (change == ItemPositionChange && scene() && lockedX_) {
+            auto position = value.toPointF();
+            position.setX(*lockedX_);
+            return position;
+        }
         if (change == ItemPositionHasChanged && scene())
             moved_();
         return QGraphicsPolygonItem::itemChange(change, value);
     }
 
 private:
+    std::optional<double> lockedX_;
     std::function<void()> moved_;
 };
 }
@@ -274,6 +294,25 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     auto* fit = new QPushButton(tr("Fit"));
     controls->addWidget(fit);
 
+    auto* cutControls = new QHBoxLayout;
+    layout->addLayout(cutControls);
+    auto* cutMode = new QComboBox;
+    cutMode->addItem(tr("Single copy"));
+    cutMode->addItem(tr("Left + right pair"));
+    cutMode->addItem(tr("Left copy"));
+    cutMode->addItem(tr("Right copy (mirrored)"));
+    cutMode->addItem(tr("On left fold"));
+    cutMode->addItem(tr("On right fold"));
+    cutControls->addWidget(new QLabel(tr("Cut mode")));
+    cutControls->addWidget(cutMode);
+    auto* fixedOrientation = new QCheckBox(tr("Fix orientation for new copies"));
+    cutControls->addWidget(fixedOrientation);
+    cutControls->addStretch();
+    auto* reportButton = new QPushButton(tr("Cutting report…"));
+    cutControls->addWidget(reportButton);
+    auto* dxf = new QPushButton(tr("Export layout DXF…"));
+    cutControls->addWidget(dxf);
+
     auto* automaticControls = new QHBoxLayout;
     layout->addLayout(automaticControls);
     auto* automatic = new QPushButton(tr("Auto arrange"));
@@ -281,9 +320,13 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     auto* halfTurns = new QCheckBox(tr("Allow 180° turns in automatic layout"));
     halfTurns->setChecked(data.allowHalfTurns);
     automaticControls->addWidget(halfTurns);
+    auto* directional = new QCheckBox(tr("One-way nap or print"));
+    directional->setChecked(data.directionalFabric);
+    automaticControls->addWidget(directional);
+    halfTurns->setEnabled(!data.directionalFabric);
     automaticControls->addStretch();
 
-    auto* hint = new QLabel(tr("Drag copies to position them. Grain runs along the fabric length. Pieces without a grainline use their base orientation or a 180° turn."));
+    auto* hint = new QLabel(tr("Grain runs along the fabric length. Fold copies need a straight outer edge and a finished cutting contour with zero added allowance. Set the width of the folded fabric for fold layouts."));
     hint->setWordWrap(true);
     layout->addWidget(hint);
     QGraphicsScene scene;
@@ -315,6 +358,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         const double displayLength = std::max(1000.0, usage.length + 200);
         fabric->setRect(0, 0, data.fabricWidth, displayLength);
         automatic->setEnabled(!items.isEmpty());
+        dxf->setEnabled(!items.isEmpty());
         auto summary = tr("Used length: %1 m · Copies: %2 · Outside fabric: %3 · Overlapping pairs: %4 · Invalid contours: %5")
                            .arg(usage.length / 1000, 0, 'f', 3).arg(items.size())
                            .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid);
@@ -335,14 +379,27 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     const auto addItem = [&](qsizetype index) {
         const auto& placement = data.placements[index];
         const auto cut = cutFor(placement);
-        auto* item = new PlacementItem(index, cut.cut, updateUsage);
+        std::optional<double> lockedX;
+        if (placement.fold != opc::FoldEdge::None && !cut.cut.isEmpty()) {
+            lockedX = opc::foldPosition(placement, data.fabricWidth, cut.cut.boundingRect().width());
+        }
+        auto* item = new PlacementItem(index, cut.cut, lockedX, updateUsage);
         item->setPen(QPen(QColor("#173b5e"), 0));
-        item->setBrush(QColor(86, 167, 222, 125));
-        item->setPos(placement.position);
+        item->setBrush(placement.hand == opc::CutHand::Right ? QColor(208, 146, 89, 140)
+                                                           : QColor(86, 167, 222, 125));
+        item->setPos(lockedX.value_or(placement.position.x()), placement.position.y());
         const auto& entry = document.pieces()[placement.piece];
         auto* label = new QGraphicsSimpleTextItem(
             tr("%1 · %2 (cut ×%3)").arg(entry.name, placement.size.isEmpty() ? tr("Base") : placement.size)
                                      .arg(entry.cutCount), item);
+        if (placement.hand == opc::CutHand::Left)
+            label->setText(label->text() + tr(" · Left"));
+        if (placement.hand == opc::CutHand::Right)
+            label->setText(label->text() + tr(" · Right"));
+        if (placement.fold != opc::FoldEdge::None)
+            label->setText(label->text() + tr(" · Fold"));
+        if (placement.reversed && !opc::canTurn(data, placement))
+            label->setText(label->text() + tr(" · Rotation conflict"));
         label->setFlag(QGraphicsItem::ItemIgnoresTransformations);
         label->setPos(cut.cut.boundingRect().center());
         if (cut.cut.isEmpty()) {
@@ -359,6 +416,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             arrow.lineTo(tip + QPointF(head / 2, behind));
             auto* line = new QGraphicsPathItem(arrow, item);
             line->setPen(QPen(QColor("#1b6645"), 0));
+        }
+        if (!cut.fold.isNull()) {
+            auto* line = new QGraphicsLineItem(cut.fold, item);
+            line->setPen(QPen(QColor("#654590"), 0, Qt::DashLine));
         }
         scene.addItem(item);
         items.append(item);
@@ -378,21 +439,35 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         return selection.isEmpty() ? nullptr : static_cast<PlacementItem*>(selection.front());
     };
     QObject::connect(&scene, &QGraphicsScene::selectionChanged, &dialog, [&] {
-        turn->setEnabled(selected());
+        const auto* item = selected();
+        turn->setEnabled(item && (data.placements[item->index].reversed
+                                  || opc::canTurn(data, data.placements[item->index])));
         remove->setEnabled(selected());
     });
     turn->setEnabled(false);
     remove->setEnabled(false);
     QObject::connect(width, &QDoubleSpinBox::valueChanged, &dialog, [&](double value) {
         data.fabricWidth = value;
-        updateUsage();
-        updateSceneBounds();
+        rebuild();
     });
     QObject::connect(add, &QPushButton::clicked, &dialog, [&] {
         opc::FabricPlacement placement{piece->currentIndex(), size->currentData().toString(), {}};
+        placement.fixedOrientation = fixedOrientation->isChecked();
+        const int mode = cutMode->currentIndex();
+        const bool pair = mode == 1;
+        if (pair || mode == 2)
+            placement.hand = opc::CutHand::Left;
+        else if (mode == 3)
+            placement.hand = opc::CutHand::Right;
+        else if (mode == 4)
+            placement.fold = opc::FoldEdge::Left;
+        else if (mode == 5)
+            placement.fold = opc::FoldEdge::Right;
         const auto cut = cutFor(placement).cut;
         if (cut.isEmpty()) {
-            QMessageBox::warning(&dialog, dialog.windowTitle(), tr("This size needs a valid closed contour and a valid allowance."));
+            QMessageBox::warning(&dialog, dialog.windowTitle(), placement.fold == opc::FoldEdge::None
+                ? tr("This size needs a valid closed contour and a valid allowance.")
+                : tr("Use a finished contour with zero added allowance and a straight outer edge on the selected side, parallel to the grain."));
             return;
         }
         for (auto* item : items) {
@@ -401,10 +476,18 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
                                                 item->pos().y() + item->polygon().boundingRect().bottom() + 10));
         }
         const double step = cut.boundingRect().height() + 10;
-        for (int i = 0; i < quantity->value(); ++i) {
+        const auto append = [&] {
             data.placements.append(placement);
             addItem(data.placements.size() - 1);
             placement.position.ry() += step;
+        };
+        for (int i = 0; i < quantity->value(); ++i) {
+            append();
+            if (pair) {
+                placement.hand = opc::CutHand::Right;
+                append();
+                placement.hand = opc::CutHand::Left;
+            }
         }
         updateUsage();
         updateSceneBounds();
@@ -434,6 +517,55 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     QObject::connect(halfTurns, &QCheckBox::toggled, &dialog, [&](bool enabled) {
         data.allowHalfTurns = enabled;
     });
+    QObject::connect(directional, &QCheckBox::toggled, &dialog, [&](bool enabled) {
+        data.directionalFabric = enabled;
+        halfTurns->setEnabled(!enabled);
+        rebuild();
+    });
+    QObject::connect(dxf, &QPushButton::clicked, &dialog, [&] {
+        auto path = QFileDialog::getSaveFileName(&dialog, tr("Export fabric layout"), {}, tr("DXF (*.dxf)"));
+        if (path.isEmpty())
+            return;
+        if (!path.endsWith(QStringLiteral(".dxf"), Qt::CaseInsensitive))
+            path += QStringLiteral(".dxf");
+        QString error;
+        if (!opc::exportFabricDxf(path, document, data, error))
+            QMessageBox::warning(&dialog, dialog.windowTitle(), error);
+    });
+    QObject::connect(reportButton, &QPushButton::clicked, &dialog, [&] {
+        const auto report = opc::cuttingReport(document, data);
+        const auto& usage = report.usage;
+        QString text = tr("Working width: %1 mm · Used length: %2 m · Cut area: %3 m²")
+            .arg(data.fabricWidth).arg(usage.length / 1000, 0, 'f', 3).arg(usage.cutArea / 1e6, 0, 'f', 3);
+        if (!report.orientationViolations && !report.foldViolations) {
+            if (const auto utilization = usage.utilization(data.fabricWidth))
+                text += tr(" · Utilization: %1%").arg(*utilization * 100, 0, 'f', 1);
+        }
+        text += tr("\nPlotted copies: %1. On-fold entries each count as one unfolded piece. Other counts are per cutting layer.")
+            .arg(data.placements.size());
+        text += tr("\nOutside: %1 · Overlapping pairs: %2 · Invalid outlines: %3"
+                   "\nRotation conflicts: %4 · Off fold: %5\n")
+            .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid)
+            .arg(report.orientationViolations).arg(report.foldViolations);
+        for (const auto& row : report.rows) {
+            text += tr("\n%1 · %2 | Single: %3 | Left: %4 | Right: %5 | On fold: %6")
+                .arg(document.pieces()[row.piece].name, row.size.isEmpty() ? tr("Base") : row.size)
+                .arg(row.single).arg(row.left).arg(row.right).arg(row.onFold);
+            if (row.left != row.right)
+                text += tr(" | Unmatched left/right copies");
+        }
+        QDialog reportDialog(&dialog);
+        reportDialog.setWindowTitle(tr("Cutting report"));
+        reportDialog.resize(700, 440);
+        QVBoxLayout reportLayout(&reportDialog);
+        auto* reportText = new QPlainTextEdit(text);
+        reportText->setReadOnly(true);
+        reportLayout.addWidget(reportText);
+        auto* close = new QDialogButtonBox(QDialogButtonBox::Close);
+        reportLayout.addWidget(close);
+        QObject::connect(close, &QDialogButtonBox::rejected, &reportDialog, &QDialog::reject);
+        reportDialog.exec();
+    });
     QObject::connect(automatic, &QPushButton::clicked, &dialog, [&] {
         auto result = opc::arrangeFabric(document, data);
         QString error;
@@ -450,7 +582,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             error = tr("Enter a positive fabric width.");
             break;
         case opc::FabricLayoutError::InvalidContour:
-            error = tr("The cutting outline or seam allowance is invalid.");
+            error = tr("The cutting outline, seam allowance, or required straight fold edge is invalid.");
             break;
         case opc::FabricLayoutError::TooWide:
             error = tr("The cutting outline is wider than the fabric with the grain aligned.");

@@ -3,6 +3,7 @@
 #include "PieceGeometry.h"
 #include <QJsonObject>
 #include <QLineF>
+#include <QPolygonF>
 #include <optional>
 
 namespace opc {
@@ -16,9 +17,13 @@ bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionDat
 struct LayoutPiece {
     QPolygonF cut;
     QLineF grain;
+    QLineF fold;
 };
 
 LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& placement);
+
+bool canTurn(const ProductionData& data, const FabricPlacement& placement);
+double foldPosition(const FabricPlacement& placement, double fabricWidth, double cutWidth);
 
 struct FabricUsage {
     double length = 0;
@@ -30,6 +35,24 @@ struct FabricUsage {
 };
 
 FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width);
+
+struct CuttingReportRow {
+    qsizetype piece;
+    QString size;
+    qsizetype single = 0;
+    qsizetype left = 0;
+    qsizetype right = 0;
+    qsizetype onFold = 0;
+};
+
+struct CuttingReport {
+    QVector<CuttingReportRow> rows;
+    FabricUsage usage;
+    qsizetype orientationViolations = 0;
+    qsizetype foldViolations = 0;
+};
+
+CuttingReport cuttingReport(const PatternDocument& document, const ProductionData& data);
 
 inline constexpr qsizetype maxAutomaticCopies = 200;
 enum class FabricLayoutError { None, InvalidWidth, TooManyCopies, InvalidContour, TooWide, VerificationFailed };

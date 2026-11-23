@@ -57,7 +57,7 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     QJsonArray layerVisibility;
     for (bool visible : layerVisibility_)
         layerVisibility.append(visible);
-    const QJsonObject root{{"format", "SOFIT"}, {"version", 6}, {"objects", objects},
+    const QJsonObject root{{"format", "SOFIT"}, {"version", 7}, {"objects", objects},
                            {"pieces", pieces}, {"layerVisibility", layerVisibility},
                            {"production", saveProduction(production_)}};
     ProductionData validated;
@@ -90,7 +90,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto format = root.value("format").toString();
     const auto version = root.value("version").toDouble();
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
-    const bool current = (version == 2 || version == 3 || version == 4 || version == 5 || version == 6) && format == "SOFIT";
+    const bool current = (version == 2 || version == 3 || version == 4 || version == 5 || version == 6 || version == 7) && format == "SOFIT";
     const auto objects = root.value(legacy ? "segments" : "objects");
     if ((!legacy && !current) || !objects.isArray())
         return fail(QStringLiteral("Unsupported document format"));
