@@ -1,4 +1,4 @@
-# SOFIT 0.1 — independent CAD prototype
+# SOFIT 0.3 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -37,6 +37,9 @@ Use `macdeployqt` when packaging the app for distribution.
 
 ## Features
 - Two clicks create a segment; right-click cancels.
+- Mouse wheel zooms around the cursor; dragging with the middle button pans the canvas.
+- The status bar shows the cursor's scene X/Y coordinates in millimeters.
+- **View → Snap to Grid** aligns line endpoints to the nearest 10 mm grid intersection at any zoom level. Snap starts off.
 - New/Open/Save (`.sofit` JSON format) and Export SVG.
 - Can read legacy `.opcad` files from the initial prototype; newly saved projects use `.sofit`.
 - No undo, parametric drafting, GRAFIS file compatibility, or unsaved-change warning yet.

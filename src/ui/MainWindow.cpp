@@ -2,6 +2,8 @@
 #include <QAction>
 #include <QFileDialog>
 #include <QFile>
+#include <QLabel>
+#include <QLocale>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -14,6 +16,10 @@
 #include <algorithm>
 #include <cmath>
 
+namespace {
+constexpr qreal gridStep = 10.0; // Scene units are millimeters.
+}
+
 PatternView::PatternView(QGraphicsScene* scene, QWidget* parent):QGraphicsView(scene,parent) {
     setRenderHint(QPainter::Antialiasing);
     setMouseTracking(true);
@@ -25,7 +31,7 @@ void PatternView::drawBackground(QPainter* painter, const QRectF& rect) {
 
     // Keep the grid visible when zoomed out while preserving its origin.
     const qreal scale = transform().m11();
-    const qreal step = scale >= 0.8 ? 10.0 : scale >= 0.16 ? 50.0 : 250.0;
+    const qreal step = scale >= 0.8 ? gridStep : scale >= 0.16 ? 5 * gridStep : 25 * gridStep;
 
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, false);
@@ -35,6 +41,37 @@ void PatternView::drawBackground(QPainter* painter, const QRectF& rect) {
     for (qreal y = std::ceil(rect.top() / step) * step; y <= rect.bottom(); y += step)
         painter->drawLine(QLineF(rect.left(), y, rect.right(), y));
     painter->restore();
+}
+
+void PatternView::setSnapToGrid(bool enabled) {
+    snapToGrid_ = enabled;
+    updatePreview();
+}
+
+QPointF PatternView::drawingPoint(QPointF scenePoint) const {
+    if (!snapToGrid_)
+        return scenePoint;
+
+    return QPointF(std::round(scenePoint.x() / gridStep) * gridStep,
+                   std::round(scenePoint.y() / gridStep) * gridStep);
+}
+
+void PatternView::updateCursorPosition(const QPoint& viewportPoint) {
+    cursorScenePosition_ = mapToScene(viewportPoint);
+    updatePreview();
+    emit cursorPositionChanged(cursorScenePosition_);
+}
+
+void PatternView::updatePreview() {
+    if (preview_)
+        preview_->setLine(QLineF(first_, drawingPoint(cursorScenePosition_)));
+}
+
+bool PatternView::viewportEvent(QEvent* event) {
+    if (event->type() == QEvent::Leave)
+        emit cursorLeftCanvas();
+
+    return QGraphicsView::viewportEvent(event);
 }
 
 void PatternView::wheelEvent(QWheelEvent* event) {
@@ -55,9 +92,8 @@ void PatternView::wheelEvent(QWheelEvent* event) {
         const QPointF scenePoint = mapToScene(cursor);
         scale(factor, factor);
         moveView(scenePoint, cursor);
-        if (pending_ && preview_)
-            preview_->setLine(QLineF(first_, mapToScene(cursor)));
     }
+    updateCursorPosition(event->position().toPoint());
     event->accept();
 }
 
@@ -85,6 +121,7 @@ void PatternView::moveView(const QPointF& scenePoint, const QPoint& viewportPoin
 }
 
 void PatternView::mousePressEvent(QMouseEvent* event) {
+    updateCursorPosition(event->pos());
     if (event->button() == Qt::MiddleButton) {
         panning_ = true;
         lastPanPosition_ = event->pos();
@@ -95,7 +132,7 @@ void PatternView::mousePressEvent(QMouseEvent* event) {
         preview_ = nullptr;
     } else if (event->button() == Qt::LeftButton && doc_) {
         if (!panning_) {
-            const QPointF point = mapToScene(event->pos());
+            const QPointF point = drawingPoint(cursorScenePosition_);
             if (!pending_) {
                 first_ = point;
                 pending_ = true;
@@ -120,8 +157,7 @@ void PatternView::mouseMoveEvent(QMouseEvent* event) {
         }
     }
 
-    if (pending_ && preview_)
-        preview_->setLine(QLineF(first_, mapToScene(event->pos())));
+    updateCursorPosition(event->pos());
 
     if (panning_)
         event->accept();
@@ -139,7 +175,7 @@ void PatternView::mouseReleaseEvent(QMouseEvent* event) {
     QGraphicsView::mouseReleaseEvent(event);
 }
 MainWindow::MainWindow():view_(new PatternView(&scene_,this)) {
-    setWindowTitle("SOFIT 0.1"); resize(1100,750);
+    setWindowTitle("SOFIT 0.3"); resize(1100,750);
     scene_.setSceneRect(-500,-350,1000,700);
     setCentralWidget(view_); view_->setDocument(&doc_);
     auto* file=menuBar()->addMenu(tr("&File"));
@@ -150,6 +186,24 @@ MainWindow::MainWindow():view_(new PatternView(&scene_,this)) {
     add(tr("&Open"),QKeySequence::Open,[this]{openDocument();});
     add(tr("&Save"),QKeySequence::Save,[this]{saveDocument();});
     add(tr("Export &SVG"),QKeySequence(),[this]{exportSvg();});
+    auto* viewMenu = menuBar()->addMenu(tr("&View"));
+    auto* snapAction = viewMenu->addAction(tr("Snap to Grid"));
+    snapAction->setCheckable(true);
+    connect(snapAction, &QAction::toggled, view_, &PatternView::setSnapToGrid);
+
+    const QString emptyCoordinates = tr("X: — mm  Y: — mm");
+    auto* coordinates = new QLabel(emptyCoordinates, statusBar());
+    statusBar()->addPermanentWidget(coordinates);
+    connect(view_, &PatternView::cursorPositionChanged, coordinates,
+            [coordinates](const QPointF& position) {
+        const QLocale locale;
+        coordinates->setText(tr("X: %1 mm  Y: %2 mm")
+                                 .arg(locale.toString(position.x(), 'f', 2),
+                                      locale.toString(position.y(), 'f', 2)));
+    });
+    connect(view_, &PatternView::cursorLeftCanvas, coordinates,
+            [coordinates, emptyCoordinates] { coordinates->setText(emptyCoordinates); });
+
     statusBar()->showMessage(tr("Left click: first/second endpoint | Right click: cancel | Mouse wheel: zoom | Middle drag: pan | Units: mm"));
 }
 void MainWindow::newDocument() { doc_.clear(); currentPath_.clear(); view_->refresh(); }
