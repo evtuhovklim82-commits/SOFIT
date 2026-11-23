@@ -100,7 +100,7 @@ std::optional<ContourOperation> contourOperationFromKey(const QString& key) {
 }
 
 bool PatternDocument::appendSilhouette(qsizetype piece, double axisFraction, double topScale,
-                                       double bottomScale, QString* error) {
+                                       double bottomScale, QString* error, double lengthScale) {
     if (piece < 0 || piece >= pieces_.size() || placed(production_, piece)) {
         if (error)
             *error = QStringLiteral("Choose a formula piece without fabric placements.");
@@ -109,6 +109,7 @@ bool PatternDocument::appendSilhouette(qsizetype piece, double axisFraction, dou
 
     ModelingStep step{pieceObjects(entities_, piece), axisFraction, topScale, bottomScale};
     auto candidate = *this;
+    step.lengthScale = lengthScale;
     candidate.history_.append(std::move(step));
     if (!candidate.setParametricDraft(draft_, error))
         return false;
@@ -160,6 +161,39 @@ bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
             && (entity.piece == piece || step.guides.contains(entity.draftName)))
             candidate.hiddenSources_.append({entity.draftName, entity.piece, entity.layer});
     }
+    if (!candidate.setParametricDraft(draft_, error))
+        return false;
+    *this = std::move(candidate);
+    return true;
+}
+
+bool PatternDocument::editModelingStep(qsizetype index, const ModelingStep& settings, QString* error) {
+    const auto fail = [error](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (index < 0 || index >= history_.size())
+        return fail(QStringLiteral("Choose a modeling step."));
+    auto candidate = *this;
+    auto& step = candidate.history_[index];
+    if (!step.contour) {
+        step.axisFraction = settings.axisFraction;
+        step.topScale = settings.topScale;
+        step.bottomScale = settings.bottomScale;
+        step.lengthScale = settings.lengthScale;
+    } else if (usesSpreadWidth(*step.contour)) {
+        step.spreadMm = settings.spreadMm;
+    } else {
+        return fail(QStringLiteral("This step has no numeric settings."));
+    }
+    if (step == history_[index]) {
+        if (error)
+            error->clear();
+        return true;
+    }
+    if (!production_.placements.isEmpty())
+        return fail(QStringLiteral("Clear the fabric layout before editing the construction history."));
     if (!candidate.setParametricDraft(draft_, error))
         return false;
     *this = std::move(candidate);
@@ -270,7 +304,7 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
             }
             const auto bounds = analyzePiece(working, 0).bounds;
             const auto result = shapeSilhouette(working, 0, std::lerp(bounds.left(), bounds.right(), step.axisFraction),
-                                                step.topScale, step.bottomScale);
+                                                step.topScale, step.bottomScale, step.lengthScale);
             if (!result.edit)
                 return fail(result.error);
             for (qsizetype j = 0; j < indices.size(); ++j) {

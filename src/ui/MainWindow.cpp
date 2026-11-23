@@ -1048,6 +1048,8 @@ void MainWindow::diagnoseGradedPieces() {
     QFormLayout form(&dialog);
     QComboBox sizes(&dialog);
     fillExportSizes(sizes, doc_);
+    sizes.insertItem(0, tr("All sizes"), QVariant{});
+    sizes.setCurrentIndex(0);
     form.addRow(tr("Size"), &sizes);
     QTreeWidget report(&dialog);
     report.setHeaderLabels({tr("Piece"), tr("Contour, allowance and notches")});
@@ -1055,17 +1057,39 @@ void MainWindow::diagnoseGradedPieces() {
     QDialogButtonBox buttons(QDialogButtonBox::Close, &dialog);
     form.addRow(&buttons);
     connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    const auto refresh = [&] {
-        report.clear();
-        const auto graded = opc::gradedPattern(doc_, sizes.currentData().toString());
+    QMap<QString, QVector<qsizetype>> copyCounts;
+    for (const auto& placement : doc_.production().placements) {
+        if (placement.piece < 0 || placement.piece >= doc_.pieces().size())
+            continue;
+        auto& counts = copyCounts[placement.size];
+        if (counts.isEmpty())
+            counts.resize(doc_.pieces().size());
+        ++counts[placement.piece];
+    }
+    const auto addSize = [&](QTreeWidgetItem* group, const QString& size) {
+        const auto graded = opc::gradedPattern(doc_, size);
         if (graded.pieces().isEmpty()) {
-            new QTreeWidgetItem(&report, {doc_.pieces().isEmpty() ? tr("No pieces") : tr("Size evaluation failed")});
+            group->setText(1, doc_.pieces().isEmpty() ? tr("No pieces") : tr("Size evaluation failed"));
             return;
         }
+        const auto counts = copyCounts.constFind(size);
+        if (counts == copyCounts.cend() && !copyCounts.isEmpty())
+            group->setText(1, tr("Size is absent from the layout"));
         for (qsizetype i = 0; i < graded.pieces().size(); ++i) {
             const auto& piece = graded.pieces()[i];
             const auto geometry = opc::analyzePiece(graded, i);
-            auto* row = new QTreeWidgetItem(&report, {piece.name, describeContour(geometry.error)});
+            auto* row = new QTreeWidgetItem(group, {piece.name, describeContour(geometry.error)});
+            const auto copies = counts == copyCounts.cend() ? 0 : counts->at(i);
+            QString count = tr("%1 per kit").arg(piece.cutCount);
+            if (counts != copyCounts.cend()) {
+                if (copies < piece.cutCount)
+                    count = tr("%1 of %2 in layout · missing %3").arg(copies).arg(piece.cutCount).arg(piece.cutCount - copies);
+                else if (copies > piece.cutCount)
+                    count = tr("%1 of %2 in layout · extra %3").arg(copies).arg(piece.cutCount).arg(copies - piece.cutCount);
+                else
+                    count = tr("%1 of %2 in layout").arg(copies).arg(piece.cutCount);
+            }
+            new QTreeWidgetItem(row, {tr("Cut quantity"), count});
             if (geometry.error == opc::ContourError::None) {
                 new QTreeWidgetItem(row, {tr("Seam dimensions"),
                     tr("%1 × %2 mm · Perimeter %3 mm")
@@ -1098,6 +1122,16 @@ void MainWindow::diagnoseGradedPieces() {
                         .arg(marks.notchesMissingCutOutline)});
             }
             row->setExpanded(true);
+        }
+    };
+    const auto refresh = [&] {
+        report.clear();
+        for (int i = 1; i < sizes.count(); ++i) {
+            if (sizes.currentIndex() != 0 && sizes.currentIndex() != i)
+                continue;
+            auto* group = new QTreeWidgetItem(&report, {sizes.itemText(i)});
+            addSize(group, sizes.itemData(i).toString());
+            group->setExpanded(true);
         }
         report.resizeColumnToContents(0);
     };
@@ -1415,6 +1449,7 @@ void MainWindow::shapeSilhouette() {
     };
     const auto* top = width(tr("Top width"), 100);
     const auto* bottom = width(tr("Bottom width"), 125);
+    const auto* length = width(tr("Length from top of piece"), 100);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -1429,7 +1464,7 @@ void MainWindow::shapeSilhouette() {
         auto updated = doc_;
         QString error;
         if (!updated.appendSilhouette(piece, fractions[axis->currentIndex()], top->value() / 100,
-                                      bottom->value() / 100, &error)) {
+                                      bottom->value() / 100, &error, length->value() / 100)) {
             setModelingError(error);
             QMessageBox::warning(this, title, error);
             return;
@@ -1440,7 +1475,7 @@ void MainWindow::shapeSilhouette() {
     }
     const double axes[]{geometry.bounds.center().x(), geometry.bounds.left(), geometry.bounds.right()};
     auto result = opc::shapeSilhouette(doc_, piece, axes[axis->currentIndex()], top->value() / 100,
-                                       bottom->value() / 100);
+                                       bottom->value() / 100, length->value() / 100);
     if (!result.edit) {
         QMessageBox::warning(this, title, result.error);
         return;
@@ -1471,6 +1506,8 @@ void MainWindow::showModelingHistory() {
             if (pair.size() == 2)
                 matchSeams({static_cast<qsizetype>(pair[0].toLongLong()),
                             static_cast<qsizetype>(pair[1].toLongLong())}, true);
+            else if (const auto step = item->data(0, Qt::UserRole + 1); step.isValid())
+                editModelingStep(step.toLongLong());
         });
         connect(removeModelingStep_, &QPushButton::clicked, this, [this] {
             auto updated = doc_;
@@ -1486,6 +1523,67 @@ void MainWindow::showModelingHistory() {
     modelingDock_->show();
     refreshModelingHistory();
     modelingDock_->raise();
+}
+
+void MainWindow::editModelingStep(qsizetype index) {
+    auto settings = doc_.modelingHistory()[index];
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Edit %1").arg(modelingStepName(settings)));
+    QFormLayout form(&dialog);
+    const auto number = [&](const QString& label, double value, double minimum, double maximum,
+                            const QString& suffix) {
+        auto* field = new QDoubleSpinBox(&dialog);
+        field->setDecimals(6);
+        field->setRange(minimum, maximum);
+        field->setValue(value);
+        field->setSuffix(suffix);
+        form.addRow(label, field);
+        return field;
+    };
+    QDoubleSpinBox* axis = nullptr;
+    QDoubleSpinBox* top = nullptr;
+    QDoubleSpinBox* bottom = nullptr;
+    QDoubleSpinBox* length = nullptr;
+    QDoubleSpinBox* spread = nullptr;
+    if (settings.contour) {
+        spread = number(tr("Added width"), settings.spreadMm, 0.000001,
+                        std::max(100000., settings.spreadMm), tr(" mm"));
+    } else {
+        axis = number(tr("Axis from left edge"), settings.axisFraction * 100, 0, 100, tr(" %"));
+        top = number(tr("Top width"), settings.topScale * 100, 20, 500, tr(" %"));
+        bottom = number(tr("Bottom width"), settings.bottomScale * 100, 20, 500, tr(" %"));
+        length = number(tr("Length from top"), settings.lengthScale * 100, 20, 500, tr(" %"));
+    }
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        const auto read = [](const QDoubleSpinBox* field, double original, double factor) {
+            return std::abs(field->value() - original * factor) <= 0.0000005
+                ? original : field->value() / factor;
+        };
+        auto revised = settings;
+        if (spread) {
+            revised.spreadMm = read(spread, settings.spreadMm, 1);
+        } else {
+            revised.axisFraction = read(axis, settings.axisFraction, 100);
+            revised.topScale = read(top, settings.topScale, 100);
+            revised.bottomScale = read(bottom, settings.bottomScale, 100);
+            revised.lengthScale = read(length, settings.lengthScale, 100);
+        }
+        auto updated = doc_;
+        QString error;
+        if (!updated.editModelingStep(index, revised, &error)) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(), error);
+            return;
+        }
+        if (revised != settings) {
+            view_->cancelDrawing();
+            undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Modeling Step"), view_));
+        }
+        dialog.accept();
+    });
+    dialog.exec();
 }
 
 void MainWindow::setModelingError(const QString& error) {
@@ -1521,18 +1619,24 @@ void MainWindow::refreshModelingHistory() {
             if (left && right) {
                 auto* row = new QTreeWidgetItem(pair, {size, tr("%L1 / %L2 mm · B − A %L3 mm")
                     .arg(*left, 0, 'f', 2).arg(*right, 0, 'f', 2).arg(*right - *left, 0, 'f', 2)});
-                // Cut closure edges are directed in opposite sewing directions.
-                auto opposite = second.seamNotches;
-                for (auto& notch : opposite)
-                    notch = 1 - notch;
-                std::ranges::sort(opposite);
+                // Compare distances along the seam after reversing the second sewing direction.
                 auto firstNotches = first.seamNotches;
-                std::ranges::sort(firstNotches);
-                if (firstNotches.size() != opposite.size()
-                    || !std::ranges::equal(firstNotches, opposite, [](double x, double y) {
-                        return std::abs(x - y) <= 1e-6;
-                    }))
-                    new QTreeWidgetItem(row, {tr("Notch positions differ")});
+                auto secondNotches = second.seamNotches;
+                if (firstNotches.size() != secondNotches.size()) {
+                    new QTreeWidgetItem(row, {tr("Notch counts differ"),
+                        tr("%1 / %2").arg(firstNotches.size()).arg(secondNotches.size())});
+                } else {
+                    std::ranges::sort(firstNotches);
+                    std::ranges::sort(secondNotches, std::greater<>());
+                    double maximumOffset = 0;
+                    for (qsizetype i = 0; i < firstNotches.size(); ++i) {
+                        const double offset = firstNotches[i] * *left - (1 - secondNotches[i]) * *right;
+                        maximumOffset = std::max(maximumOffset, std::abs(offset));
+                    }
+                    if (maximumOffset >= 0.005)
+                        new QTreeWidgetItem(row, {tr("Notch positions differ"),
+                            tr("Up to %L1 mm from the sewing start").arg(maximumOffset, 0, 'f', 2)});
+                }
             }
         };
         add(tr("Base pattern"), doc_.entities()[a], doc_.entities()[b]);
@@ -1549,8 +1653,13 @@ void MainWindow::refreshModelingHistory() {
     for (qsizetype i = 0; i < history.size(); ++i) {
         const auto& step = history[i];
         auto* item = new QTreeWidgetItem(root, {tr("%1. %2").arg(i + 1).arg(modelingStepName(step))});
+        if (!step.contour || opc::usesSpreadWidth(*step.contour)) {
+            item->setData(0, Qt::UserRole + 1, QVariant::fromValue(i));
+            item->setToolTip(0, tr("Double-click to edit step parameters."));
+        }
         if (!step.contour)
-            item->setText(1, tr("%1% / %2%").arg(step.topScale * 100).arg(step.bottomScale * 100));
+            item->setText(1, tr("Width %L1% / %L2% · Length %L3%")
+                .arg(step.topScale * 100).arg(step.bottomScale * 100).arg(step.lengthScale * 100));
         else if (step.secondPiece >= 0)
             item->setText(1, doc_.pieces()[step.secondPiece].name);
         else if (step.spreadMm > 0)
@@ -1613,8 +1722,7 @@ void MainWindow::modelPiece(opc::ContourOperation operation, const QString& titl
         guides.move(lines.indexOf(outlet), 2);
     }
     double width = 0;
-    if (operation == ContourOperation::Spread || operation == ContourOperation::Pleat
-        || operation == ContourOperation::Gather) {
+    if (opc::usesSpreadWidth(operation)) {
         bool accepted = false;
         width = QInputDialog::getDouble(this, title, tr("Total added width perpendicular to the cut (mm)"),
                                         20, 0.01, 100000, 2, &accepted);

@@ -89,6 +89,14 @@ private:
             const auto end = pos_;
             if (name == u"quadlen" && take(u'('))
                 return quadraticLength(depth + 1);
+            if (name == u"positive" && take(u'(')) {
+                const auto value = expression(depth + 1);
+                if (!take(u')'))
+                    fail(QStringLiteral("Expected ')'"));
+                if (value <= 0)
+                    fail(QStringLiteral("Expected a value greater than zero"));
+                return value;
+            }
             pos_ = end;
             if (peek() == u'.') {
                 ++pos_;

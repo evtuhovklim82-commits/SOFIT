@@ -1,0 +1,758 @@
+{
+    "format": "SOFIT",
+    "layerVisibility": [
+        true,
+        true,
+        true
+    ],
+    "objects": [
+        {
+            "coordinates": [
+                -130,
+                0
+            ],
+            "draftName": "BibL",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                130,
+                0
+            ],
+            "draftName": "BibR",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                350,
+                250
+            ],
+            "draftName": "WaistR",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                350,
+                780
+            ],
+            "draftName": "HemR",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                -350,
+                780
+            ],
+            "draftName": "HemL",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                -350,
+                250
+            ],
+            "draftName": "WaistL",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                410,
+                0
+            ],
+            "draftName": "waist_a",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                460,
+                0
+            ],
+            "draftName": "waist_b",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                460,
+                600
+            ],
+            "draftName": "waist_c",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                410,
+                600
+            ],
+            "draftName": "waist_d",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                435,
+                0
+            ],
+            "draftName": "waist_e",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                435,
+                600
+            ],
+            "draftName": "waist_f",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                520,
+                0
+            ],
+            "draftName": "neck_a",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                570,
+                0
+            ],
+            "draftName": "neck_b",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                570,
+                420
+            ],
+            "draftName": "neck_c",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                520,
+                420
+            ],
+            "draftName": "neck_d",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                545,
+                0
+            ],
+            "draftName": "neck_e",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                545,
+                420
+            ],
+            "draftName": "neck_f",
+            "layer": "construction",
+            "piece": -1,
+            "type": "point"
+        },
+        {
+            "coordinates": [
+                -130,
+                0,
+                130,
+                0
+            ],
+            "draftName": "apron_top",
+            "layer": "main",
+            "piece": 0,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                130,
+                0,
+                350,
+                250
+            ],
+            "draftName": "apron_arm_r",
+            "layer": "main",
+            "piece": 0,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                350,
+                250,
+                350,
+                780
+            ],
+            "draftName": "apron_side_r",
+            "layer": "main",
+            "piece": 0,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                350,
+                780,
+                -350,
+                780
+            ],
+            "draftName": "apron_hem",
+            "layer": "main",
+            "piece": 0,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                -350,
+                780,
+                -350,
+                250
+            ],
+            "draftName": "apron_side_l",
+            "layer": "main",
+            "piece": 0,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                -350,
+                250,
+                -130,
+                0
+            ],
+            "draftName": "apron_arm_l",
+            "layer": "main",
+            "piece": 0,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                410,
+                0,
+                460,
+                0
+            ],
+            "draftName": "waist_top",
+            "layer": "main",
+            "piece": 1,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                460,
+                0,
+                460,
+                600
+            ],
+            "draftName": "waist_right",
+            "layer": "main",
+            "piece": 1,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                460,
+                600,
+                410,
+                600
+            ],
+            "draftName": "waist_end",
+            "layer": "main",
+            "piece": 1,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                410,
+                600,
+                410,
+                0
+            ],
+            "draftName": "waist_left",
+            "layer": "main",
+            "piece": 1,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                435,
+                0,
+                435,
+                600
+            ],
+            "draftName": "waist_fold",
+            "layer": "construction",
+            "piece": 1,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                520,
+                0,
+                570,
+                0
+            ],
+            "draftName": "neck_top",
+            "layer": "main",
+            "piece": 2,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                570,
+                0,
+                570,
+                420
+            ],
+            "draftName": "neck_right",
+            "layer": "main",
+            "piece": 2,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                570,
+                420,
+                520,
+                420
+            ],
+            "draftName": "neck_end",
+            "layer": "main",
+            "piece": 2,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                520,
+                420,
+                520,
+                0
+            ],
+            "draftName": "neck_left",
+            "layer": "main",
+            "piece": 2,
+            "type": "line"
+        },
+        {
+            "coordinates": [
+                545,
+                0,
+                545,
+                420
+            ],
+            "draftName": "neck_fold",
+            "layer": "construction",
+            "piece": 2,
+            "type": "line"
+        }
+    ],
+    "parametricDraft": {
+        "edges": [
+            {
+                "control": "",
+                "end": "BibR",
+                "name": "apron_top",
+                "start": "BibL"
+            },
+            {
+                "control": "",
+                "end": "WaistR",
+                "name": "apron_arm_r",
+                "start": "BibR"
+            },
+            {
+                "control": "",
+                "end": "HemR",
+                "name": "apron_side_r",
+                "start": "WaistR"
+            },
+            {
+                "control": "",
+                "end": "HemL",
+                "name": "apron_hem",
+                "start": "HemR"
+            },
+            {
+                "control": "",
+                "end": "WaistL",
+                "name": "apron_side_l",
+                "start": "HemL"
+            },
+            {
+                "control": "",
+                "end": "BibL",
+                "name": "apron_arm_l",
+                "start": "WaistL"
+            },
+            {
+                "control": "",
+                "end": "waist_b",
+                "name": "waist_top",
+                "start": "waist_a"
+            },
+            {
+                "control": "",
+                "end": "waist_c",
+                "name": "waist_right",
+                "start": "waist_b"
+            },
+            {
+                "control": "",
+                "end": "waist_d",
+                "name": "waist_end",
+                "start": "waist_c"
+            },
+            {
+                "control": "",
+                "end": "waist_a",
+                "name": "waist_left",
+                "start": "waist_d"
+            },
+            {
+                "control": "",
+                "end": "waist_f",
+                "name": "waist_fold",
+                "start": "waist_e"
+            },
+            {
+                "control": "",
+                "end": "neck_b",
+                "name": "neck_top",
+                "start": "neck_a"
+            },
+            {
+                "control": "",
+                "end": "neck_c",
+                "name": "neck_right",
+                "start": "neck_b"
+            },
+            {
+                "control": "",
+                "end": "neck_d",
+                "name": "neck_end",
+                "start": "neck_c"
+            },
+            {
+                "control": "",
+                "end": "neck_a",
+                "name": "neck_left",
+                "start": "neck_d"
+            },
+            {
+                "control": "",
+                "end": "neck_f",
+                "name": "neck_fold",
+                "start": "neck_e"
+            }
+        ],
+        "measurements": [
+            {
+                "mm": 700,
+                "name": "width"
+            },
+            {
+                "mm": 780,
+                "name": "length"
+            },
+            {
+                "mm": 260,
+                "name": "bib_width"
+            },
+            {
+                "mm": 250,
+                "name": "bib_height"
+            },
+            {
+                "mm": 600,
+                "name": "waist_tie_length"
+            },
+            {
+                "mm": 420,
+                "name": "neck_tie_length"
+            },
+            {
+                "mm": 25,
+                "name": "tie_width"
+            }
+        ],
+        "parameters": [
+            {
+                "formula": "width / 2",
+                "name": "half_width"
+            },
+            {
+                "formula": "bib_width / 2",
+                "name": "half_bib"
+            },
+            {
+                "formula": "2 * positive(tie_width)",
+                "name": "flat_tie"
+            },
+            {
+                "formula": "half_width + 60",
+                "name": "waist_x"
+            },
+            {
+                "formula": "waist_x + flat_tie + 60",
+                "name": "neck_x"
+            },
+            {
+                "formula": "positive(bib_width - flat_tie)",
+                "name": "bib_clearance"
+            },
+            {
+                "formula": "positive(width - bib_width)",
+                "name": "arm_slope_width"
+            },
+            {
+                "formula": "positive(length - bib_height - tie_width)",
+                "name": "side_clearance"
+            },
+            {
+                "formula": "positive(waist_tie_length - tie_width)",
+                "name": "waist_tie_clearance"
+            },
+            {
+                "formula": "positive(neck_tie_length - tie_width)",
+                "name": "neck_tie_clearance"
+            }
+        ],
+        "points": [
+            {
+                "name": "BibL",
+                "x": "-half_bib",
+                "y": "0"
+            },
+            {
+                "name": "BibR",
+                "x": "half_bib",
+                "y": "0"
+            },
+            {
+                "name": "WaistR",
+                "x": "half_width",
+                "y": "positive(bib_height)"
+            },
+            {
+                "name": "HemR",
+                "x": "half_width",
+                "y": "length"
+            },
+            {
+                "name": "HemL",
+                "x": "-half_width",
+                "y": "length"
+            },
+            {
+                "name": "WaistL",
+                "x": "-half_width",
+                "y": "WaistR.y"
+            },
+            {
+                "name": "waist_a",
+                "x": "waist_x",
+                "y": "0"
+            },
+            {
+                "name": "waist_b",
+                "x": "waist_x + flat_tie",
+                "y": "0"
+            },
+            {
+                "name": "waist_c",
+                "x": "waist_b.x",
+                "y": "waist_tie_length"
+            },
+            {
+                "name": "waist_d",
+                "x": "waist_x",
+                "y": "waist_tie_length"
+            },
+            {
+                "name": "waist_e",
+                "x": "waist_x + tie_width",
+                "y": "0"
+            },
+            {
+                "name": "waist_f",
+                "x": "waist_e.x",
+                "y": "waist_tie_length"
+            },
+            {
+                "name": "neck_a",
+                "x": "neck_x",
+                "y": "0"
+            },
+            {
+                "name": "neck_b",
+                "x": "neck_x + flat_tie",
+                "y": "0"
+            },
+            {
+                "name": "neck_c",
+                "x": "neck_b.x",
+                "y": "neck_tie_length"
+            },
+            {
+                "name": "neck_d",
+                "x": "neck_x",
+                "y": "neck_tie_length"
+            },
+            {
+                "name": "neck_e",
+                "x": "neck_x + tie_width",
+                "y": "0"
+            },
+            {
+                "name": "neck_f",
+                "x": "neck_e.x",
+                "y": "neck_tie_length"
+            }
+        ]
+    },
+    "pieces": [
+        {
+            "allowanceMm": 10,
+            "cutCount": 1,
+            "grainAngle": 90,
+            "name": "Apron body",
+            "notches": [
+            ],
+            "showLabel": true,
+            "size": ""
+        },
+        {
+            "allowanceMm": 10,
+            "cutCount": 2,
+            "grainAngle": 90,
+            "name": "Waist tie",
+            "notches": [
+            ],
+            "showLabel": true,
+            "size": ""
+        },
+        {
+            "allowanceMm": 10,
+            "cutCount": 2,
+            "grainAngle": 90,
+            "name": "Neck tie",
+            "notches": [
+            ],
+            "showLabel": true,
+            "size": ""
+        }
+    ],
+    "production": {
+        "allowHalfTurns": true,
+        "directionalFabric": false,
+        "fabricWidth": 1500,
+        "placements": [
+            {
+                "fixedOrientation": false,
+                "fold": 0,
+                "hand": 0,
+                "piece": 0,
+                "position": [
+                    0,
+                    0
+                ],
+                "reversed": false,
+                "size": "Long"
+            },
+            {
+                "fixedOrientation": false,
+                "fold": 0,
+                "hand": 0,
+                "piece": 1,
+                "position": [
+                    720.01,
+                    0
+                ],
+                "reversed": false,
+                "size": "Long"
+            },
+            {
+                "fixedOrientation": false,
+                "fold": 0,
+                "hand": 0,
+                "piece": 1,
+                "position": [
+                    800.02,
+                    0
+                ],
+                "reversed": false,
+                "size": "Long"
+            },
+            {
+                "fixedOrientation": false,
+                "fold": 0,
+                "hand": 0,
+                "piece": 2,
+                "position": [
+                    880.03,
+                    0
+                ],
+                "reversed": false,
+                "size": "Long"
+            },
+            {
+                "fixedOrientation": false,
+                "fold": 0,
+                "hand": 0,
+                "piece": 2,
+                "position": [
+                    960.04,
+                    0
+                ],
+                "reversed": false,
+                "size": "Long"
+            }
+        ],
+        "rules": [
+        ],
+        "sizes": [
+            {
+                "measurements": {
+                    "length": 850,
+                    "tie_width": 30,
+                    "waist_tie_length": 660
+                },
+                "name": "Long"
+            }
+        ]
+    },
+    "version": 9
+}

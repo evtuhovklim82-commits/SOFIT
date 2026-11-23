@@ -22,13 +22,14 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     auto* templatePage = new QWizardPage;
     templatePage->setTitle(tr("Choose a template"));
     auto* selection = new QFormLayout(templatePage);
-    enum Template { Gathered, ALine, Bodice, Trousers, Dress };
+    enum Template { Gathered, ALine, Bodice, Trousers, Dress, Apron };
     auto* style = new QComboBox;
     style->addItem(tr("Gathered skirt"));
     style->addItem(tr("A-line skirt"));
     style->addItem(tr("Bodice and set-in sleeve (fitting block)"));
     style->addItem(tr("Trousers (fitting block)"));
     style->addItem(tr("Sleeveless dress with waist seam (fitting block)"));
+    style->addItem(tr("Bib apron with waist and neck ties"));
     selection->addRow(tr("Template"), style);
     auto* note = new QLabel(tr("All templates open as editable parametric drafts. "
                                "Fitting blocks use sewing lines and are intended for a fitting sample."));
@@ -123,9 +124,26 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     const auto* skirtLength = measurement(tr("Waist to dress hem"), 620, 200, 1500);
     const auto* hemFlare = measurement(tr("Extra dress hem circumference beyond eased hip"), 160, 0, 1500);
 
+    const int apronStart = form->rowCount();
+    const auto* apronWidth = measurement(tr("Apron width at hem"), 700, 200, 1600);
+    const auto* apronLength = measurement(tr("Bib top to hem"), 780, 200, 1600);
+    const auto* bibWidth = measurement(tr("Bib width at top"), 260, 60, 800);
+    const auto* bibHeight = measurement(tr("Bib top to waist"), 250, 60, 600);
+    const auto* waistTie = measurement(tr("Length of one waist tie"), 600, 50, 1500);
+    const auto* neckTie = measurement(tr("Length of one neck tie"), 420, 50, 1200);
+    const auto* tieWidth = measurement(tr("Finished tie width"), 25, 10, 100);
+    auto* apronInstructions = new QLabel(tr("Cut one body, two waist ties and two neck ties. "
+        "Fold each tie lengthwise, sew and turn it. Attach ties at the top bib corners and waist. "
+        "The template adds a uniform 10 mm allowance. Use Pattern → Diagnose Pieces by Size "
+        "to check the cut outlines and quantities before arranging the fabric."));
+    apronInstructions->setWordWrap(true);
+    form->addRow(apronInstructions);
+
     const auto showFields = [=](int index) {
         for (int row = 0; row < form->rowCount(); ++row) {
-            const bool visible = row < fittingStart ? index < Bodice
+            const bool visible = row >= apronStart ? index == Apron
+                : index == Apron ? false
+                : row < fittingStart ? index < Bodice
                 : row < bodiceStart ? index >= Bodice
                 : row < sleeveStart ? index == Bodice || index == Dress
                 : row < finishStart ? index == Bodice
@@ -134,8 +152,8 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                 : row < dressStart ? index == Trousers : index == Dress;
             form->setRowVisible(row, visible);
         }
-        form->setRowVisible(waist, index >= Bodice);
-        form->setRowVisible(waistEase, index >= Bodice);
+        form->setRowVisible(waist, index >= Bodice && index != Apron);
+        form->setRowVisible(waistEase, index >= Bodice && index != Apron);
         form->setRowVisible(flare, index == ALine);
         form->setRowVisible(extraWidth, index == Bodice && sleeveStyle->currentIndex() > 0);
         form->setRowVisible(crownRise, index == Bodice && sleeveStyle->currentIndex() == 2);
@@ -158,6 +176,12 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                 index == ALine ? opc::SkirtStyle::ALine : opc::SkirtStyle::Gathered,
                 {hip->value(), length->value(), ease->value(), flare->value(), casing->value()}, &error);
             if (document)
+                return document;
+        } else if (index == Apron) {
+            if (auto document = opc::draftBibApron({
+                    apronWidth->value(), apronLength->value(), bibWidth->value(), bibHeight->value(),
+                    waistTie->value(), neckTie->value(), tieWidth->value()
+                }, &error))
                 return document;
         } else if (index == Trousers) {
             if (auto document = opc::draftTrousers({

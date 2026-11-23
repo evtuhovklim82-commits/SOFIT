@@ -2,6 +2,7 @@
 #include "ContourModeling.h"
 #include "PatternDxf.h"
 #include "PatternPdf.h"
+#include "PatternTemplates.h"
 #include "Production.h"
 
 #include <QFile>
@@ -246,8 +247,38 @@ void checkContourHistory() {
         check(near(analyzePiece(spread, 0).bounds.height(), 104)
               && near(analyzePiece(gradedPattern(spread, "L"), 0).bounds.height(), 124),
               "Apply exactly the fixed added fullness in base and graded sizes");
+        check(spread.appendSilhouette(0, 0.5, 1, 1, &error, 1.25), error);
+        const auto originalHistory = spread.modelingHistory();
+        const auto edgeName = spread.entities()[0].draftName;
+        auto settings = originalHistory[0];
+        settings.spreadMm = 40;
+        check(spread.editModelingStep(0, settings, &error), error);
+        check(near(analyzePiece(spread, 0).bounds.height(), 150)
+              && near(analyzePiece(gradedPattern(spread, "L"), 0).bounds.height(), 175)
+              && spread.entities()[0].draftName == edgeName
+              && spread.modelingHistory()[1] == originalHistory[1],
+              "Update a prior width and replay the downstream length in both sizes");
+        settings = spread.modelingHistory()[1];
+        settings.lengthScale = 0;
+        check(!spread.editModelingStep(1, settings, &error) && error.contains("Modeling step 2")
+              && near(analyzePiece(spread, 0).bounds.height(), 150)
+              && spread.modelingHistory()[1] == originalHistory[1],
+              "An invalid replay preserves the last valid geometry and history");
         roundTripAndExport(spread, "L");
     }
+
+    auto dependent = panel;
+    dependent.production().sizes[0].measurements["cut_y"] = 60;
+    check(dependent.appendSilhouette(0, 0.5, 1, 1, &error)
+          && dependent.appendContour(0, ContourOperation::Cut, {namedEdge(dependent, "cut")}, 0, &error),
+          error);
+    const auto before = dependent.modelingHistory();
+    auto invalidLength = before[0];
+    invalidLength.lengthScale = 0.5;
+    check(!dependent.editModelingStep(0, invalidLength, &error) && error.contains("Size 'L'")
+          && error.contains("Modeling step 2") && dependent.modelingHistory() == before
+          && near(*seamLength(dependent.entities()[namedEdge(dependent, "@2:seam-A")]), 100),
+          "A downstream failure isolated to a graded size must roll back the entire edit: " + error);
 
     auto doubleCut = panel;
     auto twoGuides = draft;
@@ -403,6 +434,56 @@ void checkTemplates() {
           "Add facings to the sleeveless dress without losing the skirt seam checks");
 }
 
+void checkApronKit() {
+    const ApronMeasurements measurements{700, 780, 260, 250, 600, 420, 25};
+    QString error;
+    auto invalid = measurements;
+    invalid.bibWidthMm = invalid.widthMm;
+    check(!draftBibApron(invalid, &error) && !error.isEmpty(), "Reject an oversized apron bib");
+
+    auto draft = draftBibApron(measurements, &error);
+    check(draft.has_value(), error);
+    draft->production().sizes.append({"Long", {{"length", 850}, {"waist_tie_length", 660}, {"tie_width", 30}}});
+    auto invalidGrade = draft->production();
+    invalidGrade.sizes[0].measurements["bib_width"] = 750;
+    check(!draft->validateParametricSizes(invalidGrade, &error) && error.contains("Size 'Long'")
+          && error.contains("arm_slope_width"), "Reject a size that violates the same bib constraint");
+    const auto graded = gradedPattern(*draft, "Long");
+    check(graded.pieces().size() == 3, "Grade all three apron pieces");
+    const auto body = analyzePiece(graded, 0);
+    const auto waist = analyzePiece(graded, 1);
+    const auto neck = analyzePiece(graded, 2);
+    check(near(body.bounds.width(), 700) && near(body.bounds.height(), 850)
+          && near(waist.bounds.width(), 60) && near(waist.bounds.height(), 660)
+          && near(neck.bounds.width(), 60) && near(neck.bounds.height(), 420)
+          && near(waist.allowance.boundingRect().width(), 80),
+          "Preserve formula dimensions and cut allowance after grading");
+    for (const auto& [i, count] : {std::pair{0, 1}, std::pair{1, 2}, std::pair{2, 2}}) {
+        check(graded.pieces()[i].cutCount == count, "Keep apron kit quantities");
+        for (int copy = 0; copy < count; ++copy)
+            draft->production().placements.append({i, "Long", {}});
+    }
+    const auto arranged = arrangeFabric(*draft, draft->production());
+    check(arranged.error == FabricLayoutError::None, "Arrange the graded apron kit");
+    draft->production().placements = arranged.placements;
+    const auto marker = cuttingReport(*draft, draft->production());
+    check(marker.canExport(draft->production().fabricWidth), "Check apron layout geometry");
+    const auto rows = cuttingKitRows(*draft, marker);
+    check(rows.size() == 3 && std::ranges::all_of(rows, [&](const auto& row) {
+        return row.copies() == draft->pieces()[row.piece].cutCount;
+    }), "Verify every piece in the graded kit");
+    roundTripAndExport(*draft, "Long");
+
+    QTemporaryDir directory;
+    check(directory.isValid(), "Create apron export directory");
+    const auto pdf = directory.filePath("apron-marker.pdf");
+    const auto dxf = directory.filePath("apron-marker.dxf");
+    check(exportFabricPdf(pdf, *draft, draft->production(), {}, error), error);
+    check(exportFabricDxf(dxf, *draft, draft->production(), error), error);
+    check(readFile(pdf).startsWith("%PDF-") && readFile(pdf).trimmed().endsWith("%%EOF")
+          && readFile(dxf).contains("ENTITIES"), "Read back both apron marker exports");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -410,4 +491,5 @@ int main(int argc, char** argv) {
     checkModeling();
     checkContourHistory();
     checkTemplates();
+    checkApronKit();
 }

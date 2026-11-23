@@ -1,4 +1,4 @@
-# SOFIT 1.9 Professional
+# SOFIT 2.0 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -50,6 +50,14 @@ Use `macdeployqt` when packaging the app for distribution.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
 - SOFIT opens `.sofit` formats 1–12 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Silhouette-only history uses format 11 (SOFIT 1.7+). Contour history uses format 12 (SOFIT 1.8+). SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
+
+## Professional workflow in 2.0
+
+- In **Modeling → Construction Tree**, activate a silhouette, slash-and-spread, pleat, or gathering step to edit its numeric settings. SOFIT rebuilds the base pattern and all formula sizes, keeps named edge references and restores the previous state if any step fails. Undo and Redo cover the entire edit. Clear the fabric layout before changing an existing step.
+- **Shape Silhouette** can also change the length, scaling vertically from the top of each piece. Width settings remain independent. Existing shape operations keep their original length unless edited. Files using length scaling or the new `positive(expression)` formula require SOFIT 2.0.
+- **Pattern → New Pattern from Template → Bib apron with waist and neck ties** creates a one-piece body, two waist ties and two neck ties. The body uses half of the entered widths on either side of the centre. Each tie has a lengthwise fold guide at its centre and a seam-line width of twice the finished width. All three pieces start with 10 mm allowances. Named formulas check the relative dimensions of the bib and ties again whenever measurements or formula sizes change.
+- **Diagnose Pieces by Size** groups contour, allowance, notch and cut-quantity checks by size. For a size in the marker it shows the copies present and any missing or extra copies for one kit. The Construction Tree compares opposite cut seams, including notch distances in millimetres from the sewing start.
+- Open [the apron example](examples/bib-apron.sofit) to inspect a graded kit on 1,500 mm fabric. Open **Pattern → Fabric Layout** for the cutting report and 1:1 tiled PDF or DXF export. Open [the skirt example](examples/graded-skirt.sofit) and edit its silhouette step to try recalculation and Undo/Redo with a second size.
 
 ## Professional workflow in 1.9
 
@@ -114,7 +122,7 @@ Silhouette shaping retains edge-specific allowances and arc-length notch fractio
 4. Click **Validate**, then **Apply**. Reopen the draft and change `chest` to `1000`. The X coordinate of `B` increases from 245 to 265 mm. Undo and Redo restore the inputs and geometry together.
 5. Save and reopen the project to continue editing the formulas.
 
-Identifiers are case-sensitive and use ASCII letters, digits and underscores, with a letter or underscore first. Measurements and parameters share one namespace. Formulas can use `+`, `-`, `*`, `/`, parentheses, a decimal point, scientific notation and named point coordinates such as `B.x` and `B.y`. The function `quadlen(ax, ay, cx, cy, bx, by)` measures a quadratic Bézier seam from start to end through its control point, using the same length calculation as the seam tools. Coordinates are in mm and Y increases downwards. Points start on the Construction layer and edges on the Main layer.
+Identifiers are case-sensitive and use ASCII letters, digits and underscores, with a letter or underscore first. Measurements and parameters share one namespace. Formulas can use `+`, `-`, `*`, `/`, parentheses, a decimal point, scientific notation and named point coordinates such as `B.x` and `B.y`. The function `quadlen(ax, ay, cx, cy, bx, by)` measures a quadratic Bézier seam from start to end through its control point, using the same length calculation as the seam tools. The function `positive(expression)` returns its argument when it is greater than zero and produces a named formula error otherwise. Coordinates are in mm and Y increases downwards. Points start on the Construction layer and edges on the Main layer.
 
 Edit or delete generated objects in the draft editor. Piece and layer assignments are retained when a generated object's name stays the same. Renaming a point also requires updating formulas and edges that reference it. Review grade rules and fabric placements after editing the base contour.
 

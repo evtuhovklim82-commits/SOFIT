@@ -125,7 +125,7 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
     const bool dart = explicitOutlet || operation == ContourOperation::TransferDart;
     const bool pleat = operation == ContourOperation::Pleat;
     const bool gather = operation == ContourOperation::Gather;
-    const bool spread = pleat || gather || operation == ContourOperation::Spread;
+    const bool spread = usesSpreadWidth(operation);
     const qsizetype guideCount = dart ? 3 : 1;
     if (piece < 0 || piece >= document.pieces().size())
         return failure("Choose a piece.");
@@ -329,12 +329,12 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
 }
 
 ContourEditResult shapeSilhouette(const PatternDocument& document, qsizetype piece,
-                                 double axisX, double topScale, double bottomScale) {
+                                 double axisX, double topScale, double bottomScale, double lengthScale) {
     if (piece < 0 || piece >= document.pieces().size())
         return failure("Choose a piece.");
     const auto validScale = [](double scale) { return scale >= 0.2 && scale <= 5; };
-    if (!std::isfinite(axisX) || !validScale(topScale) || !validScale(bottomScale))
-        return failure("Use a finite axis and widths between 20% and 500%.");
+    if (!std::isfinite(axisX) || !validScale(topScale) || !validScale(bottomScale) || !validScale(lengthScale))
+        return failure("Use a finite axis and width and length factors between 20% and 500%.");
     const auto source = analyzePiece(document, piece);
     if (source.error != ContourError::None)
         return invalidContour(source.error);
@@ -347,7 +347,9 @@ ContourEditResult shapeSilhouette(const PatternDocument& document, qsizetype pie
     const auto transform = [&](QPointF point) {
         const double level = std::clamp((point.y() - source.bounds.top()) / source.bounds.height(), 0., 1.);
         const double scale = std::lerp(topScale, bottomScale, level);
-        return QPointF(axisX + (point.x() - axisX) * scale, point.y());
+        const double y = lengthScale == 1 ? point.y()
+            : source.bounds.top() + (point.y() - source.bounds.top()) * lengthScale;
+        return QPointF(axisX + (point.x() - axisX) * scale, y);
     };
 
     auto updated = document;

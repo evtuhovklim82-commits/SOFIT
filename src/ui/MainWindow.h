@@ -38,6 +38,7 @@ private:
     void joinSelectedEdges();
     void shapeSilhouette();
     void showModelingHistory();
+    void editModelingStep(qsizetype index);
     void refreshModelingHistory();
     void setModelingError(const QString& error);
     void diagnoseGradedPieces();

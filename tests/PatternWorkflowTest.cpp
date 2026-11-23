@@ -16,6 +16,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QGraphicsItem>
 #include <QGraphicsScene>
 #include <QMenu>
@@ -745,7 +746,7 @@ int main(int argc, char** argv) {
         return dock->windowTitle() == "Construction Tree";
     });
     check(construction != docks.end(), "Open the construction dock");
-    const auto* constructionTree = (*construction)->findChild<QTreeWidget*>();
+    auto* constructionTree = (*construction)->findChild<QTreeWidget*>();
     check(constructionTree && constructionTree->topLevelItem(0)->childCount() == 1
           && constructionTree->topLevelItem(0)->child(0)->childCount() > 0,
           "Show the recorded modeling step and its named formula objects");
@@ -761,10 +762,32 @@ int main(int argc, char** argv) {
     check(constructionTree->topLevelItem(0)->childCount() == 1, "Refresh the open construction tree after redo");
     action(bodiceWindow, "&Save").trigger();
     check(bodice.load(bodicePath) && bodice.modelingHistory().size() == 1, "Redo modeling history");
+    QTimer::singleShot(0, [] {
+        auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(dialog && dialog->windowTitle().startsWith("Edit "), "Open construction step settings");
+        for (auto* field : dialog->findChildren<QDoubleSpinBox*>()) {
+            auto* form = qobject_cast<QFormLayout*>(dialog->layout());
+            if (qobject_cast<QLabel*>(form->labelForField(field))->text() == "Length from top")
+                field->setValue(120);
+        }
+        dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    constructionTree->itemActivated(constructionTree->topLevelItem(0)->child(0), 0);
+    const auto verifyLength = [&](double expected) {
+        action(bodiceWindow, "&Save").trigger();
+        check(bodice.load(bodicePath) && bodice.modelingHistory()[0].lengthScale == expected,
+              "Save, undo and redo an edited construction step");
+    };
+    verifyLength(1.2);
+    action(bodiceWindow, "Undo Edit Modeling Step").trigger();
+    verifyLength(1.05);
+    action(bodiceWindow, "Redo Edit Modeling Step").trigger();
+    verifyLength(1.2);
     runDialog<QDialog>(action(bodiceWindow, "Diagnose Pieces by Size…"), [](QDialog& dialog) {
         const auto* report = dialog.findChild<QTreeWidget*>();
-        check(report && report->topLevelItemCount() == 3
-              && report->topLevelItem(0)->text(1) == "One closed contour", "Diagnose the modeled pieces");
+        check(report && report->topLevelItemCount() == 1 && report->topLevelItem(0)->childCount() == 3
+              && report->topLevelItem(0)->child(0)->text(1) == "One closed contour",
+              "Diagnose the modeled pieces");
         dialog.reject();
     });
     const auto bodicePdf = temp.filePath("bodice.pdf");
@@ -829,6 +852,20 @@ int main(int argc, char** argv) {
     check(yoke.load(yokePath) && yoke.pieces().size() == 2
           && opc::analyzePiece(yoke, 0).notchAnchors.size() == 3
           && opc::analyzePiece(yoke, 1).notchAnchors.size() == 3, "Redo restores both panels and the paired marks");
+    check(yoke.appendSilhouette(1, 0.5, 1.1, 1.1, &seamError) && yoke.save(yokePath),
+          "Lengthen only one side of the marked seam");
+    MainWindow mismatchedYoke;
+    mismatchedYoke.show();
+    chooseFile(action(mismatchedYoke, "&Open"), yokePath);
+    action(mismatchedYoke, "Construction Tree…").trigger();
+    auto* mismatchTree = mismatchedYoke.findChildren<QDockWidget*>().back()->findChild<QTreeWidget*>();
+    auto* cut = mismatchTree->topLevelItem(0)->child(0);
+    auto* cutPair = cut->child(cut->childCount() - 1);
+    for (int i = 0; i < cutPair->childCount(); ++i) {
+        auto* sizeRow = cutPair->child(i);
+        check(sizeRow->childCount() == 1 && sizeRow->child(0)->text(0) == "Notch positions differ"
+              && sizeRow->child(0)->text(1).contains("mm"), "Report notch displacement along each graded seam");
+    }
 
     for (const int choice : {3, 4}) {
         const bool trousers = choice == 3;
@@ -895,6 +932,18 @@ int main(int argc, char** argv) {
             mismatch |= qAbs(seam.second - seam.first - seam.targetDifference) > 0.01;
         check(mismatch, "Detect a seam length difference after a manual size offset");
     }
+
+    MainWindow apronWindow;
+    apronWindow.show();
+    runDialog<QWizard>(action(apronWindow, "New Pattern from Template…"), [](QWizard& wizard) {
+        wizard.findChild<QComboBox*>()->setCurrentText("Bib apron with waist and neck ties");
+        wizard.next();
+        wizard.button(QWizard::FinishButton)->click();
+    });
+    const auto apronPath = temp.filePath("apron.sofit");
+    chooseFile(action(apronWindow, "&Save"), apronPath);
+    opc::PatternDocument apron;
+    check(apron.load(apronPath) && apron.pieces().size() == 3, "Create and save an apron through the wizard");
 
     MainWindow templateWindow;
     templateWindow.show();

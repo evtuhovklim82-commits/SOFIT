@@ -52,6 +52,7 @@ struct ModelingStep {
     double spreadMm = 0;
     QVector<QString> topology;
     qsizetype secondPiece = -1;
+    double lengthScale = 1;
     bool operator==(const ModelingStep&) const = default;
 };
 
@@ -73,7 +74,9 @@ public:
     std::optional<QVector<Entity>> evaluateSizeDraft(const PatternSize& size) const;
     const QVector<ModelingStep>& modelingHistory() const { return history_; }
     bool appendSilhouette(qsizetype piece, double axisFraction, double topScale,
-                          double bottomScale, QString* error = nullptr);
+                          double bottomScale, QString* error = nullptr, double lengthScale = 1);
+    // Change numeric settings while keeping the operation and all references intact.
+    bool editModelingStep(qsizetype index, const ModelingStep& settings, QString* error = nullptr);
     bool appendContour(qsizetype piece, ContourOperation operation,
                        const QVector<qsizetype>& guides, double spreadMm, QString* error = nullptr);
     bool hasContourHistory() const { return !hiddenSources_.isEmpty(); }

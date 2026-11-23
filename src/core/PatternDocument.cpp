@@ -176,7 +176,9 @@ bool PatternDocument::save(const QString& path, QString* error) const {
                 record.insert("topology", names(step.topology));
                 record.insert("secondPiece", step.secondPiece);
             } else {
-                record.insert("operation", "silhouette");
+                record.insert("operation", step.lengthScale == 1 ? "silhouette" : "silhouette-length");
+                if (step.lengthScale != 1)
+                    record.insert("length", step.lengthScale);
                 record.insert("axis", step.axisFraction);
                 record.insert("top", step.topScale);
                 record.insert("bottom", step.bottomScale);
@@ -381,7 +383,9 @@ bool PatternDocument::load(const QString& path, QString* error) {
             };
             if (!readNames(entry.value("objects"), step.objects))
                 return fail(QStringLiteral("Invalid modeling object names"));
-            if (operation == "silhouette") {
+            if (operation == "silhouette" || operation == "silhouette-length") {
+                if (operation == "silhouette-length")
+                    step.lengthScale = entry.value("length").toDouble(-1);
                 step.axisFraction = entry.value("axis").toDouble(-1);
                 step.topScale = entry.value("top").toDouble(-1);
                 step.bottomScale = entry.value("bottom").toDouble(-1);
