@@ -31,6 +31,7 @@ struct ProductionData {
     QVector<GradeRule> rules;
     double fabricWidth = 1500;
     QVector<FabricPlacement> placements;
+    bool allowHalfTurns = true;
 
     void removePiece(qsizetype piece);
 };

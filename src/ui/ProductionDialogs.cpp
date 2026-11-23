@@ -1,6 +1,7 @@
 #include "ProductionDialogs.h"
 #include "Production.h"
 
+#include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
@@ -14,6 +15,7 @@
 #include <QMessageBox>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
@@ -257,6 +259,11 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     for (const auto& entry : data.sizes)
         size->addItem(entry.name, entry.name);
     controls->addWidget(size);
+    auto* quantity = new QSpinBox;
+    quantity->setRange(1, int(opc::maxAutomaticCopies));
+    quantity->setAccessibleName(tr("Number of copies"));
+    controls->addWidget(new QLabel(tr("Quantity")));
+    controls->addWidget(quantity);
     auto* add = new QPushButton(tr("Add copy"));
     add->setEnabled(piece->count() > 0);
     controls->addWidget(add);
@@ -267,7 +274,16 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     auto* fit = new QPushButton(tr("Fit"));
     controls->addWidget(fit);
 
-    auto* hint = new QLabel(tr("Drag copies to position them. Grain runs along the fabric length. Pieces without a grainline keep their base orientation."));
+    auto* automaticControls = new QHBoxLayout;
+    layout->addLayout(automaticControls);
+    auto* automatic = new QPushButton(tr("Auto arrange"));
+    automaticControls->addWidget(automatic);
+    auto* halfTurns = new QCheckBox(tr("Allow 180° turns in automatic layout"));
+    halfTurns->setChecked(data.allowHalfTurns);
+    automaticControls->addWidget(halfTurns);
+    automaticControls->addStretch();
+
+    auto* hint = new QLabel(tr("Drag copies to position them. Grain runs along the fabric length. Pieces without a grainline use their base orientation or a 180° turn."));
     hint->setWordWrap(true);
     layout->addWidget(hint);
     QGraphicsScene scene;
@@ -298,9 +314,18 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         const auto usage = opc::fabricUsage(placed, data.fabricWidth);
         const double displayLength = std::max(1000.0, usage.length + 200);
         fabric->setRect(0, 0, data.fabricWidth, displayLength);
-        stats->setText(tr("Used length: %1 m · Copies: %2 · Outside fabric: %3 · Overlapping pairs: %4 · Invalid contours: %5")
+        automatic->setEnabled(!items.isEmpty());
+        auto summary = tr("Used length: %1 m · Copies: %2 · Outside fabric: %3 · Overlapping pairs: %4 · Invalid contours: %5")
                            .arg(usage.length / 1000, 0, 'f', 3).arg(items.size())
-                           .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid));
+                           .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid);
+        if (const auto utilization = usage.utilization(data.fabricWidth)) {
+            const double fabricArea = data.fabricWidth * usage.length;
+            summary += QLatin1Char('\n') + tr("Cut area: %1 m² · Unused area: %2 m² · Fabric utilization: %3%")
+                .arg(usage.cutArea / 1e6, 0, 'f', 3)
+                .arg(std::max(0.0, fabricArea - usage.cutArea) / 1e6, 0, 'f', 3)
+                .arg(*utilization * 100, 0, 'f', 1);
+        }
+        stats->setText(summary);
     };
     const auto updateSceneBounds = [&] {
         auto bounds = scene.itemsBoundingRect();
@@ -365,7 +390,8 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     });
     QObject::connect(add, &QPushButton::clicked, &dialog, [&] {
         opc::FabricPlacement placement{piece->currentIndex(), size->currentData().toString(), {}};
-        if (cutFor(placement).cut.isEmpty()) {
+        const auto cut = cutFor(placement).cut;
+        if (cut.isEmpty()) {
             QMessageBox::warning(&dialog, dialog.windowTitle(), tr("This size needs a valid closed contour and a valid allowance."));
             return;
         }
@@ -374,8 +400,12 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
                 placement.position.setY(std::max(placement.position.y(),
                                                 item->pos().y() + item->polygon().boundingRect().bottom() + 10));
         }
-        data.placements.append(placement);
-        addItem(data.placements.size() - 1);
+        const double step = cut.boundingRect().height() + 10;
+        for (int i = 0; i < quantity->value(); ++i) {
+            data.placements.append(placement);
+            addItem(data.placements.size() - 1);
+            placement.position.ry() += step;
+        }
         updateUsage();
         updateSceneBounds();
         scene.clearSelection();
@@ -401,6 +431,41 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         view->fitInView(scene.itemsBoundingRect().adjusted(-60, -60, 60, 60), Qt::KeepAspectRatio);
     };
     QObject::connect(fit, &QPushButton::clicked, &dialog, fitFabric);
+    QObject::connect(halfTurns, &QCheckBox::toggled, &dialog, [&](bool enabled) {
+        data.allowHalfTurns = enabled;
+    });
+    QObject::connect(automatic, &QPushButton::clicked, &dialog, [&] {
+        auto result = opc::arrangeFabric(document, data);
+        QString error;
+        switch (result.error) {
+        case opc::FabricLayoutError::None:
+            data.placements = std::move(result.placements);
+            rebuild();
+            fitFabric();
+            return;
+        case opc::FabricLayoutError::TooManyCopies:
+            error = tr("Automatic layout supports up to %1 copies.").arg(opc::maxAutomaticCopies);
+            break;
+        case opc::FabricLayoutError::InvalidWidth:
+            error = tr("Enter a positive fabric width.");
+            break;
+        case opc::FabricLayoutError::InvalidContour:
+            error = tr("The cutting outline or seam allowance is invalid.");
+            break;
+        case opc::FabricLayoutError::TooWide:
+            error = tr("The cutting outline is wider than the fabric with the grain aligned.");
+            break;
+        case opc::FabricLayoutError::VerificationFailed:
+            error = tr("Automatic layout could not produce a verified arrangement.");
+            break;
+        }
+        if (result.failedCopy >= 0) {
+            const auto& copy = data.placements[result.failedCopy];
+            error = tr("Copy %1 · %2 · %3\n%4").arg(result.failedCopy + 1)
+                .arg(document.pieces()[copy.piece].name, copy.size.isEmpty() ? tr("Base") : copy.size, error);
+        }
+        QMessageBox::warning(&dialog, dialog.windowTitle(), error);
+    });
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     rebuild();
     QTimer::singleShot(0, &dialog, fitFabric);

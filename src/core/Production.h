@@ -3,6 +3,7 @@
 #include "PieceGeometry.h"
 #include <QJsonObject>
 #include <QLineF>
+#include <optional>
 
 namespace opc {
 
@@ -24,8 +25,21 @@ struct FabricUsage {
     qsizetype invalid = 0;
     qsizetype outside = 0;
     qsizetype overlaps = 0;
+    double cutArea = 0;
+    std::optional<double> utilization(double width) const;
 };
 
 FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width);
+
+inline constexpr qsizetype maxAutomaticCopies = 200;
+enum class FabricLayoutError { None, InvalidWidth, TooManyCopies, InvalidContour, TooWide, VerificationFailed };
+
+struct AutomaticFabricLayout {
+    QVector<FabricPlacement> placements;
+    FabricLayoutError error = FabricLayoutError::None;
+    qsizetype failedCopy = -1;
+};
+
+AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const ProductionData& data);
 
 }

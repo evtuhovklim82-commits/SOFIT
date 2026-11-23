@@ -1,4 +1,4 @@
-# SOFIT 0.6 — independent CAD prototype
+# SOFIT 0.7 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -63,6 +63,7 @@ SOFIT 5 saves piece names, membership, layer assignments, layer visibility and a
 2. On **Grade Rules**, add a rule for each point that moves in a target size. Select the piece and the point in base coordinates, then enter ΔX and ΔY in mm. Coincident points of the same piece share the offset. Rectangle corners and quadratic control points are available. Measurements are recorded for reference and the offsets are entered explicitly for each size.
 3. Enable the sizes to compare in **Pattern → Size Overlays**. The menu swatches match the canvas colors. **File → Export DXF…** and **Export PDF for Printing…** offer the base pattern or a single target size.
 4. Open **Pattern → Fabric Layout…**, set the width in mm, choose a piece and size, and click **Add copy**. Add each required copy, drag the copies inside the fabric, and use **Turn 180°** where the fabric allows it. The declared grainline is aligned with the fabric length. Without a grainline the original orientation is used. The outline includes the seam allowance when defined.
+5. Set **Quantity** and add the copies required for each piece and size. Click **Auto arrange** to rearrange the entire list. Clear **Allow 180° turns in automatic layout** for directional fabric. The search tries three deterministic largest-first orders and keeps the shortest valid result it finds. It is limited to 200 copies. The report shows length, cut area including allowances, unused area and percentage used for a valid layout. Saving the pattern stores the placements and the rotation setting in the existing version 6 format.
 5. Read the length from the fabric start to the furthest cut edge. Resolve reported overlaps and pieces outside the fabric before using the estimate. Click **OK** and save the pattern to retain the width and positions.
 
 Grade rules reference the piece and exact base point coordinates. After moving base geometry, review rules labelled **Missing point**. If a contour joins endpoints with slightly different coordinates, give both points the same offset to keep the join. Fabric layout uses existing contour validation and flattened cut polygons. Layout is manual and is saved with the project. The PDF and DXF actions export patterns.

@@ -7,6 +7,10 @@
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <numeric>
+#include <limits>
+#include <tuple>
 
 namespace opc {
 namespace {
@@ -135,7 +139,8 @@ QJsonObject saveProduction(const ProductionData& data) {
     for (const auto& placement : data.placements)
         placements.append(QJsonObject{{"piece", placement.piece}, {"size", placement.size},
                                       {"position", pair(placement.position)}, {"reversed", placement.reversed}});
-    return {{"sizes", sizes}, {"rules", rules}, {"fabricWidth", data.fabricWidth}, {"placements", placements}};
+    return {{"sizes", sizes}, {"rules", rules}, {"fabricWidth", data.fabricWidth}, {"placements", placements},
+            {"allowHalfTurns", data.allowHalfTurns}};
 }
 
 bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionData& data) {
@@ -145,6 +150,12 @@ bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionDat
         || !json.value("sizes").isArray() || !json.value("rules").isArray()
         || !json.value("placements").isArray())
         return false;
+
+    if (json.contains("allowHalfTurns")) {
+        if (!json.value("allowHalfTurns").isBool())
+            return false;
+        parsed.allowHalfTurns = json.value("allowHalfTurns").toBool();
+    }
 
     QSet<QString> names;
     for (const auto& value : json.value("sizes").toArray()) {
@@ -214,32 +225,227 @@ LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& pl
                           center + QPointF(0, placement.reversed ? -halfLength : halfLength))};
 }
 
+namespace {
+constexpr double layoutTolerance = 1e-7;
+constexpr double placementGap = 0.01;
+
+double polygonArea(const QPolygonF& cut) {
+    if (cut.size() < 3)
+        return 0;
+    const auto origin = cut.front();
+    long double sum = 0;
+    for (qsizetype i = 1; i + 1 < cut.size(); ++i) {
+        const auto a = cut[i] - origin;
+        const auto b = cut[i + 1] - origin;
+        sum += static_cast<long double>(a.x()) * b.y() - static_cast<long double>(a.y()) * b.x();
+    }
+    return std::abs(sum) / 2;
+}
+
+QPainterPath cutPath(const QPolygonF& cut) {
+    QPainterPath path;
+    path.addPolygon(cut);
+    path.closeSubpath();
+    return path;
+}
+
+bool outsideFabric(const QRectF& bounds, double width) {
+    return bounds.left() < -layoutTolerance || bounds.right() > width + layoutTolerance
+        || bounds.top() < -layoutTolerance;
+}
+
+bool overlap(const QPainterPath& a, const QPainterPath& b) {
+    if (!a.boundingRect().intersects(b.boundingRect()))
+        return false;
+    const auto intersection = a.intersected(b).boundingRect();
+    return intersection.width() > layoutTolerance && intersection.height() > layoutTolerance;
+}
+
+struct PositionedCut {
+    QRectF bounds;
+    QPainterPath path;
+};
+
+struct CutOptions {
+    std::array<QPolygonF, 2> cuts;
+    double area;
+};
+}
+
+std::optional<double> FabricUsage::utilization(double width) const {
+    const double total = width * length;
+    if (invalid || outside || overlaps || !(total > 0) || !std::isfinite(total))
+        return std::nullopt;
+    return std::clamp(cutArea / total, 0.0, 1.0);
+}
+
 FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width) {
     FabricUsage usage;
     QVector<QPainterPath> previous;
     for (const auto& cut : polygons) {
-        if (cut.isEmpty()) {
+        const auto bounds = cut.boundingRect();
+        const double area = polygonArea(cut);
+        if (!(area > 0) || !std::isfinite(area) || !std::isfinite(bounds.bottom())
+            || !std::isfinite(bounds.right())) {
             ++usage.invalid;
             continue;
         }
-        const auto bounds = cut.boundingRect();
+        usage.cutArea += area;
         usage.length = std::max(usage.length, bounds.bottom());
-        constexpr double tolerance = 1e-7;
-        if (bounds.left() < -tolerance || bounds.right() > width + tolerance || bounds.top() < -tolerance)
+        if (outsideFabric(bounds, width))
             ++usage.outside;
-        QPainterPath path;
-        path.addPolygon(cut);
-        path.closeSubpath();
+        const auto path = cutPath(cut);
         for (const auto& other : previous) {
-            if (!bounds.intersects(other.boundingRect()))
-                continue;
-            const auto intersection = path.intersected(other).boundingRect();
-            if (intersection.width() > tolerance && intersection.height() > tolerance)
+            if (overlap(path, other))
                 ++usage.overlaps;
         }
         previous.append(path);
     }
     return usage;
+}
+
+AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const ProductionData& data) {
+    if (!(data.fabricWidth > 0) || !std::isfinite(data.fabricWidth))
+        return {{}, FabricLayoutError::InvalidWidth};
+    if (data.placements.size() > maxAutomaticCopies)
+        return {{}, FabricLayoutError::TooManyCopies};
+    if (data.placements.isEmpty())
+        return {};
+
+    QMap<QString, PatternDocument> graded;
+    QMap<std::pair<QString, qsizetype>, CutOptions> cached;
+    QVector<const CutOptions*> options;
+    for (qsizetype i = 0; i < data.placements.size(); ++i) {
+        auto copy = data.placements[i];
+        const auto key = std::pair(copy.size, copy.piece);
+        auto found = cached.constFind(key);
+        if (found == cached.cend()) {
+            if (!graded.contains(copy.size)) {
+                if (!copy.size.isEmpty() && std::ranges::none_of(data.sizes, [&](const PatternSize& size) {
+                        return size.name == copy.size;
+                    }))
+                    return {{}, FabricLayoutError::InvalidContour, i};
+                graded.insert(copy.size, gradedPattern(document, copy.size));
+            }
+            const auto& pattern = graded.value(copy.size);
+            copy.reversed = false;
+            auto normal = fabricPiece(pattern, copy).cut;
+            const double area = polygonArea(normal);
+            const auto bounds = normal.boundingRect();
+            if (!(area > 0) || !std::isfinite(area) || !std::isfinite(bounds.height()))
+                return {{}, FabricLayoutError::InvalidContour, i};
+            if (outsideFabric(bounds, data.fabricWidth))
+                return {{}, FabricLayoutError::TooWide, i};
+            copy.reversed = true;
+            auto reversed = data.allowHalfTurns ? fabricPiece(pattern, copy).cut : QPolygonF{};
+            if (reversed == normal)
+                reversed.clear();
+            found = cached.insert(key, {{std::move(normal), std::move(reversed)}, area});
+        }
+        options.append(&found.value());
+    }
+
+    auto polygonsFor = [&](const QVector<FabricPlacement>& copies) {
+        QVector<QPolygonF> polygons;
+        for (qsizetype i = 0; i < copies.size(); ++i) {
+            const auto& copy = copies[i];
+            // An identical half-turn is elided from the search.
+            const auto& cuts = options[i]->cuts;
+            const auto& cut = copy.reversed && !cuts[1].isEmpty() ? cuts[1] : cuts[0];
+            polygons.append(cut.translated(copy.position));
+        }
+        return polygons;
+    };
+
+    AutomaticFabricLayout best;
+    double bestLength = std::numeric_limits<double>::infinity();
+    const auto consider = [&](const QVector<FabricPlacement>& copies) {
+        const auto usage = fabricUsage(polygonsFor(copies), data.fabricWidth);
+        if (!usage.invalid && !usage.outside && !usage.overlaps && usage.length < bestLength) {
+            bestLength = usage.length;
+            best.placements = copies;
+        }
+    };
+
+    QVector<qsizetype> order(data.placements.size());
+    std::iota(order.begin(), order.end(), qsizetype{0});
+    // Different largest-first orders give the greedy search different opportunities.
+    for (int pass = 0; pass < 3; ++pass) {
+        const auto priority = [&](qsizetype index) {
+            const auto& cut = *options[index];
+            const auto bounds = cut.cuts[0].boundingRect();
+            return pass == 0 ? cut.area : pass == 1 ? bounds.height() : bounds.width();
+        };
+        std::ranges::sort(order, [&](qsizetype a, qsizetype b) {
+            return std::tuple(-priority(a), a) < std::tuple(-priority(b), b);
+        });
+
+        auto copies = data.placements;
+        QVector<PositionedCut> placed;
+        double length = 0;
+        for (const auto index : order) {
+            auto& copy = copies[index];
+            QPointF position(0, placed.isEmpty() ? 0 : length + placementGap);
+            auto bestScore = std::tuple(std::numeric_limits<double>::infinity(), 0.0, 0.0, false);
+            PositionedCut chosen;
+            for (int orientation = 0; orientation < 2; ++orientation) {
+                const auto& cut = options[index]->cuts[orientation];
+                if (cut.isEmpty())
+                    continue;
+                const auto bounds = cut.boundingRect();
+                const auto path = cutPath(cut);
+                const double rightEdge = std::max(0.0, data.fabricWidth - bounds.width());
+                const auto tryPosition = [&](double x, double y) {
+                    const QPointF point(x, y);
+                    const auto candidate = bounds.translated(point);
+                    const auto score = std::tuple(std::max(length, candidate.bottom()), y, x, orientation != 0);
+                    if (!std::isfinite(candidate.bottom()) || score >= bestScore
+                        || outsideFabric(candidate, data.fabricWidth))
+                        return;
+                    const auto translated = path.translated(point);
+                    for (const auto& other : placed) {
+                        if (candidate.intersects(other.bounds) && overlap(translated, other.path))
+                            return;
+                    }
+                    position = point;
+                    chosen = {candidate, translated};
+                    bestScore = score;
+                };
+
+                // Stacking below all previous copies provides a fallback.
+                tryPosition(0, placed.isEmpty() ? 0 : length + placementGap);
+                tryPosition(rightEdge, 0);
+                tryPosition(0, 0);
+                for (const auto& other : placed) {
+                    const auto b = other.bounds;
+                    const std::array xs{0.0, rightEdge, b.left(), b.right() + placementGap,
+                                        b.left() - bounds.width() - placementGap,
+                                        b.center().x() - bounds.width() / 2};
+                    const std::array ys{b.top(), b.bottom() + placementGap,
+                                        b.center().y() - bounds.height() / 2};
+                    for (const auto x : xs) {
+                        for (const auto y : ys)
+                            tryPosition(x, y);
+                    }
+                    tryPosition(b.right() + placementGap, 0);
+                }
+            }
+            if (chosen.path.isEmpty())
+                return {{}, FabricLayoutError::VerificationFailed, index};
+            copy.position = position;
+            copy.reversed = std::get<3>(bestScore);
+            length = std::get<0>(bestScore);
+            placed.append(std::move(chosen));
+        }
+        consider(copies);
+    }
+
+    // Preserve a valid hand-tuned layout if the search cannot improve it.
+    if (data.allowHalfTurns || std::ranges::none_of(data.placements, &FabricPlacement::reversed))
+        consider(data.placements);
+    if (best.placements.isEmpty())
+        best.error = FabricLayoutError::VerificationFailed;
+    return best;
 }
 
 }

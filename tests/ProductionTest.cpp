@@ -65,6 +65,60 @@ int main(int argc, char** argv) {
     check(qAbs(usage.length - cut.cut.boundingRect().height() - 25) < 1e-7 && usage.outside == 0,
           "Measure usage from fabric origin including placement offset");
 
+    check(!usage.utilization(0) && usage.cutArea > 0, "Calculate cutting area and reject unusable totals");
+    const auto full = fabricUsage({square, square.translated(40, 0)}, 80);
+    check(full.cutArea == 4000 && full.utilization(80) == 1,
+          "Compute utilization from polygon area and count touching edges as valid");
+    check(!fabricUsage({square, square.translated(1, 1)}, 80).utilization(80),
+          "Suppress utilization for invalid arrangements");
+
+    auto batch = production;
+    batch.allowHalfTurns = false;
+    batch.placements.append({0, "M", {200, 400}, true});
+    const auto automatic = arrangeFabric(base, batch);
+    check(automatic.error == FabricLayoutError::None && automatic.placements.size() == 3,
+          "Arrange mixed sizes including the base");
+    QVector<QPolygonF> arrangedCuts;
+    for (qsizetype i = 0; i < automatic.placements.size(); ++i) {
+        const auto& copy = automatic.placements[i];
+        check(copy.piece == batch.placements[i].piece && copy.size == batch.placements[i].size
+              && !copy.reversed, "Preserve order, piece and size and respect directional fabric");
+        arrangedCuts.append(fabricPiece(gradedPattern(base, copy.size), copy).cut.translated(copy.position));
+    }
+    const auto arranged = fabricUsage(arrangedCuts, batch.fabricWidth);
+    check(!arranged.invalid && !arranged.outside && !arranged.overlaps && arranged.length < 225,
+          "Verify that the mixed marker fits and is shorter than stacking");
+    auto repeated = batch;
+    repeated.placements = arrangeFabric(base, batch).placements;
+    auto expected = batch;
+    expected.placements = automatic.placements;
+    check(saveProduction(repeated) == saveProduction(expected), "Return identical results for identical requests");
+    batch.fabricWidth = 59;
+    const auto tooWide = arrangeFabric(base, batch);
+    check(tooWide.error == FabricLayoutError::TooWide && tooWide.failedCopy == 0
+          && tooWide.placements.isEmpty(), "Fail atomically when an allowance exceeds the fabric width");
+
+    PatternDocument triangle;
+    triangle.pieces().append(Piece{"Triangle", 0});
+    triangle.insert(0, {Shape::Line, {0, 0}, {80, 0}, {}, 0});
+    triangle.insert(1, {Shape::Line, {80, 0}, {0, 80}, {}, 0});
+    triangle.insert(2, {Shape::Line, {0, 80}, {0, 0}, {}, 0});
+    auto& triangleBatch = triangle.production();
+    triangleBatch.fabricWidth = 80;
+    triangleBatch.placements = {{0, {}, {}}, {0, {}, {}}};
+    const auto nested = arrangeFabric(triangle, triangleBatch);
+    check(nested.error == FabricLayoutError::None && nested.placements[1].reversed
+          && nested.placements[1].position == QPointF{}, "Nest complementary half-turns at full fabric width");
+    triangleBatch.allowHalfTurns = false;
+    const auto directional = arrangeFabric(triangle, triangleBatch);
+    check(directional.error == FabricLayoutError::None && !directional.placements[1].reversed
+          && directional.placements[1].position.y() >= 80, "Stack when half-turns are disabled");
+    triangle.pieces().append(Piece{"Open", 0});
+    triangleBatch.placements.append({1, {}, {}});
+    check(arrangeFabric(triangle, triangleBatch).error == FabricLayoutError::InvalidContour
+          && arrangeFabric(triangle, triangleBatch).placements.isEmpty(), "Reject incomplete contours atomically");
+
+    production.allowHalfTurns = false;
     QTemporaryDir temp;
     check(temp.isValid(), "Create temporary directory");
     const auto file = temp.filePath("production.sofit");
@@ -73,6 +127,11 @@ int main(int argc, char** argv) {
     check(loaded.load(file) && saveProduction(loaded.production()) == saveProduction(production)
           && loaded.pieces() == base.pieces(), "Round-trip sizes, rules, placement, width, and piece metadata");
     auto json = saveProduction(production);
+    auto version6 = json;
+    version6.remove("allowHalfTurns");
+    ProductionData legacyProduction;
+    check(loadProduction(version6, 2, legacyProduction) && legacyProduction.allowHalfTurns,
+          "Keep legacy rotation behavior for version 6 files without the optional setting");
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());
     check(!loadProduction(saveProduction(duplicate), 2, loaded.production())

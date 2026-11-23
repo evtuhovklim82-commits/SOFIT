@@ -3,6 +3,7 @@
 #include "PatternPdf.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QRegularExpression>
@@ -265,6 +266,24 @@ int main(int argc, char** argv) {
           && loaded.production().fabricWidth == 1450
           && loaded.production().placements.front().position == QPointF(20, 40)
           && loaded.production().placements.front().reversed, "Save grading and layout through the UI");
+
+    runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
+        dialog.findChild<QCheckBox*>()->setChecked(false);
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Auto arrange")
+                button->click();
+        }
+        bool utilization = false;
+        for (auto* label : dialog.findChildren<QLabel*>())
+            utilization |= label->text().contains("Fabric utilization:");
+        check(utilization, "Show utilization after automatic arrangement");
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    action(window, "&Save").trigger();
+    check(loaded.load(pattern) && !loaded.production().allowHalfTurns
+          && loaded.production().placements.size() == 1 && !loaded.production().placements.front().reversed
+          && loaded.production().placements.front().position == QPointF{},
+          "Save and reload the automatic arrangement and directional fabric setting");
 
     const auto gradedDxfPath = temp.filePath("graded.dxf");
     const auto gradedPdfPath = temp.filePath("graded.pdf");
