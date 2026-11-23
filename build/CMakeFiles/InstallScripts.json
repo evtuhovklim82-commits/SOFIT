@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/mnt/A/SOFIT/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

@@ -1,9 +1,0 @@
-/mnt/A/SOFIT/build/CMakeFiles/sofit.dir
-/mnt/A/SOFIT/build/CMakeFiles/edit_cache.dir
-/mnt/A/SOFIT/build/CMakeFiles/rebuild_cache.dir
-/mnt/A/SOFIT/build/CMakeFiles/list_install_components.dir
-/mnt/A/SOFIT/build/CMakeFiles/install.dir
-/mnt/A/SOFIT/build/CMakeFiles/install/local.dir
-/mnt/A/SOFIT/build/CMakeFiles/install/strip.dir
-/mnt/A/SOFIT/build/CMakeFiles/sofit_autogen_timestamp_deps.dir
-/mnt/A/SOFIT/build/CMakeFiles/sofit_autogen.dir
