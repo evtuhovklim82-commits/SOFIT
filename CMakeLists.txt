@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 0.9.0 LANGUAGES CXX)
+project(SOFIT VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -15,6 +15,7 @@ add_library(sofit_core STATIC
     src/core/PieceMarkings.cpp
     src/core/PatternDxf.cpp
     src/core/ParametricDraft.cpp
+    src/core/PatternTemplates.cpp
     src/core/PatternDocument.cpp
     src/core/PatternDocument.h
     src/core/PieceGeometry.cpp
@@ -25,6 +26,7 @@ target_include_directories(sofit_core PUBLIC src/core)
 
 add_library(sofit_widgets STATIC
     src/ui/ParametricDialog.cpp
+    src/ui/TemplateWizard.cpp
     src/ui/MainWindow.cpp
     src/ui/ProductionDialogs.cpp
     src/ui/MainWindow.h
@@ -38,6 +40,12 @@ qt_add_executable(sofit src/app/main.cpp)
 target_link_libraries(sofit PRIVATE sofit_widgets)
 set_target_properties(sofit PROPERTIES WIN32_EXECUTABLE TRUE MACOSX_BUNDLE TRUE)
 install(TARGETS sofit BUNDLE DESTINATION . RUNTIME DESTINATION bin)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    install(FILES LICENSE-NOTICE.txt README.md DESTINATION share/doc/sofit)
+    set(CPACK_GENERATOR TGZ)
+    set(CPACK_PACKAGE_CHECKSUM SHA256)
+    include(CPack)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)

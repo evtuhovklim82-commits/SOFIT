@@ -17,7 +17,7 @@ jobs:
           arch: win64_msvc2022_64
           cache: true
       - name: Configure
-        run: cmake -S . -B build -A x64
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DBUILD_TESTING=ON
       - name: Build
         run: cmake --build build --config Release
       - name: Test
@@ -28,6 +28,11 @@ jobs:
           New-Item -ItemType Directory -Force dist/SOFIT | Out-Null
           Copy-Item build/Release/sofit.exe dist/SOFIT/SOFIT.exe
           windeployqt --release --no-translations dist/SOFIT/SOFIT.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($file in @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "platforms/qwindows.dll")) {
+            if (!(Test-Path "dist/SOFIT/$file")) { throw "Missing runtime file $file" }
+          }
+          Copy-Item README.md, LICENSE-NOTICE.txt dist/SOFIT
           Compress-Archive -Path dist/SOFIT -DestinationPath SOFIT-Windows-x64.zip
       - uses: actions/upload-artifact@v4
         with:

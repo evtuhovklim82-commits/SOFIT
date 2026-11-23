@@ -1,14 +1,13 @@
-# SOFIT 0.9 — independent CAD prototype
+# SOFIT 1.0 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
 ## Windows .exe via GitHub Actions
-1. Create a GitHub repository and upload the contents of this folder to the repository root (including `.github/workflows/windows.yml`).
-2. Open **Actions → Windows portable build → Run workflow**.
-3. After completion, download the `SOFIT-Windows-x64` artifact and unpack the ZIP inside it.
-4. Run `SOFIT.exe` on Windows. Qt runtime DLLs and plugins are included by `windeployqt`.
+1. In the SOFIT repository, open **Actions → Windows portable build → Run workflow**.
+2. After completion, download the `SOFIT-Windows-x64` artifact and unpack the ZIP inside it.
+3. Run `SOFIT.exe` on Windows. Qt runtime DLLs and plugins are included by `windeployqt`.
 
-The ZIP in this starter project contains **source code, not a precompiled .exe**. Windows CI builds the actual .exe. CI build has not been executed here.
+The workflow uses Qt 6.8.3 and MSVC 2022 x64 and runs CTest before packaging. The executable also requires the Microsoft Visual C++ x64 runtime.
 
 ## Arch Linux — native (recommended)
 ```bash
@@ -17,6 +16,14 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/sofit
 ```
+
+To build the native Linux archive and SHA-256 checksum, run:
+
+```bash
+cpack --config build/CPackConfig.cmake -B dist
+```
+
+The archive contains the app and documentation. It uses the Qt and system libraries on the target machine. The **Linux native build** workflow builds, tests and packages on Ubuntu 24.04.
 
 ## Arch Linux — Windows build via Wine
 After obtaining the Windows ZIP from GitHub Actions, extract it and run from the directory containing `SOFIT.exe`:
@@ -41,7 +48,7 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
 - Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
-- Save patterns in `.sofit` format 8 when they contain a parametric draft, or format 7 otherwise. SOFIT opens formats 1–8 and legacy format 1 `.opcad` drawings. SVG export includes enabled layers and uses millimeters.
+- SOFIT opens `.sofit` formats 1–9 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
 
 ## Parametric drafting
@@ -54,7 +61,16 @@ Use `macdeployqt` when packaging the app for distribution.
 
 Identifiers are case-sensitive and use ASCII letters, digits and underscores, with a letter or underscore first. Measurements and parameters share one namespace. Formulas can use `+`, `-`, `*`, `/`, parentheses, a decimal point, scientific notation and named point coordinates such as `B.x` and `B.y`. Coordinates are in mm and Y increases downwards. Points start on the Construction layer and edges on the Main layer.
 
-Edit or delete generated objects in the draft editor. Piece and layer assignments are retained when a generated object's name stays the same. Renaming a point also requires updating formulas and edges that reference it. Parametric measurements are project-wide. Size grading uses its existing coordinate-based offsets, so review the grade rules and fabric layout after changing the base contour.
+Edit or delete generated objects in the draft editor. Piece and layer assignments are retained when a generated object's name stays the same. Renaming a point also requires updating formulas and edges that reference it. Review grade rules and fabric placements after editing the base contour.
+
+## Draft a skirt from measurements
+
+1. Open **Pattern → New Pattern from Template…** and choose a gathered or A-line skirt.
+2. Enter hip circumference, finished length, extra opening circumference, and casing depth in mm. The A-line template also takes extra hem circumference.
+3. Finish the wizard. It creates a new editable drawing with one full panel to cut twice, a casing fold guide, a lengthwise grainline, and a 10 mm perimeter allowance.
+4. Join the side seams, finish the raw edges, and turn the top down along the casing fold. Fit the elastic at the waist and finish the hem. Check the fit with a test garment before cutting final fabric.
+
+To make another size, add `hip` and optionally `length` in the size table. Opening ease, flare and casing depth are shared draft parameters.
 
 ## Pattern pieces
 
@@ -71,8 +87,8 @@ SOFIT 5 saves piece names, membership, layer assignments, layer visibility and a
 
 ## Grading sizes and fabric layout
 
-1. Open **Pattern → Sizes, Measurements and Grade Rules…**. On **Measurements**, enter the size and one measurement in mm per row. Repeat the size name for more measurements. A size can also have an empty measurement list.
-2. On **Grade Rules**, add a rule for each point that moves in a target size. Select the piece and the point in base coordinates, then enter ΔX and ΔY in mm. Coincident points of the same piece share the offset. Rectangle corners and quadratic control points are available. Measurements are recorded for reference and the offsets are entered explicitly for each size.
+1. Open **Pattern → Sizes, Measurements and Grade Rules…**. On **Measurements**, enter the size and one measurement in mm per row. Repeat the size name for more measurements. A size can also have an empty measurement list. With **Use size measurements in draft formulas** enabled, a row overrides a base measurement with the exact same name. Omitted measurements use the base values. Other rows remain available for reference. Opening a format 8 file with sizes keeps its old grading behavior. Enable the option in the grading dialog and save to use format 9.
+2. On **Grade Rules**, add a rule for each point that moves in a target size. Select the piece and the point in base coordinates, then enter ΔX and ΔY in mm. Coincident points of the same piece share the offset. Rectangle corners and quadratic control points are available. Offsets are added after formula evaluation and are looked up by the original base coordinates. Manual geometry continues to move by the existing offsets.
 3. Enable the sizes to compare in **Pattern → Size Overlays**. The menu swatches match the canvas colors. **File → Export DXF…** and **Export PDF for Printing…** offer the base pattern or a single target size.
 4. Open **Pattern → Fabric Layout…**, set the width in mm, choose a piece and size, and click **Add copy**. Add each required copy, drag the copies inside the fabric, and use **Turn 180°** where the fabric allows it. The declared grainline is aligned with the fabric length. Without a grainline the original orientation is used. The outline includes the seam allowance when defined.
 5. Choose a cut mode before adding copies. **Left + right pair** adds one original and one mirrored contour per unit of quantity. You can also add either hand by itself. The reflection preserves the lengthwise grain direction.
@@ -80,9 +96,9 @@ SOFIT 5 saves piece names, membership, layer assignments, layer visibility and a
 7. Enable **One-way nap or print** to require the original grain direction across the layout. Use **Fix orientation for new copies** to apply the same restriction to individual copies. Otherwise an aligned 180° turn is available. **Auto arrange** tries three deterministic orders with up to 200 plotted copies, places fold copies along their assigned edge, and checks the outlines for overlap and fit.
 8. Open **Cutting report…** to review counts by piece and size, working width, used length, utilization, and warnings. Counts refer to plotted copies per cutting layer. Each on-fold entry yields one unfolded piece. The project file retains these settings.
 9. Use **Export layout DXF…** to export a valid layout in millimeters with separate CUT, FOLD, GRAINLINE and FABRIC layers. On-fold CUT paths are open along the marked fold. For cutting, use the CUT layer.
-5. Read the length from the fabric start to the furthest cut edge. Resolve reported overlaps and pieces outside the fabric before using the estimate. Click **OK** and save the pattern to retain the width and positions.
+10. Read the length from the fabric start to the furthest cut edge. Resolve reported overlaps and pieces outside the fabric before using the estimate. Click **OK** and save the pattern to retain the width and positions.
 
-Grade rules reference the piece and exact base point coordinates. After moving base geometry, review rules labelled **Missing point**. If a contour joins endpoints with slightly different coordinates, give both points the same offset to keep the join. Fabric layout uses existing contour validation and flattened cut polygons. Layout is manual and is saved with the project. The PDF and DXF actions export patterns.
+Grade rules reference the piece and exact base point coordinates. After moving base geometry, review rules labelled **Missing point**. If a contour joins endpoints with slightly different coordinates, give both points the same offset to keep the join. Fabric layout validates contours and uses flattened cut polygons. Recheck saved placements after changing size measurements. The PDF and DXF actions export patterns.
 
 ## Full-scale printing
 

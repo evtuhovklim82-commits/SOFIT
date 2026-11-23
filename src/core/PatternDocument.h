@@ -46,6 +46,8 @@ public:
     void setLayerVisible(Layer layer, bool visible) { layerVisibility_[static_cast<int>(layer)] = visible; }
     const ParametricDraft& parametricDraft() const { return draft_; }
     bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
+    bool validateParametricSizes(const ProductionData& production, QString* error = nullptr) const;
+    std::optional<QVector<Entity>> evaluateSizeDraft(const PatternSize& size) const;
     bool save(const QString& path, QString* error = nullptr) const;
     bool load(const QString& path, QString* error = nullptr);
 

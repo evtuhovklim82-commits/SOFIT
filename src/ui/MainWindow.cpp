@@ -6,6 +6,7 @@
 #include "PieceMarkings.h"
 #include "Production.h"
 #include "ProductionDialogs.h"
+#include "TemplateWizard.h"
 #include "EntityPath.h"
 #include <QPixmap>
 #include <QCheckBox>
@@ -250,6 +251,14 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Remove Objects from Piece"));
     });
     pattern->addAction(tr("Piece, Contour and Allowance…"), this, &MainWindow::managePiece);
+    pattern->addAction(tr("New Pattern from Template…"), this, [this] {
+        if (auto generated = createPatternFromTemplate(this); generated && confirmDiscard()) {
+            replaceDocument({}, {});
+            view_->cancelDrawing();
+            undo_.push(new PatternCommand(doc_, std::move(*generated), tr("Create Pattern from Template"), view_));
+            view_->fitDrawing();
+        }
+    });
     pattern->addAction(tr("Parametric Draft…"), this, [this] {
         if (auto updated = editParametricDraft(this, doc_)) {
             view_->cancelDrawing();
@@ -261,7 +270,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
     pattern->addAction(tr("Sizes, Measurements and Grade Rules…"), this, [this] {
         if (auto production = editGrading(this, doc_)) {
-            if (opc::saveProduction(*production) == opc::saveProduction(doc_.production()))
+            if (production->useDraftMeasurements == doc_.production().useDraftMeasurements
+                && opc::saveProduction(*production) == opc::saveProduction(doc_.production()))
                 return;
             auto updated = doc_;
             updated.production() = std::move(*production);
@@ -848,6 +858,11 @@ void MainWindow::exactInput() {
         dialog.accept();
     });
     dialog.exec();
+}
+
+MainWindow::~MainWindow() {
+    // QUndoStack clears its history during destruction and would otherwise refresh the window.
+    undo_.blockSignals(true);
 }
 
 bool MainWindow::confirmDiscard() {

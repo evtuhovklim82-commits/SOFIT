@@ -111,9 +111,12 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
     auto* rulesLayout = new QVBoxLayout(rulesPage);
     tabs->addTab(sizesPage, tr("Measurements"));
     tabs->addTab(rulesPage, tr("Grade Rules"));
-    auto* sizesHint = new QLabel(tr("Use one row per measurement. Repeat the size name for each measurement. Leave the last two cells empty to define a size without measurements."));
+    auto* sizesHint = new QLabel(tr("Use one row per measurement. Repeat the size name for each measurement. Leave the last two cells empty to define a size without measurements. Matching draft measurement names replace base values for that size. Omitted measurements keep their base values."));
     sizesHint->setWordWrap(true);
     sizesLayout->addWidget(sizesHint);
+    auto* useDraftMeasurements = new QCheckBox(tr("Use size measurements in draft formulas"));
+    useDraftMeasurements->setChecked(document.production().useDraftMeasurements);
+    sizesLayout->addWidget(useDraftMeasurements);
     auto* sizes = makeTable(sizesLayout, {tr("Size"), tr("Measurement"), tr("Value (mm)")});
     const auto addMeasurement = [sizes](const QString& size, const QString& name, const QString& value) {
         const int row = sizes->rowCount();
@@ -135,7 +138,7 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         sizes->editItem(sizes->item(sizes->rowCount() - 1, 0));
     });
 
-    auto* rulesHint = new QLabel(tr("Enter the target size and choose a point on the base piece. Enter X and Y offsets in mm. Positive Y moves down. Coincident points on the same piece move together."));
+    auto* rulesHint = new QLabel(tr("Enter the target size and choose a point on the base piece. Enter X and Y offsets in mm. Offsets are added after formulas are recalculated, using the selected base point as the reference. Positive Y moves down. Coincident base points on the same piece share the offset."));
     rulesHint->setWordWrap(true);
     rulesLayout->addWidget(rulesHint);
     auto* rules = makeTable(rulesLayout, {tr("Size"), tr("Piece"), tr("Base point (X, Y)"), tr("ΔX (mm)"), tr("ΔY (mm)")});
@@ -246,6 +249,12 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         }
         if (!opc::loadProduction(opc::saveProduction(updated), document.pieces().size(), result)) {
             warn(tr("Check for duplicate grade rules at the same point and size or invalid offsets."));
+            return;
+        }
+        result.useDraftMeasurements = useDraftMeasurements->isChecked();
+        QString error;
+        if (!document.validateParametricSizes(result, &error)) {
+            warn(error);
             return;
         }
         dialog.accept();

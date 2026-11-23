@@ -1,5 +1,6 @@
 #include "Production.h"
 
+#include <QHash>
 #include <QJsonArray>
 #include <QPainterPath>
 #include <QSet>
@@ -80,6 +81,16 @@ PatternDocument gradedPattern(const PatternDocument& document, const QString& si
         return document;
     }
 
+    QHash<QString, Entity> formulaObjects;
+    const auto target = std::ranges::find(document.production().sizes, size, &PatternSize::name);
+    if (target != document.production().sizes.cend()) {
+        const auto evaluated = document.evaluateSizeDraft(*target);
+        if (!evaluated)
+            return {};
+        for (const auto& entity : *evaluated)
+            formulaObjects.insert(entity.draftName, entity);
+    }
+
     PatternDocument graded;
     graded.pieces() = document.pieces();
     for (auto& piece : graded.pieces())
@@ -93,16 +104,24 @@ PatternDocument gradedPattern(const PatternDocument& document, const QString& si
             rules[rule.piece].append(&rule);
     }
     for (qsizetype index = 0; index < document.entities().size(); ++index) {
-        auto entity = document.entities()[index];
+        const auto& base = document.entities()[index];
+        auto entity = base;
+        const auto computed = formulaObjects.constFind(base.draftName);
+        if (computed != formulaObjects.cend()) {
+            entity.a = computed->a;
+            entity.b = computed->b;
+            entity.control = computed->control;
+        }
+        entity.draftName.clear();
         const auto append = [&](const Entity& gradedEntity) {
             graded.insert(graded.entities().size(), gradedEntity);
             if (sourceIndices)
                 sourceIndices->append(index);
         };
-        const auto shift = [&](QPointF point) {
-            if (entity.piece >= 0) {
+        const auto shift = [&](QPointF basePoint, QPointF point) {
+            if (entity.piece >= 0 && entity.piece < rules.size()) {
                 for (const auto* rule : rules[entity.piece]) {
-                    if (samePoint(rule->point, point))
+                    if (samePoint(rule->point, basePoint))
                         return point + rule->offset;
                 }
             }
@@ -111,17 +130,17 @@ PatternDocument gradedPattern(const PatternDocument& document, const QString& si
         if (entity.shape == Shape::Rectangle) {
             auto points = entityPoints(entity);
             auto moved = points;
-            std::ranges::transform(points, moved.begin(), shift);
+            std::ranges::transform(points, moved.begin(), [&](QPointF point) { return shift(point, point); });
             if (!std::ranges::equal(moved, points, samePoint)) {
                 for (int i = 0; i < 4; ++i)
                     append({Shape::Line, moved[i], moved[(i + 1) % 4], {}, entity.piece, entity.layer});
                 continue;
             }
         }
-        entity.a = shift(entity.a);
-        entity.b = entity.shape == Shape::Point ? entity.a : shift(entity.b);
+        entity.a = shift(base.a, entity.a);
+        entity.b = entity.shape == Shape::Point ? entity.a : shift(base.b, entity.b);
         if (entity.shape == Shape::Curve)
-            entity.control = shift(entity.control);
+            entity.control = shift(base.control, entity.control);
         append(entity);
     }
     return graded;

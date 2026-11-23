@@ -39,6 +39,7 @@ struct ProductionData {
     QVector<FabricPlacement> placements;
     bool allowHalfTurns = true;
     bool directionalFabric = false;
+    bool useDraftMeasurements = true;
 
     void removePiece(qsizetype piece);
 };

@@ -235,6 +235,51 @@ private:
     QHash<QString, QString> formulas_;
     QHash<QString, double> values_;
 };
+
+std::optional<QVector<Entity>> evaluateSize(const ParametricDraft& base, const PatternSize& size,
+                                            QString* error) {
+    auto draft = base;
+    bool changed = false;
+    for (auto& measurement : draft.measurements) {
+        const auto value = size.measurements.constFind(measurement.name);
+        if (value != size.measurements.cend() && measurement.mm != value.value()) {
+            measurement.mm = value.value();
+            changed = true;
+        }
+    }
+    if (!changed)
+        return QVector<Entity>{};
+
+    try {
+        return DraftEvaluation(draft).geometry(draft);
+    } catch (const EvaluationError& failure) {
+        if (error)
+            *error = QStringLiteral("Size '%1': %2").arg(size.name, failure.message);
+        return std::nullopt;
+    }
+}
+
+bool validateSizes(const ParametricDraft& draft, const ProductionData& production, QString* error) {
+    if (production.useDraftMeasurements) {
+        for (const auto& size : production.sizes) {
+            if (!evaluateSize(draft, size, error))
+                return false;
+        }
+    }
+    if (error)
+        error->clear();
+    return true;
+}
+}
+
+bool PatternDocument::validateParametricSizes(const ProductionData& production, QString* error) const {
+    return validateSizes(draft_, production, error);
+}
+
+std::optional<QVector<Entity>> PatternDocument::evaluateSizeDraft(const PatternSize& size) const {
+    if (!production_.useDraftMeasurements)
+        return QVector<Entity>{};
+    return evaluateSize(draft_, size, nullptr);
 }
 
 bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) {
@@ -246,6 +291,9 @@ bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) 
             *error = failure.message;
         return false;
     }
+
+    if (!validateSizes(draft, production_, error))
+        return false;
 
     QHash<QString, qsizetype> indices;
     for (qsizetype i = 0; i < generated.size(); ++i)

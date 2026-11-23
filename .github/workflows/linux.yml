@@ -1,0 +1,30 @@
+name: Linux native build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Qt and build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build qt6-base-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Package
+        run: cpack --config build/CPackConfig.cmake -B dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SOFIT-Linux-x64
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256

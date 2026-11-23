@@ -1,6 +1,8 @@
 #include "MainWindow.h"
 #include "PatternView.h"
 #include "PatternPdf.h"
+#include "PieceGeometry.h"
+#include "Production.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -22,6 +24,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QTreeWidget>
+#include <QWizard>
 #include <cstdlib>
 #include <iostream>
 
@@ -407,5 +410,37 @@ int main(int argc, char** argv) {
     chooseFile(action(draftWindow, "&Open"), draftFile);
     check(draftTree.topLevelItemCount() == 4 && draftTree.topLevelItem(3)->text(0).contains("AB"),
           "Open a parametric project through the UI");
+
+    MainWindow templateWindow;
+    templateWindow.show();
+    runDialog<QWizard>(action(templateWindow, "New Pattern from Template…"), [](QWizard& wizard) {
+        wizard.findChild<QComboBox*>()->setCurrentIndex(1);
+        wizard.next();
+        wizard.button(QWizard::FinishButton)->click();
+    });
+    auto* templateTree = templateWindow.findChild<QTreeWidget*>();
+    check(templateTree->topLevelItemCount() == 13, "Create an editable A-line skirt through the wizard");
+    action(templateWindow, "Undo Create Pattern from Template").trigger();
+    check(templateTree->topLevelItemCount() == 0, "Undo the new template drawing");
+    action(templateWindow, "Redo Create Pattern from Template").trigger();
+
+    runDialog<QDialog>(action(templateWindow, "Sizes, Measurements and Grade Rules…"), [](QDialog& dialog) {
+        auto* measurements = dialog.findChild<QTabWidget*>()->widget(0)->findChild<QTableWidget*>();
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Add measurement row")
+                button->click();
+        }
+        check(measurements->rowCount() == 1, "Add a template size measurement row");
+        measurements->item(0, 0)->setText("L");
+        measurements->item(0, 1)->setText("hip");
+        measurements->item(0, 2)->setText("1200");
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    const auto skirtPath = temp.filePath("skirt.sofit");
+    chooseFile(action(templateWindow, "&Save"), skirtPath);
+    check(loaded.load(skirtPath)
+          && opc::analyzePiece(loaded, 0).bounds.width() == 740
+          && opc::analyzePiece(opc::gradedPattern(loaded, "L"), 0).bounds.width() == 840,
+          "Recompute the template contour for the entered size after saving and opening");
 
 }

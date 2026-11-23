@@ -13,6 +13,7 @@ class QTreeWidget;
 class MainWindow : public QMainWindow {
 public:
     MainWindow();
+    ~MainWindow() override;
 
 protected:
     void closeEvent(QCloseEvent* event) override;

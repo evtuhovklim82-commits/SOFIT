@@ -87,6 +87,8 @@ bool loadDraft(const QJsonObject& data, ParametricDraft& draft) {
 }
 
 bool PatternDocument::save(const QString& path, QString* error) const {
+    if (!validateParametricSizes(production_, error))
+        return false;
     QJsonArray objects;
     for (const auto& entity : entities_) {
         QJsonObject object{{"type", shapeName(entity.shape)}, {"coordinates", coordinates(entity)},
@@ -111,7 +113,10 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     for (bool visible : layerVisibility_)
         layerVisibility.append(visible);
     const bool parametric = draft_ != ParametricDraft{};
-    QJsonObject root{{"format", "SOFIT"}, {"version", parametric ? 8 : 7}, {"objects", objects},
+    int version = 7;
+    if (parametric)
+        version = production_.useDraftMeasurements && !production_.sizes.isEmpty() ? 9 : 8;
+    QJsonObject root{{"format", "SOFIT"}, {"version", version}, {"objects", objects},
                      {"pieces", pieces}, {"layerVisibility", layerVisibility},
                      {"production", saveProduction(production_)}};
     if (parametric)
@@ -146,7 +151,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto format = root.value("format").toString();
     const auto version = root.value("version").toDouble();
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
-    const bool current = (version == 2 || version == 3 || version == 4 || version == 5 || version == 6 || version == 7 || version == 8) && format == "SOFIT";
+    const bool current = format == "SOFIT" && version >= 2 && version <= 9 && std::trunc(version) == version;
     const auto objects = root.value(legacy ? "segments" : "objects");
     if ((!legacy && !current) || !objects.isArray())
         return fail(QStringLiteral("Unsupported document format"));
@@ -236,7 +241,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
             entity.piece = static_cast<qsizetype>(piece);
             entity.layer = layer == "main" ? Layer::Main : Layer::Construction;
         }
-        if (version == 8 && fields.contains("draftName")) {
+        if (version >= 8 && fields.contains("draftName")) {
             entity.draftName = fields.value("draftName").toString();
             if (entity.draftName.isEmpty() || draftNames.contains(entity.draftName))
                 return fail(QStringLiteral("Invalid or duplicate parametric object name"));
@@ -253,7 +258,9 @@ bool PatternDocument::load(const QString& path, QString* error) {
     loaded.entities_ = std::move(parsed);
     loaded.pieces_ = std::move(pieces);
     loaded.layerVisibility_ = layerVisibility;
-    if (version == 8) {
+    // Version 8 stored size measurements for reference only.
+    loaded.production_.useDraftMeasurements = version != 8 || loaded.production_.sizes.isEmpty();
+    if (version >= 8) {
         ParametricDraft draft;
         if (!loadDraft(root.value("parametricDraft").toObject(), draft))
             return fail(QStringLiteral("Invalid parametric draft"));
