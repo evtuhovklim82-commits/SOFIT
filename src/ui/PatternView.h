@@ -4,6 +4,7 @@
 #include <QPolygonF>
 #include <optional>
 #include "../core/PatternDocument.h"
+#include <QPainterPath>
 
 class QGraphicsPathItem;
 
