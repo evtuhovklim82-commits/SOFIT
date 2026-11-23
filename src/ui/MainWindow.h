@@ -32,6 +32,8 @@ private:
     void splitSelectedEdge();
     void joinSelectedEdges();
     void shapeSilhouette();
+    void showModelingHistory();
+    void diagnoseGradedPieces();
     void modelPiece(opc::ContourOperation operation, const QString& title);
     bool canModelEdge(const opc::Entity& edge);
     void refreshObjects();

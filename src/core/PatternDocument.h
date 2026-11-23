@@ -34,6 +34,15 @@ struct Entity {
     QVector<double> seamNotches; // Arc-length fractions measured from a.
 };
 
+// A step addresses the full piece by its persistent formula object names.
+struct SilhouetteStep {
+    QVector<QString> objects;
+    double axisFraction;
+    double topScale;
+    double bottomScale;
+    bool operator==(const SilhouetteStep&) const = default;
+};
+
 class PatternDocument {
 public:
     void insert(qsizetype index, const Entity& entity) { entities_.insert(index, entity); }
@@ -50,10 +59,21 @@ public:
     bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
     bool validateParametricSizes(const ProductionData& production, QString* error = nullptr) const;
     std::optional<QVector<Entity>> evaluateSizeDraft(const PatternSize& size) const;
+    const QVector<SilhouetteStep>& modelingHistory() const { return history_; }
+    bool appendSilhouette(qsizetype piece, double axisFraction, double topScale,
+                          double bottomScale, QString* error = nullptr);
+    bool removeLastModelingStep(QString* error = nullptr);
     bool save(const QString& path, QString* error = nullptr) const;
     bool load(const QString& path, QString* error = nullptr);
 
 private:
+    QVector<Entity> bindDraftGeometry(QVector<Entity> generated) const;
+    bool replayModeling(QVector<Entity>& entities, const ProductionData& production,
+                        QString* error) const;
+    bool validateDraftSizes(const ParametricDraft& draft, const QVector<Entity>& base,
+                            const ProductionData& production, QString* error) const;
+
+    QVector<SilhouetteStep> history_;
     ProductionData production_;
     ParametricDraft draft_;
     QVector<Entity> entities_;

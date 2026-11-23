@@ -1,4 +1,4 @@
-# SOFIT 1.6 Professional
+# SOFIT 1.7 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -48,19 +48,25 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
 - Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
-- SOFIT opens `.sofit` formats 1–10 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. SVG export includes enabled layers and uses millimeters.
+- SOFIT opens `.sofit` formats 1–11 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Projects with modeling history use format 11 and require SOFIT 1.7 or later. SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
 
 ## Seam tools
 
 - In the Objects list, select lines and quadratic Bézier curves. **Pattern → Seams → Measure Selected Lines and Curves** reports their individual lengths and total in millimeters. Quadratic lengths use subdivision with chord and control-polygon bounds. The absolute length error budget is 0.001 mm per curve within the supported coordinate range.
-- With both seams selected, open **Match Selected Seam Sections** and assign the edges to A and B. Each section must be one connected open chain on one piece, or a chain of unassigned edges for measurement. The dialog shows both lengths, signed ease (B − A), and the result against the target ease and tolerance. The match and its settings are temporary.
+- With both seams selected, open **Match Selected Seam Sections** and assign the edges to A and B. Each section must be one connected open chain on one piece, or a chain of unassigned edges for measurement. The dialog shows both lengths, signed ease (B − A), and the result against the target ease and tolerance. **Compare graded size** checks the same source edges and target in the chosen size. The match and its settings are temporary.
 - **Place Paired Notches** distributes marks at equal fractions of each section length. The dialog displays each start endpoint and lets you reverse B. Both pieces need valid closed outlines. If a requested mark lands on a junction, choose a different count. Marks are stored on individual edges at normalized arc-length positions and are recomputed from the graded geometry. This distributes ease proportionally and does not prescribe where to concentrate it. The graded result preserves each mark's fraction on its own edge; matching a particular graded size again may require adjusting its layout separately. Use **Clear Automatic Notches on Selected Edges** to remove stored marks.
 - **Allowance for Selected Edges** overrides the piece default on selected lines and quadratic curves. A width of zero follows the seam, and resetting an override uses the piece default. Rectangles use the piece default. Offsets use polygonal approximations for curves, mitered corners and steps at straight or nearly tangent width transitions. The editor rejects unsafe corners and outlines instead of clipping them automatically. Check the cut outline for each graded size before export.
 - **Piece, Contour and Allowance** reports open outlines, intersecting or overlapping geometry, and objects with segments shorter than 1 mm. The short-edge report is advisory. Intersection diagnosis follows the existing simple-contour validator, which can reject ambiguous close curves and reports the first topology failure.
+- **Pattern → Diagnose Pieces by Size** lists contour failures, failed allowance generation, missing marks and marks whose outward projection misses the cut outline.
 - Edge edits and paired notch placement can be undone and redone. The canvas, PDF and DXF derive cut outlines and notch marks from the document and the chosen size. Clear automatic notches before splitting their edge and clear edge metadata before using cut, spread or dart transfer on its piece.
 
 ## Modeling tools
+
+- **Shape Silhouette** records a replayable step on pieces made entirely of assigned formula lines, quadratic curves and construction points. Each step stores the named objects, the axis relative to the current bounds, and the top and bottom scales. Unassigned formula points remain at their draft positions.
+- **Modeling History** displays the sequence under the parametric draft, with named objects under each step. Removing the last step, changing measurements, and adding a step all rebuild from the formulas. Undo/Redo restores the document and its history together. Invalid replay is rejected with the step and, when applicable, the size that failed.
+- History supports formula-based size measurements. Pieces with coordinate-based manual grade rules, perimeter-percentage notches or mixed manual and formula objects cannot add silhouette steps. Remove existing placements before adding a step. Renaming or reassigning objects referenced by history requires removing the affected steps first.
+- The history is a single ordered sequence. Manual modeling tools continue to make direct edits. Raglan sleeves, princess seams, yokes, shaped cuts, replayable folds and gathers, and automatic reshaping of seam geometry to target ease remain future work.
 
 - **Modeling → Split Line or Curve…** divides a line or quadratic Bézier curve into two edges with a shared endpoint. The percentage sets the distance along a line or the Bézier parameter on a curve.
 - **Modeling → Join Free Endpoints** moves the unique closest pair of free endpoints to their midpoint when the two edges share a layer and piece assignment and the gap is at most 5 mm.
@@ -86,7 +92,7 @@ The cut, spread and dart tools require manual geometry and one simple straight-s
 
 **Modeling → Shape Silhouette…** scales the horizontal distance from a vertical axis at the center, left or right of the piece. Equal top and bottom percentages widen or narrow the piece uniformly. Different values taper or flare it. The operation keeps Y coordinates and uses the base outline's vertical bounds to interpolate scale between top and bottom. It transforms line endpoints and quadratic controls and converts a main-layer rectangle to four edges. A tapered quadratic uses transformed control points as a new quadratic. Check smooth joins and adjoining seam lengths after shaping.
 
-Silhouette shaping retains edge-specific allowances and arc-length notch fractions and remaps existing manual grade offsets. SOFIT rejects the edit if the resulting base or affected size has an invalid contour or allowance. Saved placements, perimeter-percentage notches and formula-generated entities on the selected piece require editing through their own tools. Keep Construction visible when exporting fold and gather guides. Undo and Redo restore the outline, guides and associated changes in a single step.
+Silhouette shaping retains edge-specific allowances and arc-length notch fractions and remaps existing manual grade offsets on manually drawn pieces. SOFIT rejects the edit if the resulting base or affected size has an invalid contour or allowance. Remove saved placements and perimeter-percentage notches before shaping. Keep Construction visible when exporting fold and gather guides. Undo and Redo restore the outline, guides and associated changes in a single step.
 
 ## Parametric drafting
 
@@ -270,7 +276,7 @@ millimeters.
 
 Each piece can have one simple outer contour. The checker accepts unordered edges and either winding direction. It joins endpoints within 0.000001 mm. Open ends, branching, disconnected loops and intersecting edges are rejected. Construction geometry stays part of the piece and does not contribute to contour measurements.
 
-A piece has a single allowance width. Straight sections are offset by that distance, with mitered joins. Quadratics use an adaptive polygonal approximation with a chord deviation of at most 0.01 mm. Perimeter estimation uses a total error budget of 0.01 mm for the quadratic segments. The allowance of a curved section is approximate. Ambiguous close curve approaches, overlong miters and offsets that would overlap or collapse are rejected. Holes, several contours in one piece and per-edge allowances are outside this release. When an edit invalidates an existing allowance, the document retains the entered width and the allowance disappears until geometry supports it again.
+A piece has a single allowance width. Straight sections are offset by that distance, with mitered joins. Quadratics use an adaptive polygonal approximation with a chord deviation of at most 0.01 mm. Perimeter estimation uses a total error budget of 0.01 mm for the quadratic segments. The allowance of a curved section is approximate. Ambiguous close curve approaches, overlong miters and offsets that would overlap or collapse are rejected. Holes and several contours in one piece are outside this release. For per-edge widths, see **Seam tools**. When an edit invalidates an existing allowance, the document retains the entered width and the allowance disappears until geometry supports it again.
 
 SOFIT 5 saves piece names, membership, layer assignments, layer visibility and allowance widths. Contours, measurements and allowance geometry are rebuilt on load. Individual object visibility is a session setting.
 

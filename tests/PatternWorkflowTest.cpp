@@ -562,6 +562,9 @@ int main(int argc, char** argv) {
             seamFixture.insert(seamFixture.entities().size(),
                 {opc::Shape::Line, corners[i], corners[(i + 1) % corners.size()], {}, piece});
     }
+    seamFixture.production().sizes.append(opc::PatternSize{"Graded", {}});
+    seamFixture.production().rules = {{"Graded", 1, {255, 0}, {10, 0}},
+                                      {"Graded", 1, {255, 40}, {10, 0}}};
     check(seamFixture.save(seamFile), "Write seam fixture");
     MainWindow seamWindow;
     seamWindow.show();
@@ -582,6 +585,13 @@ int main(int argc, char** argv) {
         const auto fields = dialog.findChildren<QDoubleSpinBox*>();
         fields.front()->setValue(5);
         check(contains("Within tolerance"), "Update ease result after changing the target");
+        for (auto* box : dialog.findChildren<QComboBox*>()) {
+            const int gradedSize = box->findData(QStringLiteral("Graded"));
+            if (gradedSize >= 0)
+                box->setCurrentIndex(gradedSize);
+        }
+        check(contains("Graded") && contains("Outside tolerance"),
+              "Compare the same seams on a graded size against the target");
         for (auto* button : dialog.findChildren<QPushButton*>()) {
             if (button->text() == "Place Paired Notches") {
                 button->click();
@@ -656,6 +666,40 @@ int main(int argc, char** argv) {
     chooseFile(action(bodiceWindow, "&Save"), bodicePath);
     opc::PatternDocument bodice;
     check(bodice.load(bodicePath) && bodice.pieces().size() == 3, "Save all three fitting pieces from the UI");
+    const auto initialWidth = opc::analyzePiece(bodice, 0).bounds.width();
+    runDialog<QInputDialog>(action(bodiceWindow, "Shape Silhouette…"), [](QInputDialog& chooser) {
+        QTimer::singleShot(0, [] {
+            auto* settings = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(settings && settings->windowTitle() == "Shape Silhouette", "Open silhouette settings");
+            for (auto* field : settings->findChildren<QDoubleSpinBox*>())
+                field->setValue(105);
+            settings->accept();
+        });
+        chooser.accept();
+    });
+    runDialog<QDialog>(action(bodiceWindow, "Modeling History…"), [](QDialog& dialog) {
+        const auto* tree = dialog.findChild<QTreeWidget*>();
+        const auto* root = tree->topLevelItem(0);
+        check(root->childCount() == 1 && root->child(0)->childCount() > 0,
+              "Show the recorded modeling step and its named formula objects");
+        dialog.reject();
+    });
+    action(bodiceWindow, "&Save").trigger();
+    check(bodice.load(bodicePath) && bodice.modelingHistory().size() == 1
+          && opc::analyzePiece(bodice, 0).bounds.width() > initialWidth, "Save the modeled bodice");
+    action(bodiceWindow, "Undo Shape Silhouette").trigger();
+    action(bodiceWindow, "&Save").trigger();
+    check(bodice.load(bodicePath) && bodice.modelingHistory().isEmpty()
+          && opc::analyzePiece(bodice, 0).bounds.width() == initialWidth, "Undo formula geometry and history together");
+    action(bodiceWindow, "Redo Shape Silhouette").trigger();
+    action(bodiceWindow, "&Save").trigger();
+    check(bodice.load(bodicePath) && bodice.modelingHistory().size() == 1, "Redo modeling history");
+    runDialog<QDialog>(action(bodiceWindow, "Diagnose Pieces by Size…"), [](QDialog& dialog) {
+        const auto* report = dialog.findChild<QTreeWidget*>();
+        check(report && report->topLevelItemCount() == 3
+              && report->topLevelItem(0)->text(1) == "One closed contour", "Diagnose the modeled pieces");
+        dialog.reject();
+    });
     const auto bodicePdf = temp.filePath("bodice.pdf");
     check(opc::exportPatternPdf(bodicePdf, bodice, QVector<bool>(bodice.entities().size(), true),
                                 {}, {}, seamError)

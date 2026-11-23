@@ -96,6 +96,8 @@ PieceMarkings buildPieceMarkings(const Piece& piece, const PieceGeometry& geomet
                     cutAnchor = intersection;
                 }
             }
+            if (!std::isfinite(nearest))
+                ++marks.notchesMissingCutOutline;
         }
         marks.notches.moveTo(cutAnchor - outward * 1.5);
         marks.notches.lineTo(cutAnchor + outward * 3);

@@ -37,6 +37,80 @@ void writeProject(const QString& path, const QJsonObject& data) {
     const auto bytes = QJsonDocument(data).toJson();
     check(file.write(bytes) == bytes.size(), "Write complete project fixture");
 }
+void checkModelingHistory() {
+    using namespace opc;
+    ParametricDraft draft;
+    draft.measurements = {{"width", 100}};
+    draft.points = {{"A", "0", "0"}, {"B", "width", "0"},
+                    {"C", "width", "60"}, {"D", "0", "60"}};
+    draft.edges = {{"top", "A", "B", {}}, {"right", "B", "C", {}},
+                   {"bottom", "C", "D", {}}, {"left", "D", "A", {}}};
+    PatternDocument document;
+    QString error;
+    check(document.setParametricDraft(draft, &error), "Build a formula rectangle from named edges");
+    document.pieces().append({"Panel", 0});
+    for (qsizetype i = 0; i < document.entities().size(); ++i) {
+        auto entity = document.entities()[i];
+        if (entity.shape == Shape::Line) {
+            entity.piece = 0;
+            if (entity.draftName == "bottom")
+                entity.seamNotches = {0.5};
+            document.replace(i, entity);
+        }
+    }
+    document.production().sizes.append({"L", {{"width", 160}}});
+    const bool appended = document.appendSilhouette(0, 0, 1, 1.5, &error)
+        && document.appendSilhouette(0, 0, 1, 2, &error);
+    check(appended, qPrintable(error));
+    const auto width = [](const PatternDocument& pattern) { return analyzePiece(pattern, 0).bounds.width(); };
+    check(width(document) == 300 && width(gradedPattern(document, "L")) == 480,
+          "Replay both steps in order for base and size measurements");
+    check(analyzePiece(document, 0).notchAnchors.size() == 1, "Preserve edge notches through replay");
+
+    draft.measurements[0].mm = 120;
+    check(document.setParametricDraft(draft, &error) && width(document) == 360,
+          "Rebuild from formulas without compounding the previous result");
+    check(document.setParametricDraft(draft, &error) && width(document) == 360,
+          "Replay is deterministic");
+    auto incompatible = draft;
+    incompatible.edges[0].name = "renamed";
+    check(!document.setParametricDraft(incompatible, &error) && error.contains("Modeling step 1")
+          && document.parametricDraft() == draft && width(document) == 360,
+          "Reject a deleted modeling object atomically");
+    auto badAllowance = document;
+    badAllowance.pieces()[0].allowanceMm = 2;
+    check(!badAllowance.validateParametricSizes(badAllowance.production(), &error)
+          && error.contains("Size 'L'") && error.contains("seam allowance"),
+          "Reject a replay that cannot rebuild the cut outline for a graded size");
+    auto invalidSize = document.production();
+    invalidSize.sizes[0].measurements["width"] = 0;
+    check(!document.validateParametricSizes(invalidSize, &error) && error.contains("Size 'L'"),
+          "Diagnose a geometry failure on a non-base size");
+    auto manualGrade = document.production();
+    manualGrade.rules.append({"L", 0, {0, 0}, {1, 0}});
+    check(!document.validateParametricSizes(manualGrade, &error) && error.contains("manual grade"),
+          "Reject coordinate-based grade rules for history-driven pieces");
+
+    QTemporaryDir directory;
+    const auto path = directory.filePath("history.sofit");
+    check(directory.isValid() && document.save(path, &error), "Save modeling history");
+    auto json = readProject(path);
+    PatternDocument loaded;
+    check(json.value("version").toInt() == 11 && loaded.load(path, &error)
+          && loaded.modelingHistory() == document.modelingHistory()
+          && width(loaded) == 360 && width(gradedPattern(loaded, "L")) == 480, "Round trip and replay format 11");
+    auto history = json.value("modelingHistory").toArray();
+    auto first = history[0].toObject();
+    first["operation"] = "unknown";
+    history[0] = first;
+    json["modelingHistory"] = history;
+    writeProject(path, json);
+    check(!loaded.load(path, &error) && width(loaded) == 360, "Reject unknown modeling steps atomically");
+    check(loaded.removeLastModelingStep(&error) && width(loaded) == 180
+          && loaded.removeLastModelingStep(&error) && width(loaded) == 120,
+          "Removing a step replays the remaining steps from the draft");
+}
+
 void checkBodiceAndSleeve() {
     using namespace opc;
     BodiceMeasurements measurements{920, 740, 420, 210, 68, 75, 22, 116, 38, 60, 40,
@@ -127,6 +201,7 @@ void checkLowerBlocks() {
 }
 
 int main() {
+    checkModelingHistory();
     checkBodiceAndSleeve();
     checkLowerBlocks();
     using namespace opc;

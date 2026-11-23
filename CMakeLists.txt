@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 1.6.0 LANGUAGES CXX)
+project(SOFIT VERSION 1.7.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -15,6 +15,7 @@ add_library(sofit_core STATIC
     src/core/ContourModeling.cpp
     src/core/EntityPath.cpp
     src/core/Modeling.cpp
+    src/core/ModelingHistory.cpp
     src/core/PatternPdf.cpp
     src/core/Production.cpp
     src/core/PieceMarkings.cpp

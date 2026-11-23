@@ -141,13 +141,25 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     int version = 7;
     if (parametric)
         version = production_.useDraftMeasurements && !production_.sizes.isEmpty() ? 9 : 8;
-    QJsonObject root{{"format", "SOFIT"}, {"version", hasSeamData ? 10 : version}, {"objects", objects},
+    QJsonObject root{{"format", "SOFIT"}, {"version", !history_.isEmpty() ? 11 : hasSeamData ? 10 : version}, {"objects", objects},
                      {"pieces", pieces}, {"layerVisibility", layerVisibility},
                      {"production", saveProduction(production_)}};
-    if (hasSeamData)
+    if (hasSeamData || !history_.isEmpty())
         root.insert("baseVersion", version);
     if (parametric)
         root.insert("parametricDraft", saveDraft(draft_));
+    if (!history_.isEmpty()) {
+        QJsonArray steps;
+        for (const auto& step : history_) {
+            QJsonArray names;
+            for (const auto& name : step.objects)
+                names.append(name);
+            steps.append(QJsonObject{{"operation", "silhouette"}, {"objects", names},
+                                     {"axis", step.axisFraction}, {"top", step.topScale},
+                                     {"bottom", step.bottomScale}});
+        }
+        root.insert("modelingHistory", steps);
+    }
     ProductionData validated;
     if (!loadProduction(root.value("production").toObject(), pieces_.size(), validated)) {
         if (error) *error = QStringLiteral("Invalid grading or fabric layout data");
@@ -176,9 +188,11 @@ bool PatternDocument::load(const QString& path, QString* error) {
         return fail(QStringLiteral("Invalid JSON document"));
     const auto root = json.object();
     const auto format = root.value("format").toString();
-    const bool seamFormat = root.value("version").toDouble() == 10;
+    const auto fileVersion = root.value("version").toDouble();
+    const bool historyFormat = fileVersion == 11;
+    const bool seamFormat = fileVersion == 10 || historyFormat;
     const auto version = root.value(seamFormat ? "baseVersion" : "version").toDouble();
-    if (seamFormat && (version < 7 || version > 9))
+    if (seamFormat && (version < (historyFormat ? 8 : 7) || version > 9))
         return fail(QStringLiteral("Invalid base document version"));
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
     const bool current = format == "SOFIT" && version >= 2 && version <= 9 && std::trunc(version) == version;
@@ -311,6 +325,24 @@ bool PatternDocument::load(const QString& path, QString* error) {
     loaded.layerVisibility_ = layerVisibility;
     // Version 8 stored size measurements for reference only.
     loaded.production_.useDraftMeasurements = version != 8 || loaded.production_.sizes.isEmpty();
+    if (historyFormat) {
+        const auto steps = root.value("modelingHistory").toArray();
+        if (steps.isEmpty())
+            return fail(QStringLiteral("Missing modeling history"));
+        for (const auto& value : steps) {
+            const auto entry = value.toObject();
+            if (entry.value("operation").toString() != "silhouette")
+                return fail(QStringLiteral("Unknown modeling operation"));
+            SilhouetteStep step{{}, entry.value("axis").toDouble(-1),
+                                entry.value("top").toDouble(-1), entry.value("bottom").toDouble(-1)};
+            for (const auto& name : entry.value("objects").toArray()) {
+                if (!name.isString() || name.toString().isEmpty())
+                    return fail(QStringLiteral("Invalid modeling object name"));
+                step.objects.append(name.toString());
+            }
+            loaded.history_.append(std::move(step));
+        }
+    }
     if (version >= 8) {
         ParametricDraft draft;
         if (!loadDraft(root.value("parametricDraft").toObject(), draft))

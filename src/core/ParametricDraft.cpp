@@ -283,42 +283,55 @@ std::optional<QVector<Entity>> evaluateSize(const ParametricDraft& base, const P
     }
 }
 
-bool validateSizes(const ParametricDraft& draft, const ProductionData& production, QString* error) {
+}
+
+bool PatternDocument::validateDraftSizes(const ParametricDraft& draft, const QVector<Entity>& base,
+                                         const ProductionData& production, QString* error) const {
     if (production.useDraftMeasurements) {
         for (const auto& size : production.sizes) {
-            if (!evaluateSize(draft, size, error))
+            auto generated = evaluateSize(draft, size, error);
+            if (!generated)
                 return false;
+            if (history_.isEmpty() || generated->isEmpty())
+                continue;
+            auto candidate = *this;
+            candidate.entities_ = base;
+            auto sized = candidate.bindDraftGeometry(std::move(*generated));
+            QString detail;
+            if (!replayModeling(sized, production, &detail)) {
+                if (error)
+                    *error = QStringLiteral("Size '%1': %2").arg(size.name, detail);
+                return false;
+            }
         }
     }
-    if (error)
-        error->clear();
     return true;
-}
 }
 
 bool PatternDocument::validateParametricSizes(const ProductionData& production, QString* error) const {
-    return validateSizes(draft_, production, error);
+    if (error)
+        error->clear();
+    if (history_.isEmpty())
+        return validateDraftSizes(draft_, entities_, production, error);
+    auto candidate = *this;
+    candidate.production_ = production;
+    return candidate.setParametricDraft(draft_, error);
 }
 
 std::optional<QVector<Entity>> PatternDocument::evaluateSizeDraft(const PatternSize& size) const {
     if (!production_.useDraftMeasurements)
         return QVector<Entity>{};
-    return evaluateSize(draft_, size, nullptr);
+    auto generated = evaluateSize(draft_, size, nullptr);
+    if (history_.isEmpty() || !generated || generated->isEmpty())
+        return generated;
+    auto sized = bindDraftGeometry(std::move(*generated));
+    if (!replayModeling(sized, production_, nullptr))
+        return std::nullopt;
+    sized.removeIf([](const Entity& entity) { return entity.draftName.isEmpty(); });
+    return sized;
 }
 
-bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) {
-    QVector<Entity> generated;
-    try {
-        generated = DraftEvaluation(draft).geometry(draft);
-    } catch (const EvaluationError& failure) {
-        if (error)
-            *error = failure.message;
-        return false;
-    }
-
-    if (!validateSizes(draft, production_, error))
-        return false;
-
+QVector<Entity> PatternDocument::bindDraftGeometry(QVector<Entity> generated) const {
     QHash<QString, qsizetype> indices;
     for (qsizetype i = 0; i < generated.size(); ++i)
         indices.insert(generated[i].draftName, i);
@@ -346,7 +359,25 @@ bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) 
         if (indices.contains(entity.draftName))
             entities.append(entity);
     }
-    entities_ = std::move(entities);
+    return entities;
+}
+
+bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) {
+    QVector<Entity> generated;
+    try {
+        generated = DraftEvaluation(draft).geometry(draft);
+    } catch (const EvaluationError& failure) {
+        if (error)
+            *error = failure.message;
+        return false;
+    }
+
+    auto base = bindDraftGeometry(std::move(generated));
+    if (!validateDraftSizes(draft, base, production_, error)
+        || !replayModeling(base, production_, error))
+        return false;
+
+    entities_ = std::move(base);
     draft_ = std::move(draft);
     if (error)
         error->clear();

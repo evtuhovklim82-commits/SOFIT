@@ -9,6 +9,7 @@ struct PieceMarkings {
     QPainterPath grainline;
     QString label;
     QPointF labelOrigin;
+    qsizetype notchesMissingCutOutline = 0;
     QPainterPath labelPath() const;
 };
 

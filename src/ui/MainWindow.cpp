@@ -48,6 +48,23 @@
 #include <utility>
 
 namespace {
+QString describeContour(opc::ContourError error) {
+    using opc::ContourError;
+    switch (error) {
+    case ContourError::None: return QCoreApplication::translate("MainWindow", "One closed contour");
+    case ContourError::Empty: return QCoreApplication::translate("MainWindow", "No objects on the main layer");
+    case ContourError::UnsupportedShape: return QCoreApplication::translate("MainWindow", "Use lines, rectangles or quadratic curves on the main layer");
+    case ContourError::Degenerate: return QCoreApplication::translate("MainWindow", "A zero-length or folded edge");
+    case ContourError::Open: return QCoreApplication::translate("MainWindow", "Open ends");
+    case ContourError::Branched: return QCoreApplication::translate("MainWindow", "Multiple edges meet at an endpoint");
+    case ContourError::Disconnected: return QCoreApplication::translate("MainWindow", "More than one closed contour");
+    case ContourError::SelfIntersecting: return QCoreApplication::translate("MainWindow", "Contour intersects, overlaps, or folds onto itself");
+    case ContourError::UncertainCurves: return QCoreApplication::translate("MainWindow", "Curves are too close to verify a simple contour");
+    case ContourError::TooComplex: return QCoreApplication::translate("MainWindow", "Contour exceeds the geometry limits");
+    }
+    return {};
+}
+
 QColor sizeColor(qsizetype index) {
     return QColor::fromHsv((265 + 137 * index) % 360, 205, 188);
 }
@@ -307,6 +324,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
     modeling->addSeparator();
     modeling->addAction(tr("Shape Silhouette…"), this, &MainWindow::shapeSilhouette);
+    modeling->addAction(tr("Modeling History…"), this, &MainWindow::showModelingHistory);
     modeling->addAction(tr("Add Box Pleat…"), this, [this] {
         modelPiece(opc::ContourOperation::Pleat, tr("Add Box Pleat"));
     });
@@ -366,6 +384,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Edit Fabric Layout"));
         }
     });
+    pattern->addAction(tr("Diagnose Pieces by Size…"), this, &MainWindow::diagnoseGradedPieces);
     auto* seams = pattern->addMenu(tr("Seams"));
     seams->addAction(tr("Measure Selected Lines and Curves"), this, &MainWindow::measureSelection);
     seams->addAction(tr("Check Fitting Block by Size…"), this, [this] {
@@ -668,6 +687,12 @@ qsizetype MainWindow::choosePiece(const QString& title) {
 }
 
 void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& text) {
+    QString error;
+    if (!document.modelingHistory().isEmpty()
+        && !document.validateParametricSizes(document.production(), &error)) {
+        QMessageBox::warning(this, text, error);
+        return;
+    }
     const auto selected = selectedObjects();
     view_->cancelDrawing();
     undo_.push(new PatternCommand(doc_, std::move(document), text));
@@ -808,6 +833,9 @@ void MainWindow::matchSeams() {
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
+    auto* size = new QComboBox(&dialog);
+    fillExportSizes(*size, doc_);
+    form->insertRow(form->rowCount() - 2, tr("Compare graded size"), size);
     std::optional<opc::SeamSection> a, b;
     const auto refresh = [&] {
         QVector<qsizetype> aIndices, bIndices;
@@ -842,6 +870,31 @@ void MainWindow::matchSeams() {
         const bool valid = auditable(*a) && auditable(*b);
         if (!valid)
             message += tr("\nNotches require closed pieces with valid cut outlines.");
+        const auto sizeName = size->currentData().toString();
+        if (!sizeName.isEmpty()) {
+            QVector<qsizetype> sourceIndices;
+            const auto graded = opc::gradedPattern(doc_, sizeName, &sourceIndices);
+            QVector<qsizetype> gradedA, gradedB;
+            const QSet<qsizetype> sourceA(aIndices.begin(), aIndices.end());
+            const QSet<qsizetype> sourceB(bIndices.begin(), bIndices.end());
+            for (qsizetype i = 0; i < sourceIndices.size(); ++i) {
+                if (sourceA.contains(sourceIndices[i]))
+                    gradedA.append(i);
+                if (sourceB.contains(sourceIndices[i]))
+                    gradedB.append(i);
+            }
+            const auto sizeA = opc::measureSeamSection(graded, gradedA);
+            const auto sizeB = opc::measureSeamSection(graded, gradedB);
+            if (sizeA && sizeB) {
+                const auto ease = sizeB->lengthMm - sizeA->lengthMm;
+                message += tr("\n%1 · A %2 mm, B %3 mm. Ease %4 mm. %5")
+                    .arg(sizeName, number(sizeA->lengthMm), number(sizeB->lengthMm), number(ease),
+                         std::abs(ease - target->value()) <= tolerance->value()
+                             ? tr("Within tolerance.") : tr("Outside tolerance."));
+            } else {
+                message += tr("\n%1 · The graded seams could not be measured.").arg(sizeName);
+            }
+        }
         summary->setText(message);
         add->setEnabled(valid);
     };
@@ -849,6 +902,7 @@ void MainWindow::matchSeams() {
         connect(side, &QComboBox::currentIndexChanged, &dialog, refresh);
     connect(target, &QDoubleSpinBox::valueChanged, &dialog, refresh);
     connect(tolerance, &QDoubleSpinBox::valueChanged, &dialog, refresh);
+    connect(size, &QComboBox::currentIndexChanged, &dialog, refresh);
     connect(reverse, &QCheckBox::toggled, &dialog, refresh);
     connect(add, &QPushButton::clicked, &dialog, [&] {
         auto updated = doc_;
@@ -955,6 +1009,55 @@ void MainWindow::clearEdgeNotches() {
         applyPatternEdit(std::move(updated), tr("Clear Automatic Notches"));
 }
 
+void MainWindow::diagnoseGradedPieces() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Diagnose Pieces by Size"));
+    QFormLayout form(&dialog);
+    QComboBox sizes(&dialog);
+    fillExportSizes(sizes, doc_);
+    form.addRow(tr("Size"), &sizes);
+    QTreeWidget report(&dialog);
+    report.setHeaderLabels({tr("Piece"), tr("Contour, allowance and notches")});
+    form.addRow(&report);
+    QDialogButtonBox buttons(QDialogButtonBox::Close, &dialog);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    const auto refresh = [&] {
+        report.clear();
+        const auto graded = opc::gradedPattern(doc_, sizes.currentData().toString());
+        if (graded.pieces().isEmpty()) {
+            new QTreeWidgetItem(&report, {doc_.pieces().isEmpty() ? tr("No pieces") : tr("Size evaluation failed")});
+            return;
+        }
+        for (qsizetype i = 0; i < graded.pieces().size(); ++i) {
+            const auto& piece = graded.pieces()[i];
+            const auto geometry = opc::analyzePiece(graded, i);
+            auto* row = new QTreeWidgetItem(&report, {piece.name, describeContour(geometry.error)});
+            if (geometry.allowanceFailed)
+                new QTreeWidgetItem(row, {tr("Allowance"), tr("Cut outline could not be generated")});
+            qsizetype expected = piece.notches.size();
+            for (const auto& edge : graded.entities()) {
+                if (edge.piece == i && edge.layer == opc::Layer::Main)
+                    expected += edge.seamNotches.size();
+            }
+            if (expected) {
+                const auto marks = opc::buildPieceMarkings(piece, geometry, !geometry.allowance.isEmpty());
+                const auto rendered = marks.notches.elementCount() / 2;
+                new QTreeWidgetItem(row, {tr("Notches"), tr("%1 of %2 marks drawn").arg(rendered).arg(expected)});
+                if (marks.notchesMissingCutOutline)
+                    new QTreeWidgetItem(row, {tr("Notches"), tr("%1 marks do not reach the cut outline")
+                        .arg(marks.notchesMissingCutOutline)});
+            }
+            row->setExpanded(true);
+        }
+        report.resizeColumnToContents(0);
+    };
+    connect(&sizes, &QComboBox::currentIndexChanged, &dialog, refresh);
+    refresh();
+    dialog.resize(680, 420);
+    dialog.exec();
+}
+
 void MainWindow::managePiece() {
     const auto piece = choosePiece(tr("Piece, Contour and Allowance"));
     if (piece < 0)
@@ -962,20 +1065,8 @@ void MainWindow::managePiece() {
 
     const auto& original = doc_.pieces()[piece];
     const auto& geometry = pieces_[piece];
-    QString contour;
     using opc::ContourError;
-    switch (geometry.error) {
-    case ContourError::None: contour = tr("One closed contour"); break;
-    case ContourError::Empty: contour = tr("No objects on the main layer"); break;
-    case ContourError::UnsupportedShape: contour = tr("Use lines, rectangles or quadratic curves on the main layer"); break;
-    case ContourError::Degenerate: contour = tr("A zero-length or folded edge"); break;
-    case ContourError::Open: contour = tr("Open ends"); break;
-    case ContourError::Branched: contour = tr("Multiple edges meet at an endpoint"); break;
-    case ContourError::Disconnected: contour = tr("More than one closed contour"); break;
-    case ContourError::SelfIntersecting: contour = tr("Contour intersects, overlaps, or folds onto itself"); break;
-    case ContourError::UncertainCurves: contour = tr("Curves are too close to verify a simple contour"); break;
-    case ContourError::TooComplex: contour = tr("Contour exceeds the geometry limits"); break;
-    }
+    const auto contour = describeContour(geometry.error);
 
     QDialog dialog(this);
     dialog.setWindowTitle(tr("Piece, Contour and Allowance"));
@@ -1276,6 +1367,22 @@ void MainWindow::shapeSilhouette() {
     form->addRow(buttons);
     if (dialog.exec() != QDialog::Accepted)
         return;
+    const bool formulaPiece = std::ranges::any_of(doc_.entities(), [piece](const auto& entity) {
+        return entity.piece == piece && !entity.draftName.isEmpty();
+    });
+    if (formulaPiece) {
+        const double fractions[]{0.5, 0, 1};
+        auto updated = doc_;
+        QString error;
+        if (!updated.appendSilhouette(piece, fractions[axis->currentIndex()], top->value() / 100,
+                                      bottom->value() / 100, &error)) {
+            QMessageBox::warning(this, title, error);
+            return;
+        }
+        view_->cancelDrawing();
+        undo_.push(new PatternCommand(doc_, std::move(updated), title, view_));
+        return;
+    }
     const double axes[]{geometry.bounds.center().x(), geometry.bounds.left(), geometry.bounds.right()};
     auto result = opc::shapeSilhouette(doc_, piece, axes[axis->currentIndex()], top->value() / 100,
                                        bottom->value() / 100);
@@ -1284,6 +1391,53 @@ void MainWindow::shapeSilhouette() {
         return;
     }
     undo_.push(new PatternCommand(doc_, std::move(*result.edit), title, *view_));
+}
+
+void MainWindow::showModelingHistory() {
+    QDialog dialog(this);
+    const auto title = tr("Modeling History");
+    dialog.setWindowTitle(title);
+    QFormLayout form(&dialog);
+    QTreeWidget tree(&dialog);
+    tree.setHeaderLabels({tr("Step"), tr("Piece"), tr("Widths · top / bottom")});
+    form.addRow(&tree);
+    QDialogButtonBox buttons(QDialogButtonBox::Close, &dialog);
+    auto* remove = buttons.addButton(tr("Remove Last Step"), QDialogButtonBox::ActionRole);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    const auto refresh = [&] {
+        tree.clear();
+        auto* root = new QTreeWidgetItem(&tree, {tr("Parametric draft")});
+        const auto& history = doc_.modelingHistory();
+        for (qsizetype i = 0; i < history.size(); ++i) {
+            const auto& step = history[i];
+            const auto anchor = std::ranges::find(doc_.entities(), step.objects.front(), &opc::Entity::draftName);
+            const auto piece = anchor == doc_.entities().end() ? -1 : anchor->piece;
+            auto* item = new QTreeWidgetItem(root, {tr("%1. Shape Silhouette").arg(i + 1),
+                piece < 0 ? QString{} : doc_.pieces()[piece].name,
+                tr("%1% / %2%").arg(step.topScale * 100).arg(step.bottomScale * 100)});
+            for (const auto& name : step.objects)
+                new QTreeWidgetItem(item, {name});
+        }
+        root->setExpanded(true);
+        tree.resizeColumnToContents(0);
+        remove->setEnabled(!history.isEmpty());
+    };
+    connect(remove, &QPushButton::clicked, &dialog, [&] {
+        auto updated = doc_;
+        QString error;
+        if (!updated.removeLastModelingStep(&error)) {
+            QMessageBox::warning(&dialog, title, error);
+            return;
+        }
+        view_->cancelDrawing();
+        undo_.push(new PatternCommand(doc_, std::move(updated), tr("Remove Last Modeling Step"), view_));
+        refresh();
+    });
+    refresh();
+    dialog.resize(610, 400);
+    dialog.exec();
 }
 
 void MainWindow::modelPiece(opc::ContourOperation operation, const QString& title) {
