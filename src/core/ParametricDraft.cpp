@@ -312,6 +312,8 @@ bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) 
             || (replacement.shape != Shape::Point && original.shape != Shape::Point)) {
             replacement.piece = original.piece;
             replacement.layer = original.layer;
+            replacement.seamAllowanceMm = original.seamAllowanceMm;
+            replacement.seamNotches = original.seamNotches;
         }
         entities.append(replacement);
         indices.remove(original.draftName);

@@ -273,8 +273,8 @@ LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& pl
     }
     QLineF fold;
     if (placement.fold != FoldEdge::None) {
-        // The document stores a uniform allowance, so the fold edge requires a pre-finished outline.
-        if (piece.allowanceMm != 0 || placement.hand != CutHand::Single)
+        // A fold placement requires a pre-finished outline.
+        if (!geometry.allowance.isEmpty() || placement.hand != CutHand::Single)
             return {};
         const auto bounds = cut.boundingRect();
         const bool right = (placement.fold == FoldEdge::Right) != placement.reversed;

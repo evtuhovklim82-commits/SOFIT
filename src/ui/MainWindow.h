@@ -44,6 +44,10 @@ private:
     void createPiece();
     void assignPiece();
     void managePiece();
+    void measureSelection();
+    void matchSeams();
+    void editEdgeAllowance();
+    void clearEdgeNotches();
     void setSelectedLayer(opc::Layer layer);
     QVector<qsizetype> selectedObjects() const;
     qsizetype choosePiece(const QString& title);

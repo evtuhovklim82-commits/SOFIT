@@ -54,7 +54,7 @@ PieceMarkings buildPieceMarkings(const Piece& piece, const PieceGeometry& geomet
         marks.grainline.lineTo(tip - direction * head - normal * head / 2);
     }
 
-    if (piece.notches.isEmpty())
+    if (piece.notches.isEmpty() && geometry.notchAnchors.isEmpty())
         return marks;
     QVector<double> distances{0.0};
     double area = 0;
@@ -64,6 +64,7 @@ PieceMarkings buildPieceMarkings(const Piece& piece, const PieceGeometry& geomet
         distances.append(distances.back() + QLineF(a, b).length());
         area += a.x() * b.y() - a.y() * b.x();
     }
+    QVector<QLineF> anchors = geometry.notchAnchors;
     for (double percent : piece.notches) {
         const double distance = percent / 100 * distances.back();
         const auto edge = std::upper_bound(distances.begin(), distances.end(), distance) - distances.begin() - 1;
@@ -73,11 +74,15 @@ PieceMarkings buildPieceMarkings(const Piece& piece, const PieceGeometry& geomet
         const auto tangent = (segment.p2() - segment.p1()) / segment.length();
         const auto anchor = segment.pointAt((distance - distances[edge]) / segment.length());
         const auto outward = QPointF(tangent.y(), -tangent.x()) * (area > 0 ? 1 : -1);
+        anchors.append(QLineF(anchor, anchor + outward));
+    }
+    for (const auto& ray : anchors) {
+        const auto anchor = ray.p1();
+        const auto outward = ray.p2() - anchor;
         QPointF cutAnchor = anchor;
         if (useAllowance && !geometry.allowance.isEmpty()) {
             const auto& allowance = geometry.allowance;
             double nearest = std::numeric_limits<double>::infinity();
-            const QLineF ray(anchor, anchor + outward);
             for (qsizetype i = 0; i < allowance.size(); ++i) {
                 QPointF intersection;
                 const QLineF edge(allowance[i], allowance[(i + 1) % allowance.size()]);
@@ -85,7 +90,7 @@ PieceMarkings buildPieceMarkings(const Piece& piece, const PieceGeometry& geomet
                     continue;
                 const double distance = QPointF::dotProduct(intersection - anchor, outward);
                 const double alongEdge = QPointF::dotProduct(intersection - edge.p1(), edge.p2() - edge.p1());
-                if (distance > 0 && distance < nearest && alongEdge >= 0
+                if (distance >= -1e-6 && distance < nearest && alongEdge >= 0
                     && alongEdge <= QPointF::dotProduct(edge.p2() - edge.p1(), edge.p2() - edge.p1())) {
                     nearest = distance;
                     cutAnchor = intersection;

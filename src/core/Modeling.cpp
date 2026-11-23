@@ -47,7 +47,7 @@ bool freeEndpoint(const PatternDocument& document, qsizetype index, QPointF poin
 }
 
 std::optional<EdgePair> splitEdge(const Entity& edge, double t) {
-    if (!validEdge(edge) || !(t > 0 && t < 1))
+    if (!validEdge(edge) || !edge.seamNotches.isEmpty() || !(t > 0 && t < 1))
         return std::nullopt;
 
     EdgePair result{edge, edge};

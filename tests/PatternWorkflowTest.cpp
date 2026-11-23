@@ -524,6 +524,93 @@ int main(int argc, char** argv) {
     check(draftTree.topLevelItemCount() == 4 && draftTree.topLevelItem(3)->text(0).contains("AB"),
           "Open a parametric project through the UI");
 
+    const auto seamFile = temp.filePath("seam-workflow.sofit");
+    opc::PatternDocument seamFixture;
+    seamFixture.pieces().append({QStringLiteral("Front"), 10});
+    seamFixture.pieces().append({QStringLiteral("Back"), 10});
+    for (qsizetype piece = 0; piece < 2; ++piece) {
+        const auto x = 150.0 * piece;
+        const auto width = 100.0 + 5 * piece;
+        const QVector<QPointF> corners{{x, 0}, {x + width, 0}, {x + width, 40}, {x, 40}};
+        for (qsizetype i = 0; i < corners.size(); ++i)
+            seamFixture.insert(seamFixture.entities().size(),
+                {opc::Shape::Line, corners[i], corners[(i + 1) % corners.size()], {}, piece});
+    }
+    check(seamFixture.save(seamFile), "Write seam fixture");
+    MainWindow seamWindow;
+    seamWindow.show();
+    chooseFile(action(seamWindow, "&Open"), seamFile);
+    auto* seamTree = seamWindow.findChild<QTreeWidget*>();
+    seamTree->topLevelItem(0)->setSelected(true);
+    seamTree->topLevelItem(4)->setSelected(true);
+    runDialog<QDialog>(action(seamWindow, "Match Selected Seam Sections…"), [](QDialog& dialog) {
+        const auto labels = dialog.findChildren<QLabel*>();
+        const auto contains = [&labels](const QString& text) {
+            for (const auto* label : labels) {
+                if (label->text().contains(text))
+                    return true;
+            }
+            return false;
+        };
+        check(contains("Outside tolerance"), "Compare signed ease against the default tolerance");
+        const auto fields = dialog.findChildren<QDoubleSpinBox*>();
+        fields.front()->setValue(5);
+        check(contains("Within tolerance"), "Update ease result after changing the target");
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Place Paired Notches") {
+                button->click();
+                return;
+            }
+        }
+        check(false, "Find the paired notch button");
+    });
+    action(seamWindow, "&Save").trigger();
+    check(loaded.load(seamFile) && loaded.entities()[0].seamNotches.size() == 3
+          && loaded.entities()[4].seamNotches.size() == 3, "Save automatic notches from the UI");
+    action(seamWindow, "Undo Place Paired Notches").trigger();
+    action(seamWindow, "&Save").trigger();
+    check(loaded.load(seamFile) && loaded.entities()[0].seamNotches.isEmpty()
+          && loaded.entities()[4].seamNotches.isEmpty(), "Undo both sides in one action");
+    action(seamWindow, "Redo Place Paired Notches").trigger();
+    action(seamWindow, "&Save").trigger();
+    check(loaded.load(seamFile) && loaded.entities()[4].seamNotches.size() == 3, "Redo paired notches");
+
+    seamTree->clearSelection();
+    seamTree->topLevelItem(0)->setSelected(true);
+    runDialog<QDialog>(action(seamWindow, "Allowance for Selected Edges…"), [](QDialog& dialog) {
+        dialog.findChild<QCheckBox*>()->setChecked(false);
+        dialog.findChild<QDoubleSpinBox*>()->setValue(0);
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    action(seamWindow, "&Save").trigger();
+    check(loaded.load(seamFile) && loaded.entities()[0].seamAllowanceMm == 0
+          && !loaded.entities()[4].seamAllowanceMm, "Override one edge and leave the other piece at its default");
+    action(seamWindow, "Undo Edit Edge Allowances").trigger();
+    action(seamWindow, "&Save").trigger();
+    check(loaded.load(seamFile) && !loaded.entities()[0].seamAllowanceMm, "Undo the override");
+    action(seamWindow, "Redo Edit Edge Allowances").trigger();
+    action(seamWindow, "&Save").trigger();
+    check(loaded.load(seamFile) && loaded.entities()[0].seamAllowanceMm == 0, "Redo the override");
+
+    const auto front = opc::analyzePiece(loaded, 0);
+    const auto back = opc::analyzePiece(loaded, 1);
+    check(front.allowance.boundingRect() == QRectF(-10, 0, 120, 50)
+          && back.allowance.boundingRect() == QRectF(140, -10, 125, 60), "Build both production outlines");
+    const QVector<bool> seamVisible(loaded.entities().size(), true);
+    const auto seamPdf = temp.filePath("seams.pdf");
+    const auto seamDxf = temp.filePath("seams.dxf");
+    QString seamError;
+    check(opc::exportPatternPdf(seamPdf, loaded, seamVisible, {front.allowance, back.allowance}, {}, seamError),
+          "Export PDF with uneven allowance and automatic notches");
+    check(pageCount(readPdf(seamPdf)) > 0, "Read the PDF produced for the seam fixture");
+    check(opc::exportPatternDxf(seamDxf, loaded, seamVisible, {front, back}, seamError),
+          "Export DXF with uneven allowance and automatic notches");
+    QFile seamDxfFile(seamDxf);
+    check(seamDxfFile.open(QIODevice::ReadOnly), "Read the seam DXF");
+    const auto seamDxfData = seamDxfFile.readAll();
+    check(seamDxfData.count("\nNOTCH\n") == 7 && seamDxfData.count("\nALLOWANCE\n") == 3,
+          "DXF contains six automatic marks and two allowance outlines, plus the layer records");
+
     MainWindow templateWindow;
     templateWindow.show();
     runDialog<QWizard>(action(templateWindow, "New Pattern from Template…"), [](QWizard& wizard) {

@@ -90,11 +90,36 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     if (!validateParametricSizes(production_, error))
         return false;
     QJsonArray objects;
+    bool hasSeamData = false;
     for (const auto& entity : entities_) {
+        if ((entity.seamAllowanceMm || !entity.seamNotches.isEmpty())
+            && entity.shape != Shape::Line && entity.shape != Shape::Curve) {
+            if (error) *error = QStringLiteral("Edge metadata requires a line or curve");
+            return false;
+        }
         QJsonObject object{{"type", shapeName(entity.shape)}, {"coordinates", coordinates(entity)},
                            {"piece", entity.piece}, {"layer", entity.layer == Layer::Main ? "main" : "construction"}};
         if (!entity.draftName.isEmpty())
             object.insert("draftName", entity.draftName);
+        if (entity.seamAllowanceMm) {
+            if (!std::isfinite(*entity.seamAllowanceMm) || *entity.seamAllowanceMm < 0) {
+                if (error) *error = QStringLiteral("Invalid edge allowance");
+                return false;
+            }
+            object.insert("edgeAllowanceMm", *entity.seamAllowanceMm);
+        }
+        if (!entity.seamNotches.isEmpty()) {
+            QJsonArray positions;
+            for (const auto position : entity.seamNotches) {
+                if (!(position > 0 && position < 1) || entity.seamNotches.size() > 100) {
+                    if (error) *error = QStringLiteral("Invalid edge notch position");
+                    return false;
+                }
+                positions.append(position);
+            }
+            object.insert("edgeNotches", positions);
+        }
+        hasSeamData |= entity.seamAllowanceMm.has_value() || !entity.seamNotches.isEmpty();
         objects.append(object);
     }
     QJsonArray pieces;
@@ -116,9 +141,11 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     int version = 7;
     if (parametric)
         version = production_.useDraftMeasurements && !production_.sizes.isEmpty() ? 9 : 8;
-    QJsonObject root{{"format", "SOFIT"}, {"version", version}, {"objects", objects},
+    QJsonObject root{{"format", "SOFIT"}, {"version", hasSeamData ? 10 : version}, {"objects", objects},
                      {"pieces", pieces}, {"layerVisibility", layerVisibility},
                      {"production", saveProduction(production_)}};
+    if (hasSeamData)
+        root.insert("baseVersion", version);
     if (parametric)
         root.insert("parametricDraft", saveDraft(draft_));
     ProductionData validated;
@@ -149,7 +176,10 @@ bool PatternDocument::load(const QString& path, QString* error) {
         return fail(QStringLiteral("Invalid JSON document"));
     const auto root = json.object();
     const auto format = root.value("format").toString();
-    const auto version = root.value("version").toDouble();
+    const bool seamFormat = root.value("version").toDouble() == 10;
+    const auto version = root.value(seamFormat ? "baseVersion" : "version").toDouble();
+    if (seamFormat && (version < 7 || version > 9))
+        return fail(QStringLiteral("Invalid base document version"));
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
     const bool current = format == "SOFIT" && version >= 2 && version <= 9 && std::trunc(version) == version;
     const auto objects = root.value(legacy ? "segments" : "objects");
@@ -246,6 +276,27 @@ bool PatternDocument::load(const QString& path, QString* error) {
             if (entity.draftName.isEmpty() || draftNames.contains(entity.draftName))
                 return fail(QStringLiteral("Invalid or duplicate parametric object name"));
             draftNames.insert(entity.draftName);
+        }
+        if (seamFormat && (fields.contains("edgeAllowanceMm") || fields.contains("edgeNotches"))) {
+            if (shape != Shape::Line && shape != Shape::Curve)
+                return fail(QStringLiteral("Edge metadata requires a line or curve"));
+            if (fields.contains("edgeAllowanceMm")) {
+                const auto width = fields.value("edgeAllowanceMm").toDouble(-1);
+                if (!std::isfinite(width) || width < 0)
+                    return fail(QStringLiteral("Invalid edge allowance"));
+                entity.seamAllowanceMm = width;
+            }
+            if (fields.contains("edgeNotches")) {
+                const auto positions = fields.value("edgeNotches");
+                if (!positions.isArray() || positions.toArray().size() > 100)
+                    return fail(QStringLiteral("Invalid edge notches"));
+                for (const auto& value : positions.toArray()) {
+                    const auto position = value.toDouble(-1);
+                    if (!(position > 0 && position < 1))
+                        return fail(QStringLiteral("Invalid edge notch position"));
+                    entity.seamNotches.append(position);
+                }
+            }
         }
         parsed.append(entity);
     }

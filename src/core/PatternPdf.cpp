@@ -101,8 +101,11 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
         strokes.append({std::move(outline), extent, layer, filled});
     };
     QVector<bool> visiblePieces(document.pieces().size(), false);
+    QVector<bool> edgeMarkedPieces(document.pieces().size(), false);
     for (qsizetype i = 0; i < document.entities().size(); ++i) {
         const auto& entity = document.entities()[i];
+        if (entity.piece >= 0 && entity.layer == Layer::Main && !entity.seamNotches.isEmpty())
+            edgeMarkedPieces[entity.piece] = true;
         if (objectVisibility[i] && document.layerVisible(entity.layer)) {
             append(entityPath(entity), entity.layer, entity.shape == Shape::Point);
             if (entity.piece >= 0 && entity.layer == Layer::Main)
@@ -113,7 +116,7 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
         if (!visiblePieces[i])
             continue;
         const auto& piece = document.pieces()[i];
-        if (!piece.showLabel && !piece.grainAngle && piece.notches.isEmpty())
+        if (!piece.showLabel && !piece.grainAngle && piece.notches.isEmpty() && !edgeMarkedPieces[i])
             continue;
         const auto marks = buildPieceMarkings(piece, analyzePiece(document, i),
                                               document.layerVisible(Layer::Allowance));

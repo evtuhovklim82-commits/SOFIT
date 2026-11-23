@@ -13,6 +13,7 @@
 #include <QPixmap>
 #include <QCheckBox>
 #include <QSpinBox>
+#include <QTableWidget>
 #include <QAction>
 #include <QActionGroup>
 #include <QCloseEvent>
@@ -22,6 +23,7 @@
 #include <QInputDialog>
 #include <QPushButton>
 #include <QSignalBlocker>
+#include <QSet>
 #include <QTreeWidget>
 #include <QComboBox>
 #include <QDialog>
@@ -351,6 +353,11 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Edit Fabric Layout"));
         }
     });
+    auto* seams = pattern->addMenu(tr("Seams"));
+    seams->addAction(tr("Measure Selected Lines and Curves"), this, &MainWindow::measureSelection);
+    seams->addAction(tr("Match Selected Seam Sections…"), this, &MainWindow::matchSeams);
+    seams->addAction(tr("Allowance for Selected Edges…"), this, &MainWindow::editEdgeAllowance);
+    seams->addAction(tr("Clear Automatic Notches on Selected Edges"), this, &MainWindow::clearEdgeNotches);
     auto* overlay = pattern->addMenu(tr("Size Overlays"));
     connect(overlay, &QMenu::aboutToShow, this, [this, overlay] {
         overlay->clear();
@@ -664,6 +671,227 @@ void MainWindow::setSelectedLayer(opc::Layer layer) {
         applyPatternEdit(std::move(updated), tr("Change Object Layer"));
 }
 
+void MainWindow::measureSelection() {
+    QStringList rows;
+    double total = 0;
+    const QLocale locale;
+    for (const auto index : selectedObjects()) {
+        if (const auto value = opc::seamLength(doc_.entities()[index])) {
+            rows.append(tr("Object %1    %2 mm").arg(index + 1).arg(locale.toString(*value, 'f', 3)));
+            total += *value;
+        }
+    }
+    if (rows.isEmpty()) {
+        QMessageBox::information(this, tr("Measure Selection"), tr("Select lines or quadratic curves."));
+        return;
+    }
+    rows.prepend(tr("Total of measurable objects    %1 mm").arg(locale.toString(total, 'f', 3)));
+    QMessageBox::information(this, tr("Measure Selection"), rows.join('\n'));
+}
+
+void MainWindow::matchSeams() {
+    const auto indices = selectedObjects();
+    const auto title = tr("Match Seam Sections");
+    if (indices.size() < 2 || !std::ranges::all_of(indices, [this](auto index) {
+            const auto& edge = doc_.entities()[index];
+            return edge.layer == opc::Layer::Main && opc::seamLength(edge).has_value();
+        })) {
+        QMessageBox::information(this, title, tr("Select the lines and quadratic curves of both seams on the main layer."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    auto* form = new QFormLayout(&dialog);
+    auto* table = new QTableWidget(indices.size(), 2, &dialog);
+    table->setHorizontalHeaderLabels({tr("Object"), tr("Section")});
+    table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    QVector<QComboBox*> sides;
+    const auto firstPiece = doc_.entities()[indices.front()].piece;
+    for (qsizetype i = 0; i < indices.size(); ++i) {
+        const auto& edge = doc_.entities()[indices[i]];
+        auto* item = new QTableWidgetItem(tr("%1 · %2").arg(indices[i] + 1)
+            .arg(edge.piece < 0 ? tr("Unassigned") : doc_.pieces()[edge.piece].name));
+        item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+        table->setItem(i, 0, item);
+        auto* box = new QComboBox(table);
+        box->addItems({tr("A"), tr("B")});
+        box->setCurrentIndex(i != 0 && (indices.size() == 2 || edge.piece != firstPiece));
+        table->setCellWidget(i, 1, box);
+        sides.append(box);
+    }
+    form->addRow(table);
+
+    auto* target = new QDoubleSpinBox(&dialog);
+    target->setRange(-100000, 100000);
+    target->setSuffix(tr(" mm"));
+    form->addRow(tr("Target ease (B − A)"), target);
+    auto* tolerance = new QDoubleSpinBox(&dialog);
+    tolerance->setRange(0, 100000);
+    tolerance->setValue(1);
+    tolerance->setSuffix(tr(" mm"));
+    form->addRow(tr("Tolerance (±)"), tolerance);
+    auto* count = new QSpinBox(&dialog);
+    count->setRange(1, 20);
+    count->setValue(3);
+    form->addRow(tr("Notch pairs"), count);
+    auto* reverse = new QCheckBox(tr("Reverse correspondence on section B"), &dialog);
+    form->addRow(reverse);
+    auto* summary = new QLabel(&dialog);
+    summary->setWordWrap(true);
+    form->addRow(summary);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    auto* add = buttons->addButton(tr("Place Paired Notches"), QDialogButtonBox::AcceptRole);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    std::optional<opc::SeamSection> a, b;
+    const auto refresh = [&] {
+        QVector<qsizetype> aIndices, bIndices;
+        for (qsizetype i = 0; i < indices.size(); ++i)
+            (sides[i]->currentIndex() == 0 ? aIndices : bIndices).append(indices[i]);
+        a = opc::measureSeamSection(doc_, aIndices);
+        b = opc::measureSeamSection(doc_, bIndices);
+        if (!a || !b) {
+            summary->setText(tr("Assign one connected, open chain to each section."));
+            add->setEnabled(false);
+            return;
+        }
+        const auto difference = b->lengthMm - a->lengthMm;
+        const bool within = std::abs(difference - target->value()) <= tolerance->value();
+        const auto auditable = [this](const opc::SeamSection& section) {
+            const auto piece = doc_.entities()[section.edges.front().index].piece;
+            return piece >= 0 && pieces_[piece].error == opc::ContourError::None && !pieces_[piece].allowanceFailed;
+        };
+        const auto number = [](double value) { return QLocale().toString(value, 'f', 3); };
+        auto message = tr("A %1 mm, B %2 mm. Ease (B − A) %3 mm. %4")
+            .arg(number(a->lengthMm), number(b->lengthMm), number(difference),
+                 within ? tr("Within tolerance.") : tr("Outside tolerance."));
+        const auto describeStart = [this](const opc::SeamSection& section, bool reversed) {
+            const auto& edge = reversed ? section.edges.back() : section.edges.front();
+            const auto& entity = doc_.entities()[edge.index];
+            const auto point = edge.reversed != reversed ? entity.b : entity.a;
+            return tr("object %1 at (%2, %3)").arg(edge.index + 1)
+                .arg(QLocale().toString(point.x(), 'f', 2), QLocale().toString(point.y(), 'f', 2));
+        };
+        message += tr("\nA starts on %1. B starts on %2.")
+            .arg(describeStart(*a, false), describeStart(*b, reverse->isChecked()));
+        const bool valid = auditable(*a) && auditable(*b);
+        if (!valid)
+            message += tr("\nNotches require closed pieces with valid cut outlines.");
+        summary->setText(message);
+        add->setEnabled(valid);
+    };
+    for (auto* side : sides)
+        connect(side, &QComboBox::currentIndexChanged, &dialog, refresh);
+    connect(target, &QDoubleSpinBox::valueChanged, &dialog, refresh);
+    connect(tolerance, &QDoubleSpinBox::valueChanged, &dialog, refresh);
+    connect(reverse, &QCheckBox::toggled, &dialog, refresh);
+    connect(add, &QPushButton::clicked, &dialog, [&] {
+        auto updated = doc_;
+        bool changed = false;
+        for (int i = 1; i <= count->value(); ++i) {
+            const auto fraction = static_cast<double>(i) / (count->value() + 1);
+            const auto first = a->notchAt(fraction);
+            const auto second = b->notchAt(reverse->isChecked() ? 1 - fraction : fraction);
+            if (!first || !second) {
+                QMessageBox::warning(&dialog, title, tr("A notch falls on a junction. Choose a different number of pairs."));
+                return;
+            }
+            for (const auto& [index, position] : {*first, *second}) {
+                auto edge = updated.entities()[index];
+                if (std::ranges::any_of(edge.seamNotches, [position](double old) {
+                        return std::abs(old - position) < 1e-9;
+                    }))
+                    continue;
+                if (edge.seamNotches.size() >= 100) {
+                    QMessageBox::warning(&dialog, title, tr("An edge can hold at most 100 automatic notches."));
+                    return;
+                }
+                edge.seamNotches.append(position);
+                updated.replace(index, edge);
+                changed = true;
+            }
+        }
+        if (changed)
+            applyPatternEdit(std::move(updated), tr("Place Paired Notches"));
+        dialog.accept();
+    });
+    refresh();
+    dialog.exec();
+}
+
+void MainWindow::editEdgeAllowance() {
+    const auto indices = selectedObjects();
+    const auto title = tr("Allowance for Selected Edges");
+    if (indices.isEmpty() || !std::ranges::all_of(indices, [this](auto index) {
+            const auto& edge = doc_.entities()[index];
+            return edge.piece >= 0 && edge.layer == opc::Layer::Main && opc::seamLength(edge).has_value();
+        })) {
+        QMessageBox::information(this, title, tr("Select lines or quadratic curves assigned to pieces on the main layer."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    auto* form = new QFormLayout(&dialog);
+    const auto& first = doc_.entities()[indices.front()];
+    auto* inherit = new QCheckBox(tr("Use the default allowance of each piece"), &dialog);
+    const auto original = first.seamAllowanceMm.value_or(doc_.pieces()[first.piece].allowanceMm);
+    auto* width = new QDoubleSpinBox(&dialog);
+    width->setDecimals(3);
+    width->setRange(0, std::max(100000.0, original));
+    width->setValue(original);
+    width->setSuffix(tr(" mm"));
+    form->addRow(inherit);
+    form->addRow(tr("Allowance"), width);
+    connect(inherit, &QCheckBox::toggled, width, &QDoubleSpinBox::setDisabled);
+    inherit->setChecked(!first.seamAllowanceMm.has_value());
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        auto updated = doc_;
+        QSet<qsizetype> affected;
+        const auto value = inherit->isChecked() ? std::nullopt : std::optional<double>(width->value());
+        for (const auto index : indices) {
+            auto edge = updated.entities()[index];
+            if (edge.seamAllowanceMm == value)
+                continue;
+            edge.seamAllowanceMm = value;
+            affected.insert(edge.piece);
+            updated.replace(index, edge);
+        }
+        for (const auto piece : affected) {
+            const auto check = opc::analyzePiece(updated, piece);
+            if (value && (check.error != opc::ContourError::None || check.allowanceFailed)) {
+                QMessageBox::warning(&dialog, title, tr("The new widths cannot produce a valid cut outline for %1.")
+                    .arg(updated.pieces()[piece].name));
+                return;
+            }
+        }
+        if (!affected.isEmpty())
+            applyPatternEdit(std::move(updated), tr("Edit Edge Allowances"));
+        dialog.accept();
+    });
+    dialog.exec();
+}
+
+void MainWindow::clearEdgeNotches() {
+    auto updated = doc_;
+    bool changed = false;
+    for (const auto index : selectedObjects()) {
+        auto edge = updated.entities()[index];
+        if (edge.seamNotches.isEmpty())
+            continue;
+        edge.seamNotches.clear();
+        updated.replace(index, edge);
+        changed = true;
+    }
+    if (changed)
+        applyPatternEdit(std::move(updated), tr("Clear Automatic Notches"));
+}
+
 void MainWindow::managePiece() {
     const auto piece = choosePiece(tr("Piece, Contour and Allowance"));
     if (piece < 0)
@@ -692,6 +920,22 @@ void MainWindow::managePiece() {
     auto* name = new QLineEdit(original.name, &dialog);
     form->addRow(tr("Name"), name);
     form->addRow(tr("Contour check"), new QLabel(contour, &dialog));
+    QStringList shortEdges;
+    for (qsizetype i = 0; i < doc_.entities().size(); ++i) {
+        const auto& edge = doc_.entities()[i];
+        if (edge.piece != piece || edge.layer != opc::Layer::Main)
+            continue;
+        const auto measured = opc::seamLength(edge);
+        const bool narrowRectangle = edge.shape == opc::Shape::Rectangle
+            && std::min(std::abs(edge.a.x() - edge.b.x()), std::abs(edge.a.y() - edge.b.y())) < 1;
+        if ((measured && *measured < 1) || narrowRectangle)
+            shortEdges.append(QString::number(i + 1));
+    }
+    if (!shortEdges.isEmpty()) {
+        auto* warning = new QLabel(shortEdges.join(", "), &dialog);
+        warning->setWordWrap(true);
+        form->addRow(tr("Objects with segments shorter than 1 mm"), warning);
+    }
     if (geometry.error == ContourError::None) {
         const QLocale locale;
         form->addRow(tr("Perimeter"), new QLabel(tr("%1 mm").arg(locale.toString(geometry.perimeterMm, 'f', 2)), &dialog));
@@ -699,7 +943,7 @@ void MainWindow::managePiece() {
             locale.toString(geometry.bounds.width(), 'f', 2),
             locale.toString(geometry.bounds.height(), 'f', 2)), &dialog));
     }
-    if (original.allowanceMm > 0 && (geometry.error != ContourError::None || geometry.allowanceFailed))
+    if (geometry.allowanceFailed || (original.allowanceMm > 0 && geometry.error != ContourError::None))
         form->addRow(new QLabel(tr("The stored allowance cannot be drawn on this contour."), &dialog));
 
     auto* width = new QDoubleSpinBox(&dialog);
@@ -872,6 +1116,10 @@ void MainWindow::splitSelectedEdge() {
     const double percent = QInputDialog::getDouble(this, title, label, 50, 0.01, 99.99, 2, &accepted);
     if (!accepted)
         return;
+    if (!edge.seamNotches.isEmpty()) {
+        statusBar()->showMessage(tr("Clear automatic notches on this edge before splitting it."), 5000);
+        return;
+    }
     const auto parts = opc::splitEdge(edge, percent / 100);
     if (!parts) {
         statusBar()->showMessage(tr("A split must produce two nondegenerate edges."), 5000);

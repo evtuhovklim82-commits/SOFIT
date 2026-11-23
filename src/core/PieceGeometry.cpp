@@ -3,6 +3,7 @@
 #include <QPainterPath>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace opc {
 namespace {
@@ -17,6 +18,8 @@ struct Edge {
     QPointF control;
     bool curved = false;
     double chordError = 0;
+    qsizetype entityIndex = -1;
+    double width = 0;
 };
 
 double length(const QPointF& vector) {
@@ -99,7 +102,9 @@ bool flatten(const Edge& edge, QVector<Edge>& chords, double& perimeter, double 
     const auto upper = length(edge.control - edge.start) + length(edge.end - edge.control);
     const auto error = length(edge.control - midpoint) / 2;
     if (error <= curveTolerance && upper - chord <= 2 * lengthBudget) {
-        chords.append({edge.start, edge.end, edge.control, true, error});
+        auto chordEdge = edge;
+        chordEdge.chordError = error;
+        chords.append(chordEdge);
         perimeter += (upper + chord) / 2;
         return true;
     }
@@ -107,8 +112,14 @@ bool flatten(const Edge& edge, QVector<Edge>& chords, double& perimeter, double 
     const auto first = (edge.start + edge.control) / 2;
     const auto second = (edge.control + edge.end) / 2;
     const auto split = (first + second) / 2;
-    return flatten({edge.start, split, first, true}, chords, perimeter, lengthBudget / 2, depth + 1)
-        && flatten({split, edge.end, second, true}, chords, perimeter, lengthBudget / 2, depth + 1);
+    auto left = edge;
+    left.end = split;
+    left.control = first;
+    auto right = edge;
+    right.start = split;
+    right.control = second;
+    return flatten(left, chords, perimeter, lengthBudget / 2, depth + 1)
+        && flatten(right, chords, perimeter, lengthBudget / 2, depth + 1);
 }
 
 // Adjacent control hulls must lie on opposite sides of a line through
@@ -181,6 +192,172 @@ QPolygonF offsetRing(const QPolygonF& ring, double width) {
     }
     return offset;
 }
+
+QPolygonF offsetVariableRing(const QPolygonF& ring, const QVector<Edge>& chords) {
+    const double orientation = signedAreaTwice(ring) > 0 ? 1 : -1;
+    QPolygonF offset;
+    QVector<qsizetype> edgeStarts;
+    QVector<qsizetype> edgeEnds;
+    for (qsizetype i = 0; i < ring.size(); ++i) {
+        edgeEnds.append(offset.size());
+        const auto previous = (i + ring.size() - 1) % ring.size();
+        const auto& vertex = ring[i];
+        const auto before = (vertex - ring[previous]) / length(vertex - ring[previous]);
+        const auto afterEdge = ring[(i + 1) % ring.size()] - vertex;
+        const auto after = afterEdge / length(afterEdge);
+        const auto previousWidth = chords[previous].width;
+        const auto nextWidth = chords[i].width;
+        const auto a = vertex + previousWidth * orientation * QPointF(before.y(), -before.x());
+        const auto b = vertex + nextWidth * orientation * QPointF(after.y(), -after.x());
+        if (!validPoint(a) || !validPoint(b))
+            return {};
+        if (near(a, b)) {
+            edgeStarts.append(offset.size());
+            offset.append(b);
+            continue;
+        }
+        const auto denominator = cross(before, after);
+        const bool nearlyStraight = QPointF::dotProduct(before, after) > 0
+            && std::abs(denominator) < 0.05;
+        if (nearlyStraight && previousWidth != nextWidth) {
+            offset.append(a);
+            edgeStarts.append(offset.size());
+            offset.append(b);
+            continue;
+        }
+        if (std::abs(denominator) <= 1e-8)
+            return {};
+        const auto corner = a + before * (cross(b - a, after) / denominator);
+        if (!validPoint(corner) || length(corner - vertex) > miterLimit * std::max(previousWidth, nextWidth))
+            return {};
+        edgeStarts.append(offset.size());
+        offset.append(corner);
+    }
+    for (qsizetype i = 0; i < chords.size(); ++i) {
+        const auto next = (i + 1) % chords.size();
+        if (QPointF::dotProduct(offset[edgeEnds[next]] - offset[edgeStarts[i]],
+                                chords[i].end - chords[i].start) <= 0)
+            return {};
+    }
+    if (!simpleRing(offset) || signedAreaTwice(offset) * orientation <= std::abs(signedAreaTwice(ring)))
+        return {};
+    for (qsizetype i = 0; i < offset.size(); ++i) {
+        const auto& a = offset[i];
+        const auto& b = offset[(i + 1) % offset.size()];
+        if (ring.containsPoint((a + b) / 2, Qt::OddEvenFill)) {
+            bool onBoundary = false;
+            for (const auto& edge : chords)
+                onBoundary |= pointSegmentDistance((a + b) / 2, edge.start, edge.end) <= joinTolerance;
+            if (!onBoundary)
+                return {};
+        }
+        for (const auto& edge : chords) {
+            if (segmentsCross(a, b, edge.start, edge.end)
+                && endpointClearance(a, b, edge.start, edge.end) > joinTolerance)
+                return {};
+        }
+    }
+    return offset;
+}
+
+double quadraticLength(const QPointF& a, const QPointF& control, const QPointF& b,
+                       double budget, int depth = 0) {
+    const auto chord = length(b - a);
+    const auto upper = length(control - a) + length(b - control);
+    if (upper - chord <= 2 * budget)
+        return (chord + upper) / 2;
+    if (depth == 22)
+        return std::numeric_limits<double>::quiet_NaN();
+    const auto left = (a + control) / 2;
+    const auto right = (control + b) / 2;
+    const auto middle = (left + right) / 2;
+    return quadraticLength(a, left, middle, budget / 2, depth + 1)
+        + quadraticLength(middle, right, b, budget / 2, depth + 1);
+}
+}
+
+std::optional<double> seamLength(const Entity& entity) {
+    if (!validPoint(entity.a) || !validPoint(entity.b))
+        return {};
+    if (entity.shape == Shape::Line)
+        return length(entity.b - entity.a);
+    if (entity.shape != Shape::Curve || !validPoint(entity.control))
+        return {};
+    const auto measured = quadraticLength(entity.a, entity.control, entity.b, 0.001);
+    return std::isfinite(measured) ? std::optional<double>(measured) : std::nullopt;
+}
+
+std::optional<std::pair<qsizetype, double>> SeamSection::notchAt(double fraction) const {
+    if (!(fraction > 0 && fraction < 1))
+        return {};
+    auto distance = fraction * lengthMm;
+    for (const auto& edge : edges) {
+        if (distance < edge.lengthMm - joinTolerance) {
+            if (distance <= joinTolerance)
+                return {}; // A junction is already a visible reference.
+            const auto position = distance / edge.lengthMm;
+            return std::pair{edge.index, edge.reversed ? 1 - position : position};
+        }
+        distance -= edge.lengthMm;
+    }
+    return {};
+}
+
+std::optional<SeamSection> measureSeamSection(const PatternDocument& document,
+                                              const QVector<qsizetype>& indices) {
+    if (indices.isEmpty() || indices.size() > maxEdges)
+        return {};
+    const auto& entities = document.entities();
+    SeamSection section;
+    QVector<SeamEdge> unordered;
+    qsizetype piece = -1;
+    for (const auto index : indices) {
+        if (index < 0 || index >= entities.size())
+            return {};
+        const auto& edge = entities[index];
+        if (unordered.isEmpty())
+            piece = edge.piece;
+        const auto measured = seamLength(edge);
+        if (edge.piece != piece || edge.layer != Layer::Main || !measured || *measured <= joinTolerance)
+            return {};
+        unordered.append({index, *measured, false});
+        section.lengthMm += *measured;
+    }
+    const auto endpoint = [&](qsizetype i) {
+        const auto& edge = entities[unordered[i / 2].index];
+        return i % 2 ? edge.b : edge.a;
+    };
+    QVector<qsizetype> links(2 * unordered.size(), -1);
+    for (qsizetype i = 0; i < links.size(); ++i) {
+        for (auto j = i + 1; j < links.size(); ++j) {
+            if (!near(endpoint(i), endpoint(j)))
+                continue;
+            if (i / 2 == j / 2 || links[i] != -1 || links[j] != -1)
+                return {};
+            links[i] = j;
+            links[j] = i;
+        }
+    }
+    qsizetype endCount = 0;
+    qsizetype current = -1;
+    for (qsizetype i = 0; i < links.size(); ++i) {
+        if (links[i] == -1) {
+            if (current == -1)
+                current = i;
+            ++endCount;
+        }
+    }
+    if (endCount != 2)
+        return {};
+    while (current != -1 && section.edges.size() < indices.size()) {
+        auto edge = unordered[current / 2];
+        edge.reversed = current % 2;
+        section.edges.append(edge);
+        current = links[current ^ 1];
+    }
+    if (section.edges.size() != indices.size())
+        return {};
+    return section;
 }
 
 PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
@@ -188,11 +365,13 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
         return {};
 
     QVector<Edge> edges;
-    for (const auto& entity : document.entities()) {
+    for (qsizetype index = 0; index < document.entities().size(); ++index) {
+        const auto& entity = document.entities()[index];
         if (entity.piece != piece || entity.layer != Layer::Main)
             continue;
         if (!validPoint(entity.a) || !validPoint(entity.b))
             return {ContourError::TooComplex};
+        const auto firstEdge = edges.size();
         if (entity.shape == Shape::Rectangle) {
             const QPointF c(entity.a.x(), entity.b.y());
             const QPointF d(entity.b.x(), entity.a.y());
@@ -208,6 +387,10 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
             edges.append({entity.a, entity.b, entity.control, entity.shape == Shape::Curve});
         } else {
             return {ContourError::UnsupportedShape};
+        }
+        for (auto i = firstEdge; i < edges.size(); ++i) {
+            edges[i].entityIndex = index;
+            edges[i].width = entity.seamAllowanceMm.value_or(document.pieces()[piece].allowanceMm);
         }
         if (edges.size() > maxEdges)
             return {ContourError::TooComplex};
@@ -244,10 +427,17 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
     QVector<Edge> chords;
     const auto start = edges.front().start;
     QPainterPath path(start);
+    struct NotchSpan {
+        qsizetype first, end, entity;
+        bool reversed;
+    };
+    QVector<NotchSpan> spans;
     qsizetype current = 0;
     for (qsizetype i = 0; i < edges.size(); ++i) {
         auto edge = edges[current / 2];
-        if (current % 2)
+        const bool reversed = current % 2;
+        const auto firstChord = chords.size();
+        if (reversed)
             std::swap(edge.start, edge.end);
         current = links[current ^ 1];
         if (current == 0 && i + 1 < edges.size())
@@ -268,6 +458,8 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
                 return {ContourError::TooComplex};
             chords.append(edge);
         }
+        if (!document.entities()[edge.entityIndex].seamNotches.isEmpty())
+            spans.append({firstChord, chords.size(), edge.entityIndex, reversed});
     }
     QPolygonF ring;
     ring.reserve(chords.size());
@@ -280,10 +472,28 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
 
     geometry.error = ContourError::None;
     geometry.bounds = path.boundingRect();
-    const auto width = document.pieces()[piece].allowanceMm;
-    if (width > 0) {
-        geometry.allowance = offsetRing(ring, width);
+    const auto width = chords.front().width;
+    if (std::ranges::any_of(chords, [](const Edge& edge) { return edge.width > 0; })) {
+        const bool uniform = std::ranges::all_of(chords, [width](const Edge& edge) { return edge.width == width; });
+        geometry.allowance = uniform ? offsetRing(ring, width) : offsetVariableRing(ring, chords);
         geometry.allowanceFailed = geometry.allowance.isEmpty();
+    }
+    const double orientation = signedAreaTwice(ring) > 0 ? 1 : -1;
+    for (const auto& span : spans) {
+        QVector<double> distances{0};
+        for (auto i = span.first; i < span.end; ++i)
+            distances.append(distances.back() + length(chords[i].end - chords[i].start));
+        for (const auto fraction : document.entities()[span.entity].seamNotches) {
+            const auto distance = (span.reversed ? 1 - fraction : fraction) * distances.back();
+            const auto index = std::upper_bound(distances.begin(), distances.end(), distance)
+                - distances.begin() - 1;
+            if (index < 0 || index + 1 >= distances.size())
+                continue;
+            const auto& chord = chords[span.first + index];
+            const auto tangent = (chord.end - chord.start) / (distances[index + 1] - distances[index]);
+            const auto anchor = chord.start + tangent * (distance - distances[index]);
+            geometry.notchAnchors.append(QLineF(anchor, anchor + orientation * QPointF(tangent.y(), -tangent.x())));
+        }
     }
     geometry.contour = std::move(ring);
     return geometry;

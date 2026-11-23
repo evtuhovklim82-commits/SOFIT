@@ -136,6 +136,10 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
         return failure("This piece has notches, grading rules, or fabric placements. Remove those before modeling.");
 
     const auto& entities = document.entities();
+    if (std::ranges::any_of(entities, [piece](const auto& edge) {
+            return edge.piece == piece && (edge.seamAllowanceMm || !edge.seamNotches.isEmpty());
+        }))
+        return failure("Clear edge allowances and automatic notches before modeling this piece.");
     QSet<qsizetype> guideSet;
     for (const auto index : guides) {
         if (index < 0 || index >= entities.size() || guideSet.contains(index))

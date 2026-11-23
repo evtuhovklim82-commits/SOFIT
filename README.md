@@ -1,4 +1,4 @@
-# SOFIT 1.3 — independent CAD prototype
+# SOFIT 1.4 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -48,8 +48,17 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
 - Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
-- SOFIT opens `.sofit` formats 1–9 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. SVG export includes enabled layers and uses millimeters.
+- SOFIT opens `.sofit` formats 1–10 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
+
+## Seam tools
+
+- In the Objects list, select lines and quadratic Bézier curves. **Pattern → Seams → Measure Selected Lines and Curves** reports their individual lengths and total in millimeters. Quadratic lengths use subdivision with chord and control-polygon bounds. The absolute length error budget is 0.001 mm per curve within the supported coordinate range.
+- With both seams selected, open **Match Selected Seam Sections** and assign the edges to A and B. Each section must be one connected open chain on one piece, or a chain of unassigned edges for measurement. The dialog shows both lengths, signed ease (B − A), and the result against the target ease and tolerance. The match and its settings are temporary.
+- **Place Paired Notches** distributes marks at equal fractions of each section length. The dialog displays each start endpoint and lets you reverse B. Both pieces need valid closed outlines. If a requested mark lands on a junction, choose a different count. Marks are stored on individual edges at normalized arc-length positions and are recomputed from the graded geometry. This distributes ease proportionally and does not prescribe where to concentrate it. The graded result preserves each mark's fraction on its own edge; matching a particular graded size again may require adjusting its layout separately. Use **Clear Automatic Notches on Selected Edges** to remove stored marks.
+- **Allowance for Selected Edges** overrides the piece default on selected lines and quadratic curves. A width of zero follows the seam, and resetting an override uses the piece default. Rectangles use the piece default. Offsets use polygonal approximations for curves, mitered corners and steps at straight or nearly tangent width transitions. The editor rejects unsafe corners and outlines instead of clipping them automatically. Check the cut outline for each graded size before export.
+- **Piece, Contour and Allowance** reports open outlines, intersecting or overlapping geometry, and objects with segments shorter than 1 mm. The short-edge report is advisory. Intersection diagnosis follows the existing simple-contour validator, which can reject ambiguous close curves and reports the first topology failure.
+- Edge edits and paired notch placement can be undone and redone. The canvas, PDF and DXF derive cut outlines and notch marks from the document and the chosen size. Clear automatic notches before splitting their edge and clear edge metadata before using cut, spread or dart transfer on its piece.
 
 ## Modeling tools
 

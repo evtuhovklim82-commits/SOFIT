@@ -3,6 +3,7 @@
 #include "ContourModeling.h"
 #include "PieceMarkings.h"
 #include "PatternDxf.h"
+#include "Production.h"
 
 #include <QFile>
 #include <QLineF>
@@ -40,6 +41,58 @@ PatternDocument polygon(const QPolygonF& vertices, double allowance = 0) {
 void writeFile(const QString& path, const QByteArray& content) {
     QFile file(path);
     check(file.open(QIODevice::WriteOnly) && file.write(content) == content.size(), "Write fixture");
+}
+
+void testSeamTools() {
+    auto document = polygon({{0, 0}, {50, 0}, {100, 0}, {100, 40}, {0, 40}}, 10);
+    auto first = document.entities()[0];
+    first.seamAllowanceMm = 0;
+    first.seamNotches = {0.5};
+    document.replace(0, first);
+    auto second = document.entities()[1];
+    std::swap(second.a, second.b);
+    second.seamAllowanceMm = 7;
+    second.seamNotches = {0.25};
+    document.replace(1, second);
+
+    const auto geometry = analyzePiece(document, 0);
+    check(geometry.error == ContourError::None && !geometry.allowanceFailed,
+          "Accept a straight step between different allowances");
+    check(geometry.allowance.contains({50, 0}) && geometry.allowance.contains({50, -7}),
+          "Keep the width step at the correct junction");
+    check(geometry.notchAnchors.size() == 2 && geometry.notchAnchors[0].p1() == QPointF(25, 0)
+          && geometry.notchAnchors[1].p1() == QPointF(87.5, 0),
+          "Locate arc-length marks from each source edge's actual start");
+    const auto marks = buildPieceMarkings(document.pieces()[0], geometry, true).notches;
+    check(marks.elementCount() == 4 && near(marks.elementAt(0).y, 1.5)
+          && near(marks.elementAt(2).y, -5.5), "Project marks to zero and nonzero cut widths");
+
+    const auto section = measureSeamSection(document, {0, 1});
+    check(section && near(section->lengthMm, 100) && !section->notchAt(0.5),
+          "Measure a multi-edge chain and identify a notch on a junction");
+    const auto mark = section->notchAt(0.875);
+    check(mark && mark->first == 1 && near(mark->second, 0.25), "Map chain distance to the reversed edge");
+    check(!measureSeamSection(document, {0, 2}) && !measureSeamSection(document, {0, 0})
+          && !measureSeamSection(document, {0, 1, 2, 3, 4}), "Reject disconnected, repeated and closed selections");
+
+    const auto curvedLength = seamLength({Shape::Curve, {0, 0}, {100, 0}, {50, 50}});
+    const auto exact = 50 * (std::sqrt(2.0) + std::asinh(1.0));
+    check(curvedLength && near(*curvedLength, exact, 0.001), "Quadratic length stays inside the error budget");
+    check(!splitEdge(first, 0.5), "Prevent duplicating automatic marks when splitting an edge");
+
+    document.production().sizes.append({QStringLiteral("L")});
+    document.production().rules.append({QStringLiteral("L"), 0, {50, 0}, {10, 0}});
+    QTemporaryDir temp;
+    const auto path = temp.filePath("seam-tools.sofit");
+    PatternDocument loaded;
+    check(document.save(path) && loaded.load(path), "Round-trip seam-enabled document");
+    check(loaded.entities()[0].seamAllowanceMm == 0 && loaded.entities()[1].seamAllowanceMm == 7
+          && loaded.entities()[1].seamNotches == QVector<double>{0.25}, "Restore edge settings and marks");
+    const auto graded = gradedPattern(loaded, "L");
+    const auto gradedGeometry = analyzePiece(graded, 0);
+    check(!gradedGeometry.allowanceFailed && gradedGeometry.notchAnchors.size() == 2
+          && gradedGeometry.notchAnchors[0].p1() == QPointF(30, 0),
+          "Rebuild allowance and notch locations from graded edges");
 }
 
 void testLines() {
@@ -367,6 +420,7 @@ void testDartTransfer() {
 }
 
 int main() {
+    testSeamTools();
     testLines();
     testCurves();
     testFiles();

@@ -30,6 +30,8 @@ struct Entity {
     qsizetype piece = -1;
     Layer layer = Layer::Main;
     QString draftName{};
+    std::optional<double> seamAllowanceMm;
+    QVector<double> seamNotches; // Arc-length fractions measured from a.
 };
 
 class PatternDocument {
