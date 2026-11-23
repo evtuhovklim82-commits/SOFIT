@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "FittingBlocks.h"
 #include "PatternView.h"
 #include "PatternPdf.h"
 #include "PatternDxf.h"
@@ -22,9 +23,11 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QPushButton>
+#include <QPlainTextEdit>
 #include <QStringList>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QMessageBox>
 #include <QTreeWidget>
 #include <QWizard>
 #include <cstdlib>
@@ -610,6 +613,96 @@ int main(int argc, char** argv) {
     const auto seamDxfData = seamDxfFile.readAll();
     check(seamDxfData.count("\nNOTCH\n") == 7 && seamDxfData.count("\nALLOWANCE\n") == 3,
           "DXF contains six automatic marks and two allowance outlines, plus the layer records");
+
+    MainWindow bodiceWindow;
+    bodiceWindow.show();
+    runDialog<QWizard>(action(bodiceWindow, "New Pattern from Template…"), [](QWizard& wizard) {
+        wizard.findChild<QComboBox*>()->setCurrentIndex(2);
+        wizard.next();
+        QTimer::singleShot(0, [] {
+            auto* report = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            check(report && report->text().contains("Front: armhole")
+                  && report->text().contains("Back: armhole")
+                  && report->text().contains("Both sections are within tolerance."),
+                  "Show the front and back cap seam report with its tolerance result");
+            report->button(QMessageBox::Yes)->click();
+        });
+        wizard.button(QWizard::FinishButton)->click();
+    });
+    const auto bodicePath = temp.filePath("bodice.sofit");
+    chooseFile(action(bodiceWindow, "&Save"), bodicePath);
+    opc::PatternDocument bodice;
+    check(bodice.load(bodicePath) && bodice.pieces().size() == 3, "Save all three fitting pieces from the UI");
+    const auto bodicePdf = temp.filePath("bodice.pdf");
+    check(opc::exportPatternPdf(bodicePdf, bodice, QVector<bool>(bodice.entities().size(), true),
+                                {}, {}, seamError)
+          && pageCount(readPdf(bodicePdf)) > 0, "Export the fitting block as tiled PDF");
+
+    for (const int choice : {3, 4}) {
+        const bool trousers = choice == 3;
+        const QString name = trousers ? "trousers" : "dress";
+        MainWindow fittingWindow;
+        fittingWindow.show();
+        runDialog<QWizard>(action(fittingWindow, "New Pattern from Template…"), [choice](QWizard& wizard) {
+            wizard.findChild<QComboBox*>()->setCurrentIndex(choice);
+            wizard.next();
+            wizard.button(QWizard::FinishButton)->click();
+        });
+        runDialog<QDialog>(action(fittingWindow, "Check Fitting Block by Size…"), [trousers](QDialog& dialog) {
+            const auto text = dialog.findChild<QPlainTextEdit*>()->toPlainText();
+            check(text.contains(trousers ? "Trouser inseam above knee" : "Front dress waist")
+                  && text.contains("within tolerance") && !text.contains("outside tolerance"),
+                  "Display the named fitting seams and their tolerance result");
+            dialog.reject();
+        });
+        const auto projectPath = temp.filePath(name + ".sofit");
+        chooseFile(action(fittingWindow, "&Save"), projectPath);
+        opc::PatternDocument block;
+        check(block.load(projectPath) && block.pieces().size() == (trousers ? 2 : 4),
+              "Round trip all fitting pieces created through the wizard");
+        auto& sizes = block.production().sizes;
+        sizes.append({"L", {{"waist", 800}, {"hip", 1060}, {"bust", 980}}});
+        const auto graded = opc::gradedPattern(block, "L");
+        const auto checks = opc::checkFittingBlock(block, "L");
+        check(checks.invalidPieces.isEmpty() && checks.missingSeams.isEmpty() && !checks.seams.isEmpty(),
+              "Check all graded contours and seam pairs");
+        for (const auto& seam : checks.seams)
+            check(qAbs(seam.second - seam.first - seam.targetDifference) < 0.01,
+                  "Keep graded fitting seams balanced");
+        check(opc::analyzePiece(graded, 0).bounds.width() > opc::analyzePiece(block, 0).bounds.width(),
+              "Increase the first piece width using size overrides");
+
+        const auto pdf = temp.filePath(name + ".pdf");
+        const auto dxf = temp.filePath(name + ".dxf");
+        const QVector<bool> visible(graded.entities().size(), true);
+        QVector<opc::PieceGeometry> contours;
+        for (qsizetype i = 0; i < graded.pieces().size(); ++i)
+            contours.append(opc::analyzePiece(graded, i));
+        check(opc::exportPatternPdf(pdf, graded, visible, {}, {}, seamError)
+              && pageCount(readPdf(pdf)) > 0, "Print the graded fitting block as tiled PDF");
+        check(opc::exportPatternDxf(dxf, graded, visible, contours, seamError),
+              "Export the graded fitting block as DXF");
+        QFile exported(dxf);
+        check(exported.open(QIODevice::ReadOnly) && exported.readAll().contains("ENTITIES"),
+              "Read the exported DXF geometry section");
+
+        check(block.save(projectPath) && block.load(projectPath)
+              && block.production().sizes[0].measurements.value("hip") == 1060
+              && block.parametricDraft().edges.size() > 20,
+              "Preserve fitting formulas and size overrides on reopening");
+
+        // A point grade offset on one joining edge must affect the report for that size.
+        const QString edgeName = trousers ? "trouser_front_inseam_upper" : "skirt_front_waist";
+        for (const auto& edge : block.entities()) {
+            if (edge.draftName == edgeName)
+                block.production().rules.append({"L", edge.piece, trousers ? edge.a : edge.b, {20, 0}});
+        }
+        const auto offsetChecks = opc::checkFittingBlock(block, "L");
+        bool mismatch = false;
+        for (const auto& seam : offsetChecks.seams)
+            mismatch |= qAbs(seam.second - seam.first - seam.targetDifference) > 0.01;
+        check(mismatch, "Detect a seam length difference after a manual size offset");
+    }
 
     MainWindow templateWindow;
     templateWindow.show();

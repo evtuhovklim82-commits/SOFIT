@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 1.4.0 LANGUAGES CXX)
+project(SOFIT VERSION 1.5.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -9,6 +9,8 @@ endif()
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets)
 
 add_library(sofit_core STATIC
+    src/core/BodiceDraft.cpp
+    src/core/FittingBlocks.cpp
     src/core/ContourModeling.cpp
     src/core/EntityPath.cpp
     src/core/Modeling.cpp

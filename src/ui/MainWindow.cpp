@@ -7,6 +7,7 @@
 #include "Production.h"
 #include "ProductionDialogs.h"
 #include "TemplateWizard.h"
+#include "FittingBlocks.h"
 #include "EntityPath.h"
 #include "Modeling.h"
 #include "ContourModeling.h"
@@ -22,6 +23,7 @@
 #include <QHash>
 #include <QInputDialog>
 #include <QPushButton>
+#include <QPlainTextEdit>
 #include <QSignalBlocker>
 #include <QSet>
 #include <QTreeWidget>
@@ -355,6 +357,56 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
     auto* seams = pattern->addMenu(tr("Seams"));
     seams->addAction(tr("Measure Selected Lines and Curves"), this, &MainWindow::measureSelection);
+    seams->addAction(tr("Check Fitting Block by Size…"), this, [this] {
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Check Fitting Block by Size"));
+        auto* form = new QFormLayout(&dialog);
+        auto* size = new QComboBox(&dialog);
+        fillExportSizes(*size, doc_);
+        form->addRow(tr("Size"), size);
+        auto* tolerance = new QDoubleSpinBox(&dialog);
+        tolerance->setSuffix(tr(" mm"));
+        tolerance->setValue(3);
+        form->addRow(tr("Tolerance"), tolerance);
+        auto* capEase = new QDoubleSpinBox(&dialog);
+        capEase->setSuffix(tr(" mm"));
+        capEase->setValue(4);
+        form->addRow(tr("Ease per sleeve cap section"), capEase);
+        auto* report = new QPlainTextEdit(&dialog);
+        report->setReadOnly(true);
+        form->addRow(report);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        form->addRow(buttons);
+
+        const auto refresh = [&] {
+            const auto check = opc::checkFittingBlock(doc_, size->currentData().toString(), capEase->value());
+            QStringList lines;
+            lines.append(check.invalidPieces.isEmpty()
+                ? (doc_.pieces().isEmpty() ? tr("No pieces to check.") : tr("All piece contours are closed and simple."))
+                : tr("Invalid contours: %1").arg(check.invalidPieces.join(", ")));
+            if (check.seams.isEmpty() && check.missingSeams.isEmpty())
+                lines.append(tr("No fitting block seam pairs found."));
+            for (const auto& missing : check.missingSeams)
+                lines.append(tr("%1: could not measure both seams.").arg(missing));
+            for (const auto& seam : check.seams) {
+                const double difference = seam.second - seam.first;
+                const auto mm = [](double value) { return QLocale().toString(value, 'f', 2); };
+                lines.append(tr("%1: %2 / %3 mm, difference %4 mm, target %5 mm — %6")
+                    .arg(seam.label, mm(seam.first), mm(seam.second), mm(difference), mm(seam.targetDifference),
+                         std::abs(difference - seam.targetDifference) <= tolerance->value()
+                             ? tr("within tolerance") : tr("outside tolerance")));
+            }
+            report->setPlainText(lines.join("\n"));
+        };
+        connect(size, &QComboBox::currentIndexChanged, &dialog, refresh);
+        connect(tolerance, &QDoubleSpinBox::valueChanged, &dialog, refresh);
+        connect(capEase, &QDoubleSpinBox::valueChanged, &dialog, refresh);
+        refresh();
+        dialog.resize(680, 340);
+        dialog.exec();
+    });
+
     seams->addAction(tr("Match Selected Seam Sections…"), this, &MainWindow::matchSeams);
     seams->addAction(tr("Allowance for Selected Edges…"), this, &MainWindow::editEdgeAllowance);
     seams->addAction(tr("Clear Automatic Notches on Selected Edges"), this, &MainWindow::clearEdgeNotches);

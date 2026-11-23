@@ -1,4 +1,9 @@
 #include "PatternDocument.h"
+#include "BodiceDraft.h"
+#include "PatternDxf.h"
+
+#include <cmath>
+#include <limits>
 #include "PieceGeometry.h"
 #include "PatternTemplates.h"
 #include "Production.h"
@@ -32,9 +37,98 @@ void writeProject(const QString& path, const QJsonObject& data) {
     const auto bytes = QJsonDocument(data).toJson();
     check(file.write(bytes) == bytes.size(), "Write complete project fixture");
 }
+void checkBodiceAndSleeve() {
+    using namespace opc;
+    BodiceMeasurements measurements{920, 740, 420, 210, 68, 75, 22, 116, 38, 60, 40,
+                                    115, 300, 50, 220, 570, 87};
+    QString error;
+    auto document = draftBodiceAndSleeve(measurements, &error);
+    if (!document)
+        std::cerr << error.toStdString() << '\n';
+    check(document.has_value() && document->pieces().size() == 3, "Draft front, back and sleeve");
+    QVector<PieceGeometry> geometry;
+    for (qsizetype i = 0; i < 3; ++i) {
+        geometry.append(analyzePiece(*document, i));
+        check(geometry.back().error == ContourError::None, "Draft a closed sewing contour");
+    }
+    check(geometry[0].bounds.width() == 245 && geometry[1].bounds.width() == 245
+          && geometry[2].bounds.width() == 350, "Draft uses bust and upper arm wearing ease");
+    const auto seams = measureBodiceSeams(*document);
+    check(seams && seams->frontArmhole > seams->backArmhole && seams->frontCap > seams->backCap,
+          "Measure the distinct front and back cap sections");
+    qsizetype dartLegs = 0;
+    for (const auto& edge : document->entities()) {
+        if (edge.draftName.contains("_dart_")) {
+            check(edge.layer == Layer::Construction && edge.piece >= 0 && edge.piece < 2,
+                  "Preserve the dart on its own bodice half");
+            ++dartLegs;
+        }
+    }
+    check(dartLegs == 4, "Draft both legs of each waist dart");
+
+    document->production().sizes.append({"Larger", {{"bust", 960}, {"upper_arm", 330}}});
+    const auto graded = gradedPattern(*document, "Larger");
+    check(analyzePiece(graded, 0).bounds.width() == 255
+          && analyzePiece(graded, 2).bounds.width() == 380, "Recalculate sizes from measurements");
+
+    QTemporaryDir directory;
+    check(directory.isValid(), "Create block export directory");
+    const auto path = directory.filePath("block.sofit");
+    check(document->save(path, &error), "Save a bodice and sleeve project");
+    PatternDocument reopened;
+    check(reopened.load(path, &error)
+          && reopened.parametricDraft() == document->parametricDraft()
+          && reopened.pieces() == document->pieces(), "Restore editable bodice and sleeve formulas");
+    const auto reopenedSeams = measureBodiceSeams(reopened);
+    check(reopenedSeams && std::abs(reopenedSeams->frontCap - seams->frontCap) < 0.001,
+          "Restore the sleeve cap measurement");
+    check(exportPatternDxf(directory.filePath("block.dxf"), reopened, QVector<bool>(reopened.entities().size(), true), geometry, error),
+          "Export the bodice and sleeve as DXF");
+
+    measurements.waist = measurements.bust;
+    check(!draftBodiceAndSleeve(measurements), "Reject insufficient waist suppression");
+    measurements.waist = std::numeric_limits<double>::quiet_NaN();
+    check(!draftBodiceAndSleeve(measurements), "Reject a nonfinite measurement");
+}
+
+void checkLowerBlocks() {
+    using namespace opc;
+    TrouserMeasurements trousers{740, 1000, 40, 60, 195, 270, 600, 1030, 460, 380, 100};
+    const auto block = draftTrousers(trousers);
+    check(block && block->pieces().size() == 2, "Draft the trouser front and back");
+    QHash<QString, double> lengths;
+    for (const auto& edge : block->entities()) {
+        if (const auto length = seamLength(edge))
+            lengths.insert(edge.draftName, *length);
+        if (edge.draftName.contains("_guide_") || edge.draftName.contains("_dart_"))
+            check(edge.layer == Layer::Construction && edge.piece >= 0, "Keep guides and darts on their pieces");
+    }
+    check(qAbs(lengths["trouser_front_guide_knee"] + lengths["trouser_back_guide_knee"] - trousers.knee) < 0.001
+          && qAbs(lengths["trouser_front_hem"] + lengths["trouser_back_hem"] - trousers.hem) < 0.001,
+          "Use the entered per-leg knee and hem circumferences");
+    check(lengths["trouser_back_crotch"] > lengths["trouser_front_crotch"], "Use a longer back crotch curve");
+    trousers.kneeDepth = trousers.rise;
+    check(!draftTrousers(trousers), "Reject coincident knee and seat levels");
+
+    const BodiceMeasurements bodice{920, 740, 420, 210, 68, 75, 22, 116, 38, 60, 40, 115};
+    DressSkirtMeasurements skirt{1000, 60, 195, 620, 160, 100};
+    const auto dress = draftDress(bodice, skirt);
+    check(dress && dress->pieces().size() == 4, "Draft the sleeveless bodice and the two skirt panels");
+    const auto seams = checkFittingBlock(*dress);
+    for (const auto& seam : seams.seams) {
+        if (seam.label.contains("dress waist"))
+            check(qAbs(seam.first - 195) < 0.001 && qAbs(seam.second - 195) < 0.001,
+                  "Match each quarter waist after closing its darts");
+    }
+    skirt.dartLength = skirt.hipDepth;
+    check(!draftDress(bodice, skirt), "Reject a skirt dart extending to the hip level");
+}
+
 }
 
 int main() {
+    checkBodiceAndSleeve();
+    checkLowerBlocks();
     using namespace opc;
     PatternDocument document;
     document.pieces().append({"Front", 5});

@@ -1,5 +1,6 @@
 #include "TemplateWizard.h"
 #include "PatternTemplates.h"
+#include "BodiceDraft.h"
 
 #include <QComboBox>
 #include <QCoreApplication>
@@ -8,6 +9,10 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QWizard>
+#include <QScrollArea>
+#include <QVBoxLayout>
+
+#include <cmath>
 
 std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     QWizard wizard(parent);
@@ -15,21 +20,32 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     wizard.setWindowTitle(tr("New Pattern from Template"));
 
     auto* templatePage = new QWizardPage;
-    templatePage->setTitle(tr("Choose a skirt"));
+    templatePage->setTitle(tr("Choose a template"));
     auto* selection = new QFormLayout(templatePage);
+    enum Template { Gathered, ALine, Bodice, Trousers, Dress };
     auto* style = new QComboBox;
     style->addItem(tr("Gathered skirt"));
     style->addItem(tr("A-line skirt"));
+    style->addItem(tr("Bodice and set-in sleeve (fitting block)"));
+    style->addItem(tr("Trousers (fitting block)"));
+    style->addItem(tr("Sleeveless dress with waist seam (fitting block)"));
     selection->addRow(tr("Template"), style);
-    auto* note = new QLabel(tr("Both templates use two identical panels and a fold-over elastic casing. "
-                               "The new pattern will open as an editable parametric draft."));
+    auto* note = new QLabel(tr("All templates open as editable parametric drafts. "
+                               "Fitting blocks use sewing lines and are intended for a fitting sample."));
     note->setWordWrap(true);
     selection->addRow(note);
     wizard.addPage(templatePage);
 
     auto* measurementsPage = new QWizardPage;
     measurementsPage->setTitle(tr("Enter measurements"));
-    auto* form = new QFormLayout(measurementsPage);
+    auto* pageLayout = new QVBoxLayout(measurementsPage);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setMinimumHeight(260);
+    auto* fields = new QWidget;
+    auto* form = new QFormLayout(fields);
+    scroll->setWidget(fields);
+    pageLayout->addWidget(scroll);
     const auto measurement = [&](const QString& label, double initial, double minimum, double maximum) {
         auto* input = new QDoubleSpinBox;
         input->setRange(minimum, maximum);
@@ -44,25 +60,137 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     auto* ease = measurement(tr("Extra opening circumference"), 350, 40, 1500);
     auto* flare = measurement(tr("Extra hem circumference"), 400, 40, 2000);
     const auto* casing = measurement(tr("Casing depth"), 35, 15, 100);
-    form->setRowVisible(flare, false);
-    QObject::connect(style, &QComboBox::currentIndexChanged, &wizard, [=](int index) {
-        form->setRowVisible(flare, index == 1);
-        ease->setValue(index == 1 ? 80 : 350);
-    });
     auto* instructions = new QLabel(tr("Cut two panels. Join the side seams, turn down the top at the "
                                        "casing fold, and fit the elastic at the waist. "
                                        "The cutting contour includes a 10 mm allowance."));
     instructions->setWordWrap(true);
     form->addRow(instructions);
+
+    const int fittingStart = form->rowCount();
+    auto* fittingNote = new QLabel(tr("Make a fitting sample before adding allowances. "
+                                      "Check joining seams again after editing measurements or grading."));
+    fittingNote->setWordWrap(true);
+    form->addRow(fittingNote);
+    const int bodiceStart = form->rowCount();
+    const auto* bust = measurement(tr("Bust circumference"), 920, 400, 2000);
+    auto* waist = measurement(tr("Waist circumference"), 740, 350, 2000);
+    const auto* bodiceLength = measurement(tr("Neck-side level to waist"), 420, 200, 800);
+    const auto* armhole = measurement(tr("Neck-side level to underarm"), 210, 100, 450);
+    const auto* neckWidth = measurement(tr("Center to neck-side point, horizontal"), 68, 25, 180);
+    const auto* frontNeck = measurement(tr("Front neckline depth"), 75, 20, 250);
+    const auto* backNeck = measurement(tr("Back neckline depth"), 22, 5, 150);
+    const auto* shoulderRun = measurement(tr("Shoulder run, horizontal"), 116, 45, 200);
+    const auto* shoulderDrop = measurement(tr("Shoulder drop, vertical"), 38, 5, 100);
+    const auto* bustEase = measurement(tr("Bust wearing ease"), 60, 0, 300);
+    auto* waistEase = measurement(tr("Waist wearing ease"), 40, 0, 300);
+    const auto* dart = measurement(tr("Waist dart length"), 115, 20, 250);
+    const int sleeveStart = form->rowCount();
+    const auto* upperArm = measurement(tr("Upper arm circumference"), 300, 120, 800);
+    const auto* upperArmEase = measurement(tr("Upper arm wearing ease"), 50, 0, 200);
+    const auto* cuff = measurement(tr("Finished sleeve opening circumference"), 220, 100, 700);
+    const auto* sleeveLength = measurement(tr("Sleeve crown to hem"), 570, 180, 900);
+    const auto* capHeight = measurement(tr("Sleeve cap height"), 87, 30, 350);
+    const auto* capEase = measurement(tr("Target ease per cap section"), 4, 0, 30);
+    const auto* tolerance = measurement(tr("Tolerance per cap section"), 3, 0, 30);
+
+    const int hipStart = form->rowCount();
+    const auto* fittedHip = measurement(tr("Hip circumference"), 1000, 350, 2500);
+    const auto* hipEase = measurement(tr("Hip wearing ease"), 60, 0, 300);
+    const auto* hipDepth = measurement(tr("Waist to hip level"), 195, 50, 400);
+    const auto* lowerDart = measurement(tr("Lower waist dart length"), 100, 20, 250);
+
+    const int trousersStart = form->rowCount();
+    const auto* rise = measurement(tr("Waist to seat level"), 270, 100, 600);
+    const auto* kneeDepth = measurement(tr("Waist to knee level"), 600, 200, 1000);
+    const auto* trouserLength = measurement(tr("Waist to trouser hem"), 1030, 300, 1600);
+    const auto* knee = measurement(tr("Finished knee circumference per leg"), 460, 100, 1200);
+    const auto* hem = measurement(tr("Finished hem circumference per leg"), 380, 100, 1200);
+
+    const int dressStart = form->rowCount();
+    const auto* skirtLength = measurement(tr("Waist to dress hem"), 620, 200, 1500);
+    const auto* hemFlare = measurement(tr("Extra dress hem circumference beyond eased hip"), 160, 0, 1500);
+
+    const auto showFields = [=](int index) {
+        for (int row = 0; row < form->rowCount(); ++row) {
+            const bool visible = row < fittingStart ? index < Bodice
+                : row < bodiceStart ? index >= Bodice
+                : row < sleeveStart ? index == Bodice || index == Dress
+                : row < hipStart ? index == Bodice
+                : row < trousersStart ? index == Trousers || index == Dress
+                : row < dressStart ? index == Trousers : index == Dress;
+            form->setRowVisible(row, visible);
+        }
+        form->setRowVisible(waist, index >= Bodice);
+        form->setRowVisible(waistEase, index >= Bodice);
+        form->setRowVisible(flare, index == ALine);
+        if (index < Bodice)
+            ease->setValue(index == ALine ? 80 : 350);
+    };
+    QObject::connect(style, &QComboBox::currentIndexChanged, &wizard, showFields);
+    showFields(0);
     wizard.addPage(measurementsPage);
 
-    if (wizard.exec() != QDialog::Accepted)
-        return std::nullopt;
-    QString error;
-    auto document = opc::draftPullOnSkirt(style->currentIndex() == 1 ? opc::SkirtStyle::ALine : opc::SkirtStyle::Gathered,
-                                        {hip->value(), length->value(), ease->value(), flare->value(), casing->value()},
-                                        &error);
-    if (!document)
+    while (wizard.exec() == QDialog::Accepted) {
+        QString error;
+        const int index = style->currentIndex();
+        if (index < Bodice) {
+            auto document = opc::draftPullOnSkirt(
+                index == ALine ? opc::SkirtStyle::ALine : opc::SkirtStyle::Gathered,
+                {hip->value(), length->value(), ease->value(), flare->value(), casing->value()}, &error);
+            if (document)
+                return document;
+        } else if (index == Trousers) {
+            if (auto document = opc::draftTrousers({
+                    waist->value(), fittedHip->value(), waistEase->value(), hipEase->value(),
+                    hipDepth->value(), rise->value(), kneeDepth->value(), trouserLength->value(),
+                    knee->value(), hem->value(), lowerDart->value()
+                }, &error))
+                return document;
+        } else {
+            const opc::BodiceMeasurements bodice{
+                bust->value(), waist->value(), bodiceLength->value(), armhole->value(),
+                neckWidth->value(), frontNeck->value(), backNeck->value(), shoulderRun->value(),
+                shoulderDrop->value(), bustEase->value(), waistEase->value(), dart->value(),
+                upperArm->value(), upperArmEase->value(), cuff->value(), sleeveLength->value(),
+                capHeight->value()
+            };
+            if (index == Dress) {
+                if (auto document = opc::draftDress(bodice, {
+                        fittedHip->value(), hipEase->value(), hipDepth->value(), skirtLength->value(),
+                        hemFlare->value(), lowerDart->value()
+                    }, &error))
+                    return document;
+                QMessageBox::warning(parent, wizard.windowTitle(), error);
+                continue;
+            }
+            auto document = opc::draftBodiceAndSleeve(bodice, &error);
+            if (document) {
+                const auto lengths = opc::measureBodiceSeams(*document);
+                if (lengths) {
+                    const double front = lengths->frontCap - lengths->frontArmhole;
+                    const double back = lengths->backCap - lengths->backArmhole;
+                    const bool within = std::abs(front - capEase->value()) <= tolerance->value()
+                        && std::abs(back - capEase->value()) <= tolerance->value();
+                    const auto mm = [](double value) { return QString::number(value, 'f', 2); };
+                    const auto summary = tr("Front: armhole %1 mm, cap %2 mm, difference %3 mm.\n"
+                                            "Back: armhole %4 mm, cap %5 mm, difference %6 mm.\n\n"
+                                            "Target per section: %7 ± %8 mm. %9\n\n"
+                                            "Open this fitting block?")
+                        .arg(mm(lengths->frontArmhole), mm(lengths->frontCap), mm(front),
+                             mm(lengths->backArmhole), mm(lengths->backCap), mm(back),
+                             mm(capEase->value()), mm(tolerance->value()),
+                             within ? tr("Both sections are within tolerance.")
+                                    : tr("At least one section is outside tolerance."));
+                    if (QMessageBox::question(parent, wizard.windowTitle(), summary,
+                                              QMessageBox::Yes | QMessageBox::No,
+                                              within ? QMessageBox::Yes : QMessageBox::No) == QMessageBox::Yes)
+                        return document;
+                    continue;
+                }
+                error = tr("Could not measure both sleeve cap sections and armholes.");
+            }
+        }
         QMessageBox::warning(parent, wizard.windowTitle(), error);
-    return document;
+    }
+    return std::nullopt;
 }

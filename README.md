@@ -1,4 +1,4 @@
-# SOFIT 1.4 — independent CAD prototype
+# SOFIT 1.5 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -100,6 +100,129 @@ Edit or delete generated objects in the draft editor. Piece and layer assignment
 4. Join the side seams, finish the raw edges, and turn the top down along the casing fold. Fit the elastic at the waist and finish the hem. Check the fit with a test garment before cutting final fabric.
 
 To make another size, add `hip` and optionally `length` in the size table. Opening ease, flare and casing depth are shared draft parameters.
+
+### Bodice and set-in sleeve fitting block
+
+In **Pattern → New Pattern from Template…**, choose **Bodice and set-in sleeve (fitting block)**.
+Enter the dimensions and wearing ease in millimetres. Use the waist level and the level of the
+neck-side shoulder point as horizontal references. Measure circumference around the whole body
+and horizontal shoulder run from the neck-side point to the shoulder tip. Measure shoulder drop
+vertically between those two points. Sleeve length is measured from the crown to the finished
+opening. Opening circumference includes the ease needed for the hand or a planned closure.
+
+The draft uses its own geometric construction. Coordinates below are local to each piece,
+with horizontal distance increasing away from the center on each bodice half and vertical
+distance increasing downward from the neck-side shoulder level.
+
+1. Use quarter bust width **C = (bust + bust ease) / 4** on each half. Compute quarter waist width
+   **W = (waist + waist ease) / 4** and suppression **D = C − W**. Place the underarm at
+   **(C, armhole depth)** and the side waist at **(C − D/2, bodice length)**. Use one waist dart
+   centered on the waist edge of each half with total intake **D/2** and the entered dart length.
+   The two sides have matching seam lengths. Closing the darts gives four quarters of width W.
+2. Draw the neckline as a quadratic Bézier from **(0, neckline depth)** to **(neck width, 0)**
+   with control point **(neck width, neckline depth)**. The front and back use their respective
+   neckline depths. From the neck-side point, draw the shoulder by the entered run and drop.
+   Draw each armhole from the shoulder tip to the underarm as a quadratic Bézier. The control
+   point is at underarm level and its horizontal position is 8 mm inside the front shoulder tip
+   and 2 mm outside the back shoulder tip.
+3. For the sleeve, put the crown at **(0, 0)** and put the underarm points at **(−H, cap height)**
+   and **(H, cap height)**, where **H = (upper arm + upper arm ease) / 2**. Use two quadratic
+   Béziers with a common horizontal tangent at the crown and controls at **(−0.70H, 0)** for
+   the front and **(0.55H, 0)** for the back. Join the underarms to the corresponding sides of
+   a centered opening at the entered sleeve length using two equal-length straight edges.
+4. The wizard reports **cap length minus armhole length** for each half separately and compares
+   each value to the entered target and tolerance. Decline the preview to adjust cap height
+   or the other inputs. The default target is a starting value for the built-in example.
+   Choose the ease for the intended fabric and check its distribution in the sample.
+   [Utah State University Extension, set-in sleeve judging guidance](https://extension.usu.edu/utah4h/files/fair-judging-manual.pdf)
+
+The wizard requires at least 6 mm waist suppression per quarter and at most 30% of quarter bust
+width, enough room below the underarm for the dart, a shoulder inside the bust width, and a cap
+that fits within the sleeve length. It checks that all three sewing contours close. The preset
+uses a 920 mm bust, 740 mm waist and 87 mm cap height. Equal-width front and back quarters and a
+shared shoulder-to-waist length approximate a balanced figure. Plan a fitting sample to adjust
+front/back balance, bust shaping, shoulder angle, armhole shape, and sleeve pitch. The block has
+waist darts only, with no separate bust dart, elbow shaping, closures or finishing details.
+
+The center edges of the bodice indicate folds. The sleeve is a mirrored pair. The drawing uses
+sewing lines with zero allowance. Add allowances after fitting, keeping the fold edges at zero.
+Keep the Construction layer visible to print or export the dart legs. Control points are also on
+that layer. The parts and formulas use the existing project format, and the drawing exports
+through the usual PDF and DXF commands. Edit the base inputs in the parametric draft or supply
+per-size overrides under **Sizes, Measurements and Grade Rules…**. After changing measurements
+or grading, recheck piece contours and both cap sections with **Check Fitting Block by Size…**. The wizard's
+drafting checks, target and tolerance apply only at creation.
+
+### Trouser fitting block
+
+Choose **Trousers (fitting block)** in the same wizard. Enter the waist and hip
+circumferences and wearing ease, four vertical distances from the waist (hip,
+seat, knee and hem), and the finished knee and hem circumference of **one leg**.
+The wizard creates separate front and back sewing contours, each for a mirrored
+pair. The seat and knee lines and waist dart legs are on the Construction layer.
+
+- For each half, start with eased quarter hip width **H = (hip + hip ease) / 4**.
+  Use eased quarter waist **W = (waist + waist ease) / 4** and suppression **D = H − W**.
+  The raw waist is **H − D/2**, with one centered dart of intake **D/2**. The
+  wizard requires suppression between 6 mm and 35% of H, and the dart must end
+  above the hip. A quadratic side seam blends the waist into the hip.
+- Extend the front seat **0.17H** and the back seat **0.31H** inward from the center
+  line. Each quadratic crotch curve joins that extension to the center at hip
+  height, with its control at center and seat height. Hip, seat, knee and hem
+  must occur in that order with clearance between levels.
+- The leg reference axis is midway between the outer seat point and the mean
+  crotch endpoint. The outer knee and hem sit one quarter of their entered
+  circumferences outside the axis. Each inner endpoint sits one quarter inside
+  the axis, shifted by the mean extension minus the piece's own extension.
+  The two panel widths therefore sum to the entered circumference at each level,
+  with more width in back. The matching segment vectors keep the front and back
+  inseams and side seams equal through the knee.
+
+The preset uses a level waist, proportional crotch extensions and straight
+segments below the seat. Check rise, crotch shape, thigh room, front/back
+balance, and knee and hem placement on a fitting sample. Add the waistband,
+closure, pockets and finishing details after fitting.
+
+### Sleeveless dress fitting block
+
+Choose **Sleeveless dress with waist seam (fitting block)**. The upper section
+reuses the bodice formulas above. The lower section uses two skirt halves on
+the fold with a waist seam. Use the same eased waist on all four pieces.
+
+- The skirt uses **H = (hip + hip ease) / 4** and suppression **D = H − W**, where
+  **W = (waist + waist ease) / 4**. Each waist edge is **H − D/2**, with a centered
+  dart of intake **D/2**. The sewn waist is **W** on each bodice and skirt half.
+  In this construction the dart legs closest to the fold sit at **W/2**, so
+  the closed dart locations meet across the waist seam.
+- From the waist, a quadratic side seam runs to the hip at width **H**, with its
+  control at width **H** and halfway down the hip depth. The side continues
+  straight to a hem of width **H + hem flare / 4**. Skirt suppression must be
+  between 6 mm and 35% of H, and the dart and hip levels must be above the hem.
+
+The default front and back skirt halves share their shaping. Adjust balance,
+sleeveless armhole fit, closure, and neckline and armhole finishing on a fitting
+sample. The fitting blocks use zero allowance, with center folds on all dress
+pieces. Review ease and fit on the intended figure before using the outlines to
+cut final fabric.
+
+### Check seams after grading
+
+With **Use size measurements in draft formulas** enabled, add overrides by
+measurement name in **Sizes, Measurements and Grade Rules…**. For trousers,
+typical overrides are `waist`, `hip`, `rise`, `knee_depth`, `length`, `knee` and
+`hem`. For the dress, use `bust`, `waist`, `hip`, `bodice_length`, `hip_depth` and
+`skirt_length` as needed. Read the complete names in **Parametric Draft…**.
+
+Open **Pattern → Seams → Check Fitting Block by Size…**. Select the base or
+any named size. The report measures that size's final geometry, including manual
+grade offsets, and flags invalid contours, missing seams and differences outside
+the selected tolerance. It checks shoulders and bodice sides, both cap sections
+and the sleeve seam, trouser sides and both inseam sections, and the dress
+skirt sides and front/back waist lengths after subtracting dart intake.
+The sleeve target and tolerance are temporary. Formula and size edits use the
+general draft evaluator, so the wizard's input ranges apply at creation.
+Repeat the contour and seam checks for every size before PDF or DXF export in
+millimeters.
 
 ## Pattern pieces
 
