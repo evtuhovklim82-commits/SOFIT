@@ -1,4 +1,4 @@
-# SOFIT 1.0 — independent CAD prototype
+# SOFIT 1.2 — independent CAD prototype
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -50,6 +50,14 @@ Use `macdeployqt` when packaging the app for distribution.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
 - SOFIT opens `.sofit` formats 1–9 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
+
+## Modeling tools
+
+- **Modeling → Split Line or Curve…** divides a line or quadratic Bézier curve into two edges with a shared endpoint. The percentage sets the distance along a line or the Bézier parameter on a curve.
+- **Modeling → Join Free Endpoints** moves the unique closest pair of free endpoints to their midpoint when the two edges share a layer and piece assignment and the gap is at most 5 mm.
+- **Dart** takes the first leg end, the apex, and the second leg end. It previews the legs, adds them to the Construction layer, and records both legs as one undoable action.
+
+Split and join work on manually drawn edges in pieces without point grading rules, or on unassigned edges. Dart creates construction geometry for manual modeling.
 
 ## Parametric drafting
 

@@ -8,6 +8,7 @@
 #include "ProductionDialogs.h"
 #include "TemplateWizard.h"
 #include "EntityPath.h"
+#include "Modeling.h"
 #include <QPixmap>
 #include <QCheckBox>
 #include <QSpinBox>
@@ -95,17 +96,12 @@ private:
     PatternView* redraw_;
 };
 
-class MoveCommand : public QUndoCommand {
+class ReplaceEntityCommand : public QUndoCommand {
 public:
-    MoveCommand(opc::PatternDocument& document, PatternView& view, qsizetype index,
-                const QPointF& offset, const QString& text)
+    ReplaceEntityCommand(opc::PatternDocument& document, PatternView& view, qsizetype index,
+                         const opc::Entity& replacement, const QString& text)
         : QUndoCommand(text), document_(document), view_(view), index_(index),
-          before_(document.entities()[index]), after_(before_) {
-        after_.a += offset;
-        after_.b += offset;
-        if (after_.shape == opc::Shape::Curve)
-            after_.control += offset;
-    }
+          before_(document.entities()[index]), after_(replacement) {}
 
     void undo() override { apply(before_); }
     void redo() override { apply(after_); }
@@ -234,6 +230,20 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     connect(&scene_, &QGraphicsScene::selectionChanged, this, updateDelete);
     connect(&undo_, &QUndoStack::indexChanged, this, updateDelete);
     connect(&undo_, &QUndoStack::cleanChanged, this, [this](bool clean) { setWindowModified(!clean); });
+
+    auto* modeling = menuBar()->addMenu(tr("&Modeling"));
+    auto* split = modeling->addAction(tr("Split Line or Curve…"), this, &MainWindow::splitSelectedEdge);
+    auto* join = modeling->addAction(tr("Join Free Endpoints"), this, &MainWindow::joinSelectedEdges);
+    join->setToolTip(tr("Select two edges on the same layer and piece. Closes a gap of up to 5 mm."));
+    connect(modeling, &QMenu::aboutToShow, this, [this, split, join] {
+        const auto selected = selectedObjects();
+        const bool edges = std::ranges::all_of(selected, [this](qsizetype index) {
+            const auto shape = doc_.entities()[index].shape;
+            return shape == opc::Shape::Line || shape == opc::Shape::Curve;
+        });
+        split->setEnabled(edges && selected.size() == 1);
+        join->setEnabled(edges && selected.size() == 2);
+    });
 
     auto* pattern = menuBar()->addMenu(tr("&Pattern"));
     pattern->addAction(tr("Create Piece from Selection…"), this, &MainWindow::createPiece);
@@ -373,6 +383,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     addTool(tr("Rectangle"), PatternView::Tool::Rectangle, tr("Pick opposite corners"));
     addTool(tr("Circle"), PatternView::Tool::Circle, tr("Pick the center, then a point on the circle"));
     addTool(tr("Curve"), PatternView::Tool::Curve, tr("Pick both endpoints, then the Bézier control point"));
+    addTool(tr("Dart"), PatternView::Tool::Dart, tr("Pick the first leg end, apex, then the second leg end"));
     addTool(tr("Measure"), PatternView::Tool::Measure, tr("Pick two points to measure the distance"));
 
     auto* projectToolbar = addToolBar(tr("Project and View"));
@@ -389,6 +400,17 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     projectToolbar->addAction(objectSnap);
     projectToolbar->addAction(fitAction);
     connect(view_, &PatternView::entityDrawn, this, &MainWindow::addEntity);
+    connect(view_, &PatternView::dartDrawn, this, [this](const opc::Entity& first, const opc::Entity& second) {
+        undo_.beginMacro(tr("Draw Dart"));
+        addEntity(first);
+        addEntity(second);
+        undo_.endMacro();
+        if (!doc_.layerVisible(opc::Layer::Construction))
+            statusBar()->showMessage(tr("Dart added. Show the Construction layer to see it."), 5000);
+    });
+    connect(view_, &PatternView::dartRejected, this, [this] {
+        statusBar()->showMessage(tr("Choose a distinct leg end so the three points form a triangle."), 5000);
+    });
 
     connect(view_, &PatternView::entityMoved, this, &MainWindow::moveEntity);
     connect(view_, &PatternView::measured, this, [this](qreal distance) {
@@ -736,7 +758,12 @@ void MainWindow::managePiece() {
 void MainWindow::moveEntity(qsizetype index, const QPointF& offset) {
     if (!doc_.entities()[index].draftName.isEmpty())
         return;
-    undo_.push(new MoveCommand(doc_, *view_, index, offset, tr("Move Object")));
+    auto moved = doc_.entities()[index];
+    moved.a += offset;
+    moved.b += offset;
+    if (moved.shape == opc::Shape::Curve)
+        moved.control += offset;
+    undo_.push(new ReplaceEntityCommand(doc_, *view_, index, moved, tr("Move Object")));
 }
 
 void MainWindow::addEntity(const opc::Entity& entity) {
@@ -757,6 +784,98 @@ void MainWindow::deleteSelection() {
     undo_.beginMacro(tr("Delete Objects"));
     for (const auto index : selected)
         undo_.push(new EntityCommand(doc_, *view_, index, doc_.entities().at(index), false, tr("Delete Object")));
+    undo_.endMacro();
+}
+
+bool MainWindow::canModelEdge(const opc::Entity& edge) {
+    if (!edge.draftName.isEmpty()) {
+        statusBar()->showMessage(tr("Edit formula-driven edges in Pattern → Parametric Draft."), 5000);
+        return false;
+    }
+    if (edge.piece >= 0 && std::ranges::any_of(doc_.production().rules, [&edge](const auto& rule) {
+            return rule.piece == edge.piece;
+        })) {
+        statusBar()->showMessage(tr("This operation is unavailable on pieces with point grading rules."), 5000);
+        return false;
+    }
+    return true;
+}
+
+void MainWindow::splitSelectedEdge() {
+    const auto selected = selectedObjects();
+    if (selected.size() != 1)
+        return;
+    const auto index = selected.front();
+    const auto edge = doc_.entities()[index];
+    if (!canModelEdge(edge))
+        return;
+
+    const auto title = tr("Split Line or Curve");
+    const auto label = edge.shape == opc::Shape::Curve
+        ? tr("Bézier parameter from start (%)")
+        : tr("Distance from start (%)");
+    bool accepted = false;
+    const double percent = QInputDialog::getDouble(this, title, label, 50, 0.01, 99.99, 2, &accepted);
+    if (!accepted)
+        return;
+    const auto parts = opc::splitEdge(edge, percent / 100);
+    if (!parts) {
+        statusBar()->showMessage(tr("A split must produce two nondegenerate edges."), 5000);
+        return;
+    }
+
+    if (edge.piece >= 0 && edge.layer == opc::Layer::Main) {
+        auto trial = doc_;
+        trial.replace(index, (*parts)[0]);
+        trial.insert(index + 1, (*parts)[1]);
+        const auto before = pieces_[edge.piece];
+        const auto after = opc::analyzePiece(trial, edge.piece);
+        if (before.error == opc::ContourError::None
+            && (after.error != opc::ContourError::None || (!before.allowanceFailed && after.allowanceFailed))) {
+            statusBar()->showMessage(tr("This split would invalidate the contour or its seam allowance."), 5000);
+            return;
+        }
+    }
+
+    const bool visible = view_->entityVisible(index);
+    undo_.beginMacro(title);
+    undo_.push(new ReplaceEntityCommand(doc_, *view_, index, (*parts)[0], title));
+    undo_.push(new EntityCommand(doc_, *view_, index + 1, (*parts)[1], true, title));
+    view_->setEntityVisible(index + 1, visible);
+    undo_.endMacro();
+}
+
+void MainWindow::joinSelectedEdges() {
+    const auto selected = selectedObjects();
+    if (selected.size() != 2)
+        return;
+    const auto first = selected[0];
+    const auto second = selected[1];
+    const auto edge = doc_.entities()[first];
+    if (!canModelEdge(edge) || !canModelEdge(doc_.entities()[second]))
+        return;
+    const auto joined = opc::joinEdges(doc_, first, second, 5);
+    if (!joined) {
+        statusBar()->showMessage(tr("Select two edges on the same piece and layer with a unique nearest pair of free ends within 5 mm."), 5000);
+        return;
+    }
+
+    if (edge.piece >= 0 && edge.layer == opc::Layer::Main) {
+        auto trial = doc_;
+        trial.replace(first, (*joined)[0]);
+        trial.replace(second, (*joined)[1]);
+        const auto result = opc::analyzePiece(trial, edge.piece);
+        if ((result.error != opc::ContourError::None && result.error != opc::ContourError::Open)
+            || result.allowanceFailed) {
+            statusBar()->showMessage(tr("This join would produce an invalid contour or seam allowance."), 5000);
+            return;
+        }
+    }
+
+    const auto title = tr("Join Free Endpoints");
+    undo_.beginMacro(title);
+    undo_.push(new ReplaceEntityCommand(doc_, *view_, first, (*joined)[0], title));
+    undo_.push(new ReplaceEntityCommand(doc_, *view_, second, (*joined)[1], title));
     undo_.endMacro();
 }
 

@@ -27,6 +27,9 @@ private:
     void addEntity(const opc::Entity& entity);
     void deleteSelection();
     void exactInput();
+    void splitSelectedEdge();
+    void joinSelectedEdges();
+    bool canModelEdge(const opc::Entity& edge);
     void refreshObjects();
     void refreshPieceDisplay();
     opc::PatternDocument exportPattern(const QString& size, QVector<bool>& visibility,

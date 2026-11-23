@@ -11,7 +11,7 @@ class QGraphicsPathItem;
 class PatternView : public QGraphicsView {
     Q_OBJECT
 public:
-    enum class Tool { Select, Point, Line, Rectangle, Circle, Curve, Measure };
+    enum class Tool { Select, Point, Line, Rectangle, Circle, Curve, Dart, Measure };
     explicit PatternView(QGraphicsScene* scene, QWidget* parent = nullptr);
     void setTool(Tool tool);
     Tool tool() const { return tool_; }
@@ -34,6 +34,8 @@ public:
 
 signals:
     void entityDrawn(const opc::Entity& entity);
+    void dartDrawn(const opc::Entity& first, const opc::Entity& second);
+    void dartRejected();
     void cursorPositionChanged(const QPointF& position);
     void cursorLeftCanvas();
     void zoomChanged(qreal pixelsPerMillimeter);
@@ -64,7 +66,7 @@ private:
     QPoint lastPanPosition_;
     QPointF cursorScenePosition_;
     std::optional<QPointF> start_;
-    std::optional<QPointF> curveEnd_;
+    std::optional<QPointF> secondPoint_;
     std::optional<QPointF> dragStart_;
     QPoint dragPressPosition_;
     qsizetype dragIndex_ = -1;

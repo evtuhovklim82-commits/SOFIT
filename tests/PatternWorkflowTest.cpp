@@ -15,6 +15,7 @@
 #include <QGraphicsItem>
 #include <QGraphicsScene>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QInputDialog>
@@ -90,11 +91,50 @@ int overlayCount(const PatternView& view) {
     }
     return count;
 }
+
+void testModelingWorkflow() {
+    MainWindow window;
+    window.show();
+    auto& view = *window.findChild<PatternView*>();
+    auto& tree = *window.findChild<QTreeWidget*>();
+    view.entityDrawn({opc::Shape::Curve, {0, 0}, {100, 0}, {50, 40}});
+    tree.topLevelItem(0)->setSelected(true);
+    runDialog<QInputDialog>(action(window, "Split Line or Curve…"), [](QInputDialog& dialog) {
+        dialog.setDoubleValue(30);
+        dialog.accept();
+    });
+    check(tree.topLevelItemCount() == 2, "Split curve in the editor");
+    action(window, "Undo Split Line or Curve").trigger();
+    check(tree.topLevelItemCount() == 1, "Undo split atomically");
+    action(window, "Redo Split Line or Curve").trigger();
+    check(tree.topLevelItemCount() == 2, "Redo split atomically");
+
+    action(window, "Dart").trigger();
+    view.setSnapToObjects(false);
+    const auto click = [&view](QPointF scenePoint) {
+        const QPointF local(view.mapFromScene(scenePoint));
+        const QPointF global(view.viewport()->mapToGlobal(local.toPoint()));
+        QMouseEvent event(QEvent::MouseButtonPress, local, global,
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(view.viewport(), &event);
+    };
+    click({0, 50});
+    click({10, 90});
+    click({20, 50});
+    check(tree.topLevelItemCount() == 4 && tree.topLevelItem(2)->text(3) == "Construction"
+          && tree.topLevelItem(3)->text(3) == "Construction", "Draw a dart on the canvas");
+    action(window, "Undo Draw Dart").trigger();
+    check(tree.topLevelItemCount() == 2, "Undo both dart legs at once");
+    action(window, "Redo Draw Dart").trigger();
+    check(tree.topLevelItemCount() == 4, "Redo both dart legs at once");
+}
+
 }
 
 int main(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
+    testModelingWorkflow();
     MainWindow window;
     window.show();
 

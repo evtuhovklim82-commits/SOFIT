@@ -1,3 +1,4 @@
+#include "Modeling.h"
 #include "EntityPath.h"
 #include "PatternView.h"
 #include <QGraphicsPathItem>
@@ -206,14 +207,22 @@ void PatternView::cancelDrawing() {
         dragIndex_ = -1;
     }
     start_.reset();
-    curveEnd_.reset();
+    secondPoint_.reset();
     delete preview_;
     preview_ = nullptr;
 }
 
 void PatternView::updatePreview() {
     if (preview_) {
-        preview_->setPath(viewEntityPath(draftEntity(drawingPoint(cursorScenePosition_))));
+        const auto point = drawingPoint(cursorScenePosition_);
+        if (tool_ == Tool::Dart && secondPoint_) {
+            QPainterPath legs(*start_);
+            legs.lineTo(*secondPoint_);
+            legs.lineTo(point);
+            preview_->setPath(legs);
+        } else {
+            preview_->setPath(viewEntityPath(draftEntity(point)));
+        }
     }
 }
 
@@ -223,8 +232,8 @@ opc::Entity PatternView::draftEntity(const QPointF& point) const {
     case Tool::Rectangle: return {Shape::Rectangle, *start_, point};
     case Tool::Circle: return {Shape::Circle, *start_, point};
     case Tool::Curve:
-        if (curveEnd_)
-            return {Shape::Curve, *start_, *curveEnd_, point};
+        if (secondPoint_)
+            return {Shape::Curve, *start_, *secondPoint_, point};
         break;
     default: break;
     }
@@ -438,9 +447,18 @@ void PatternView::mousePressEvent(QMouseEvent* event) {
             updatePreview();
         } else {
             const auto entity = draftEntity(point);
-            if (tool_ == Tool::Curve && !curveEnd_ && *start_ != point) {
-                curveEnd_ = point;
+            if ((tool_ == Tool::Curve || tool_ == Tool::Dart) && !secondPoint_ && *start_ != point) {
+                secondPoint_ = point;
                 updatePreview();
+            } else if (tool_ == Tool::Dart) {
+                if (secondPoint_) {
+                    if (const auto legs = opc::dartLegs(*start_, *secondPoint_, point)) {
+                        cancelDrawing();
+                        emit dartDrawn((*legs)[0], (*legs)[1]);
+                    } else {
+                        emit dartRejected();
+                    }
+                }
             } else if (tool_ == Tool::Measure) {
                 const qreal distance = QLineF(*start_, point).length();
                 cancelDrawing();

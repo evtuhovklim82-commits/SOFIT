@@ -1,8 +1,10 @@
 #include "PieceGeometry.h"
+#include "Modeling.h"
 #include "PieceMarkings.h"
 #include "PatternDxf.h"
 
 #include <QFile>
+#include <QLineF>
 #include <QTemporaryDir>
 #include <cmath>
 #include <cstdlib>
@@ -189,8 +191,63 @@ void testFiles() {
 }
 }
 
+namespace {
+void testModeling() {
+    const Entity curve{Shape::Curve, {0, 0}, {100, 5}, {20, 80}, 0, Layer::Construction};
+    const auto split = splitEdge(curve, 0.3);
+    check(split.has_value(), "Split a quadratic curve");
+    const auto pointAt = [](const Entity& edge, double t) {
+        return (1 - t) * (1 - t) * edge.a + 2 * t * (1 - t) * edge.control + t * t * edge.b;
+    };
+    check((*split)[0].b == (*split)[1].a, "Split endpoints are identical");
+    for (int i = 0; i <= 10; ++i) {
+        const double t = i / 10.0;
+        check(QLineF(pointAt((*split)[0], t), pointAt(curve, 0.3 * t)).length() < 1e-9
+              && QLineF(pointAt((*split)[1], t), pointAt(curve, 0.3 + 0.7 * t)).length() < 1e-9,
+              "Split preserves the curve");
+    }
+    check((*split)[1].piece == 0 && (*split)[1].layer == Layer::Construction,
+          "Split preserves piece and layer");
+    check(!splitEdge(curve, 0) && !splitEdge(curve, 1), "Reject endpoint splits");
+
+    auto document = polygon({{0, 0}, {100, 0}, {100, 40}, {0, 40}}, 10);
+    auto first = document.entities()[0];
+    first.b = {98, 0};
+    document.replace(0, first);
+    check(analyzePiece(document, 0).error == ContourError::Open, "Fixture has a gap");
+    check(!joinEdges(document, 0, 1, 1), "Reject a gap outside tolerance");
+    const auto join = joinEdges(document, 0, 1, 5);
+    check(join.has_value() && (*join)[0].b == QPointF(99, 0)
+          && (*join)[0].b == (*join)[1].a, "Join endpoints at their midpoint");
+    document.replace(0, (*join)[0]);
+    document.replace(1, (*join)[1]);
+    const auto closed = analyzePiece(document, 0);
+    check(closed.error == ContourError::None && !closed.allowance.isEmpty(),
+          "Joining closes the contour and restores its allowance");
+
+    const auto line = splitEdge(document.entities()[0], 0.5);
+    check(line.has_value() && (*line)[0].b == QPointF(49.5, 0), "Split a line by distance");
+    document.replace(0, (*line)[0]);
+    document.insert(1, (*line)[1]);
+    const auto subdivided = analyzePiece(document, 0);
+    check(subdivided.error == ContourError::None && !subdivided.allowance.isEmpty()
+          && near(closed.perimeterMm, subdivided.perimeterMm), "Split preserves the closed contour");
+
+    PatternDocument ambiguous;
+    ambiguous.insert(0, {Shape::Line, {0, 0}, {0, 20}});
+    ambiguous.insert(1, {Shape::Line, {2, 0}, {2, 20}});
+    check(!joinEdges(ambiguous, 0, 1, 5), "Reject two equally likely joins");
+    const auto dart = dartLegs({0, 0}, {5, 20}, {10, 0});
+    check(dart.has_value() && (*dart)[0].b == (*dart)[1].a
+          && (*dart)[0].layer == Layer::Construction && (*dart)[1].layer == Layer::Construction,
+          "Dart creates two construction legs with a shared apex");
+    check(!dartLegs({0, 0}, {5, 0}, {10, 0}), "Reject a collinear dart");
+}
+}
+
 int main() {
     testLines();
     testCurves();
     testFiles();
+    testModeling();
 }
