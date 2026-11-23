@@ -36,13 +36,13 @@ open build/sofit.app
 Use `macdeployqt` when packaging the app for distribution.
 
 ## Features
-- Two clicks create a segment; right-click cancels.
-- Mouse wheel zooms around the cursor; dragging with the middle button pans the canvas.
-- The status bar shows the cursor's scene X/Y coordinates in millimeters.
-- **View → Snap to Grid** aligns line endpoints to the nearest 10 mm grid intersection at any zoom level. Snap starts off.
-- New/Open/Save (`.sofit` JSON format) and Export SVG.
-- Can read legacy `.opcad` files from the initial prototype; newly saved projects use `.sofit`.
-- No undo, parametric drafting, GRAFIS file compatibility, or unsaved-change warning yet.
+- Choose **Point**, **Line**, or **Rectangle** in the toolbar. A point takes one click. A line takes two endpoints and a rectangle takes two opposite corners. Right-click or press Esc to cancel.
+- Open **Exact Input** (I) to enter coordinates in millimeters. For a line you can also enter the start, length, and angle in degrees clockwise from +X. The canvas uses +Y down.
+- **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
+- Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
+- The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
+- Save all three kinds of objects in a `.sofit` file or export them to SVG. SOFIT also opens version 1 `.sofit` and legacy `.opcad` drawings. Saving uses version 2.
+- SOFIT prompts to save changes before replacing or closing a modified drawing.
 
 ## Licensing/legal
 Code is intended for GPLv3 distribution, but check and include the complete GPLv3 license text before publishing. Qt library license obligations apply. Check SOFIT trademark availability before public branding. Independent implementation only.

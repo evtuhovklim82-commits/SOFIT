@@ -1,0 +1,3 @@
+# Hashes of file build rules.
+ccae413d37bfea33944d57587f25cefd CMakeFiles/sofit_autogen
+a2e7013ba6a777c08a18cc4d3218672f sofit_autogen/timestamp

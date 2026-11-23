@@ -1,0 +1,28 @@
+
+# Consider dependencies only in project.
+set(CMAKE_DEPENDS_IN_PROJECT_ONLY OFF)
+
+# The set of languages for which implicit dependencies are needed:
+set(CMAKE_DEPENDS_LANGUAGES
+  )
+
+# The set of dependency files which are needed:
+set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "/mnt/A/SOFIT/build/sofit_autogen/mocs_compilation.cpp" "CMakeFiles/sofit.dir/sofit_autogen/mocs_compilation.cpp.o" "gcc" "CMakeFiles/sofit.dir/sofit_autogen/mocs_compilation.cpp.o.d"
+  "/mnt/A/SOFIT/src/app/main.cpp" "CMakeFiles/sofit.dir/src/app/main.cpp.o" "gcc" "CMakeFiles/sofit.dir/src/app/main.cpp.o.d"
+  "/mnt/A/SOFIT/src/core/PatternDocument.cpp" "CMakeFiles/sofit.dir/src/core/PatternDocument.cpp.o" "gcc" "CMakeFiles/sofit.dir/src/core/PatternDocument.cpp.o.d"
+  "/mnt/A/SOFIT/src/ui/MainWindow.cpp" "CMakeFiles/sofit.dir/src/ui/MainWindow.cpp.o" "gcc" "CMakeFiles/sofit.dir/src/ui/MainWindow.cpp.o.d"
+  "/mnt/A/SOFIT/src/ui/PatternView.cpp" "CMakeFiles/sofit.dir/src/ui/PatternView.cpp.o" "gcc" "CMakeFiles/sofit.dir/src/ui/PatternView.cpp.o.d"
+  "" "sofit" "gcc" "CMakeFiles/sofit.dir/link.d"
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_LINKED_INFO_FILES
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_FORWARD_LINKED_INFO_FILES
+  )
+
+# Fortran module output directory.
+set(CMAKE_Fortran_TARGET_MODULE_DIR "")

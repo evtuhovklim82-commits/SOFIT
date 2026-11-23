@@ -10,6 +10,8 @@ qt_add_executable(sofit
     src/core/PatternDocument.h
     src/ui/MainWindow.cpp
     src/ui/MainWindow.h
+    src/ui/PatternView.cpp
+    src/ui/PatternView.h
 )
 target_link_libraries(sofit PRIVATE Qt6::Widgets)
 set_target_properties(sofit PROPERTIES WIN32_EXECUTABLE TRUE MACOSX_BUNDLE TRUE)
