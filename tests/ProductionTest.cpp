@@ -209,7 +209,8 @@ int main(int argc, char** argv) {
           && !legacyProduction.placements.front().fixedOrientation, "Use compatible defaults for legacy copies");
     QFile saved(file);
     check(saved.open(QIODevice::ReadOnly), "Read saved fixture");
-    auto legacyRoot = QJsonDocument::fromJson(saved.readAll()).object();
+    const auto envelope = QJsonDocument::fromJson(saved.readAll()).object();
+    auto legacyRoot = QJsonDocument::fromJson(envelope.value("payload").toString().toUtf8()).object();
     saved.close();
     legacyRoot["version"] = 6;
     legacyRoot["production"] = version6;

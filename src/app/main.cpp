@@ -53,5 +53,7 @@ int main(int argc, char** argv) {
     window.show();
     if (smoke)
         QTimer::singleShot(250, &app, &QApplication::quit);
+    else
+        QTimer::singleShot(0, &window, &MainWindow::offerProjectRecovery);
     return app.exec();
 }

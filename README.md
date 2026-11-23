@@ -1,4 +1,4 @@
-# SOFIT 2.5 Windows Interoperability
+# SOFIT 3.0
 
 Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native Linux build remains available.
 
@@ -7,6 +7,12 @@ Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native
 2. Run `SOFIT-Windows-x64-Setup.exe` for a per-user install, Start menu shortcut, optional desktop shortcut, and registration for opening `.sofit` files. Windows lets you choose the default app. Uninstall through **Settings → Apps**.
 3. For a portable setup, extract `SOFIT-Windows-x64.zip`. Keep `SOFIT.exe` with its Qt DLLs and plugins.
 4. Open a bundled example from **File → Open**, or pass a quoted project path to `SOFIT.exe`. **Save As** makes an editable copy at a new location.
+
+### Projects and crash recovery
+
+Use **File → Open** for existing projects and **Save As** to keep a legacy file alongside the upgraded copy. Save writes the current project with a schema version, SHA-256 integrity check and atomic replacement. The new format preserves editable geometry, formulas, sizes, modeling operations, seams and fabric layouts.
+
+After an interruption, use **File → Recover Unsaved Project** to open the latest available snapshot as an unsaved drawing, then choose its destination with **Save As**. Open the [schema 14 skirt](examples/graded-skirt-v14.sofit) or [schema 14 trousers](examples/linked-trousers-v14.sofit) to try editing and reopening a protected project. See the [format and recovery guide](docs/SOFIT-format.md) for details.
 
 ### Canvas and workspace
 

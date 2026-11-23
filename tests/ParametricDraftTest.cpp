@@ -28,7 +28,9 @@ void check(bool condition, const char* message) {
 QJsonObject readProject(const QString& path) {
     QFile file(path);
     check(file.open(QIODevice::ReadOnly), "Open saved project");
-    return QJsonDocument::fromJson(file.readAll()).object();
+    const auto root = QJsonDocument::fromJson(file.readAll()).object();
+    check(root.value("version").toInt() == 14, "Write the protected SOFIT format");
+    return QJsonDocument::fromJson(root.value("payload").toString().toUtf8()).object();
 }
 
 void writeProject(const QString& path, const QJsonObject& data) {
@@ -273,7 +275,7 @@ int main() {
     const auto filename = temp.filePath("parametric.sofit");
     check(document.save(filename, &error), "Save parametric project");
     auto json = readProject(filename);
-    check(json.value("version").toInt() == 8, "Write format version 8");
+    check(json.value("version").toInt() == 8, "Encode reference size data in the version 8 payload");
     PatternDocument loaded;
     check(loaded.load(filename, &error) && loaded.parametricDraft() == changed, "Round trip the complete draft");
     check(loaded.entities()[8].control == QPointF(60, 85) && loaded.entities()[8].piece == 0
@@ -382,7 +384,7 @@ int main() {
 
     check(document.setParametricDraft({}) && document.entities().size() == 1, "Remove generated objects without deleting manual drawing");
     check(document.save(filename, &error) && readProject(filename).value("version").toInt() == 7,
-          "Continue writing version 7 for projects without a draft");
+          "Encode projects without a draft in the version 7 payload");
     check(loaded.load(filename, &error) && loaded.parametricDraft() == ParametricDraft{}
           && loaded.entities().size() == 1, "Loading version 7 clears the previous parametric data");
 }

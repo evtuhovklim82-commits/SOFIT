@@ -9,6 +9,8 @@
 #include "ProductionData.h"
 #include "ParametricDraft.h"
 
+class QJsonObject;
+
 namespace opc {
 enum class Shape { Point, Line, Rectangle, Circle, Curve };
 
@@ -122,6 +124,7 @@ public:
     bool load(const QString& path, QString* error = nullptr);
 
 private:
+    bool loadPayload(const QJsonObject& root, bool native, QString* error);
     friend PatternDocument gradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*);
     QVector<SeamLink> seamLinks_;
     bool captureContourTopology(ModelingStep& step, QString* error) const;

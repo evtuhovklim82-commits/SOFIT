@@ -21,9 +21,14 @@
 #include <QGraphicsItem>
 #include <QGraphicsScene>
 #include <QMenu>
+#include <QMessageBox>
 #include <QKeyEvent>
 #include <QKeySequenceEdit>
 #include <QSettings>
+#include <QStandardPaths>
+#include <QStatusBar>
+#include <QDir>
+#include <QUuid>
 #include <QTextBrowser>
 #include <QToolBar>
 #include <QToolButton>
@@ -485,6 +490,50 @@ void testStageNavigationAndPreferences() {
 }
 }
 
+void testProjectRecovery() {
+    QTemporaryDir projects;
+    const auto original = projects.filePath("original.sofit");
+    const auto recovered = projects.filePath("recovered.sofit");
+    const QDir directory(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation));
+    const auto snapshots = directory.filePath("recovery");
+    {
+        MainWindow editor;
+        editor.show();
+        auto* view = editor.findChild<PatternView*>();
+        view->entityDrawn({opc::Shape::Line, {0, 0}, {100, 0}});
+        chooseFile(action(editor, "&Save"), original);
+        view->entityDrawn({opc::Shape::Line, {0, 0}, {0, 50}});
+        auto* timer = editor.findChild<QTimer*>("projectAutosaveTimer");
+        check(timer && timer->interval() == 30000 && timer->isActive(),
+              "Run the project autosave timer");
+        check(QMetaObject::invokeMethod(timer, "timeout"), "Trigger the autosave timer");
+        check(QDir(snapshots).entryList({"*.sofit"}, QDir::Files).size() == 1,
+              qPrintable("Write autosave while editing: " + editor.statusBar()->currentMessage()));
+        check(opc::ProjectRecovery::available(snapshots).isEmpty(), "Hide snapshots owned by the current editor");
+    }
+    check(opc::ProjectRecovery::available(snapshots).size() == 1,
+          "Keep a snapshot when normal close cleanup does not run");
+
+    MainWindow editor;
+    editor.show();
+    runDialog<QInputDialog>(action(editor, "Recover Unsaved Project…"), [](QInputDialog& dialog) {
+        check(dialog.comboBoxItems().size() == 1 && dialog.comboBoxItems().first().contains("original"),
+              "Offer the timestamped snapshot for recovery");
+        dialog.accept();
+    });
+    check(editor.isWindowModified() && editor.windowFilePath().isEmpty(),
+          "A recovered project is unsaved and has no original destination");
+    auto* view = editor.findChild<PatternView*>();
+    view->entityDrawn({opc::Shape::Line, {100, 0}, {0, 50}});
+    chooseFile(action(editor, "&Save"), recovered);
+    opc::PatternDocument project;
+    check(project.load(original) && project.entities().size() == 1, "Do not overwrite the original project");
+    check(project.load(recovered) && project.entities().size() == 3 && !editor.isWindowModified(),
+          "Save a recovered project after editing");
+    check(opc::ProjectRecovery::available(snapshots).isEmpty(), "Clean up after successful Save As");
+    QDir(snapshots).rmdir(".");
+}
+
 int main(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
@@ -493,6 +542,15 @@ int main(int argc, char** argv) {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, preferences.path());
     app.setOrganizationName("SOFIT Workflow Test");
+    app.setApplicationName("Preferences");
+#ifdef Q_OS_LINUX
+    qputenv("XDG_DATA_HOME", QFile::encodeName(preferences.path()));
+#else
+    QStandardPaths::setTestModeEnabled(true);
+#endif
+    app.setApplicationName(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    testProjectRecovery();
+    QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)).removeRecursively();
     app.setApplicationName("Preferences");
     testStageNavigationAndPreferences();
     testCanvasAndWorkspace();
@@ -735,8 +793,8 @@ int main(int argc, char** argv) {
 
     const auto gradedDxfPath = temp.filePath("graded.dxf");
     const auto gradedPdfPath = temp.filePath("graded.pdf");
-    const auto exportSize = [&](QAction& command, const QString& path) {
-        runDialog<QDialog>(command, [&path](QDialog& dialog) {
+    const auto exportSize = [&](QAction& command, const QString& path, bool dxf = false) {
+        const auto chooseSize = [&path](QDialog& dialog) {
             auto* sizes = dialog.findChild<QComboBox*>();
             check(sizes && sizes->findData(QStringLiteral("L")) == 1, "Offer graded size for export");
             sizes->setCurrentIndex(1);
@@ -747,9 +805,22 @@ int main(int argc, char** argv) {
                 static_cast<QDialog*>(save)->accept();
             });
             dialog.accept();
+        };
+        if (!dxf) {
+            runDialog<QDialog>(command, chooseSize);
+            return;
+        }
+        runDialog<QMessageBox>(command, [&](QMessageBox& warning) {
+            check(warning.text().contains("modeling history"), "Explain DXF exchange limitations");
+            QTimer::singleShot(0, [&] {
+                auto* dialog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                check(dialog, "Choose the DXF export size");
+                chooseSize(*dialog);
+            });
+            warning.button(QMessageBox::Ok)->click();
         });
     };
-    exportSize(action(window, "Export &DXF…"), gradedDxfPath);
+    exportSize(action(window, "Export &DXF…"), gradedDxfPath, true);
     QFile gradedDxf(gradedDxfPath);
     check(gradedDxf.open(QIODevice::ReadOnly) && gradedDxf.readAll().contains("\n125\n"),
           "Write the shifted X coordinate to DXF");

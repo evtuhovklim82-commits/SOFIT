@@ -47,6 +47,8 @@ jobs:
           }
           Copy-Item README.md, LICENSE-NOTICE.txt dist/SOFIT
           Copy-Item -Recurse examples dist/SOFIT/examples
+          New-Item -ItemType Directory -Force dist/SOFIT/docs | Out-Null
+          Copy-Item docs/SOFIT-format.md dist/SOFIT/docs
           Compress-Archive -Path dist/SOFIT -DestinationPath SOFIT-Windows-x64.zip
       - name: Launch the extracted portable package
         shell: pwsh
@@ -56,7 +58,7 @@ jobs:
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           Remove-Item Env:QT_PLUGIN_PATH, Env:QT_QPA_PLATFORM_PLUGIN_PATH -ErrorAction SilentlyContinue
           $env:QT_QPA_PLATFORM = 'windows'
-          foreach ($name in @('bib-apron', 'graded-skirt', 'linked-trousers')) {
+          foreach ($name in @('bib-apron', 'graded-skirt', 'linked-trousers', 'graded-skirt-v14', 'linked-trousers-v14')) {
             $project = Join-Path $package "examples/$name.sofit"
             if (!(Test-Path $project)) { throw "Missing example $name" }
             $process = Start-Process -FilePath (Join-Path $package 'SOFIT.exe') `
@@ -104,7 +106,7 @@ jobs:
           $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
           Remove-Item Env:QT_PLUGIN_PATH, Env:QT_QPA_PLATFORM_PLUGIN_PATH -ErrorAction SilentlyContinue
           $env:QT_QPA_PLATFORM = 'windows'
-          $project = Join-Path $app 'examples/linked-trousers.sofit'
+          $project = Join-Path $app 'examples/linked-trousers-v14.sofit'
           Run-Checked (Join-Path $app 'SOFIT.exe') @('--packaging-smoke', ('"' + $project + '"'))
           Run-Checked (Join-Path $app 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
           foreach ($path in @((Join-Path $app 'SOFIT.exe'), $shortcut, $desktop, $key)) {

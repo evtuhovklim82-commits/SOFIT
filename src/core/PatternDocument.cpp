@@ -1,7 +1,8 @@
 #include "PatternDocument.h"
-#include <QRegularExpression>
 #include "Production.h"
 #include <QFile>
+#include <QFileInfo>
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -14,6 +15,13 @@
 
 namespace opc {
 namespace {
+constexpr int projectVersion = 14;
+constexpr qint64 maxProjectBytes = 64 * 1024 * 1024;
+
+QString payloadDigest(const QByteArray& bytes) {
+    return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
+}
+
 QString canonicalContourName(const QString& name) {
     // SOFIT 1.8 could save the numeric UTF-16 values in generated cut edge names.
     static const QRegularExpression legacySeam(QStringLiteral("\\A(@[1-9][0-9]*:seam-)(65|66)\\z"));
@@ -99,11 +107,15 @@ bool loadDraft(const QJsonObject& data, ParametricDraft& draft) {
 }
 
 bool PatternDocument::save(const QString& path, QString* error) const {
-    if (!validateParametricSizes(production_, error))
-        return false;
+    if (error)
+        error->clear();
     QJsonArray objects;
     bool hasSeamData = false;
     for (const auto& entity : entities_) {
+        if (entity.layer != Layer::Main && entity.layer != Layer::Construction) {
+            if (error) *error = QStringLiteral("Invalid object layer");
+            return false;
+        }
         if ((entity.seamAllowanceMm || !entity.seamNotches.isEmpty())
             && entity.shape != Shape::Line && entity.shape != Shape::Curve) {
             if (error) *error = QStringLiteral("Edge metadata requires a line or curve");
@@ -224,13 +236,21 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         }
         root.insert("modelingSources", sources);
     }
-    ProductionData validated;
-    if (!loadProduction(root.value("production").toObject(), pieces_.size(), validated)) {
-        if (error) *error = QStringLiteral("Invalid grading or fabric layout data");
+    root.insert("useDraftMeasurements", production_.useDraftMeasurements);
+    const auto payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    const QJsonObject envelope{{"format", "SOFIT"}, {"version", projectVersion},
+                               {"payload", QString::fromUtf8(payload)}, {"sha256", payloadDigest(payload)}};
+    const auto data = QJsonDocument(envelope).toJson();
+    if (data.size() > maxProjectBytes) {
+        if (error) *error = QStringLiteral("Project exceeds the 64 MiB file limit");
         return false;
     }
-    const auto data = QJsonDocument(root).toJson();
+    // Exercise the same structural validation and modeling replay used by Open.
+    PatternDocument validated;
+    if (!validated.loadPayload(QJsonDocument::fromJson(payload).object(), true, error))
+        return false;
     QSaveFile file(path);
+    file.setDirectWriteFallback(false);
     if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
         if (error) *error = file.errorString();
         return false;
@@ -239,18 +259,52 @@ bool PatternDocument::save(const QString& path, QString* error) const {
 }
 
 bool PatternDocument::load(const QString& path, QString* error) {
+    if (error)
+        error->clear();
     auto fail = [error](const QString& message) {
         if (error) *error = message;
         return false;
     };
     QFile file(path);
+    if (!QFileInfo(file).isFile())
+        return fail(QStringLiteral("Project is missing or is not a regular file"));
     if (!file.open(QIODevice::ReadOnly))
         return fail(file.errorString());
+    if (file.size() > maxProjectBytes)
+        return fail(QStringLiteral("Project exceeds the 64 MiB file limit"));
+    const auto bytes = file.read(maxProjectBytes + 1);
+    if (file.error() != QFileDevice::NoError)
+        return fail(file.errorString());
+    if (bytes.size() > maxProjectBytes)
+        return fail(QStringLiteral("Project exceeds the 64 MiB file limit"));
 
-    const auto json = QJsonDocument::fromJson(file.readAll());
+    QJsonParseError parseError;
+    const auto json = QJsonDocument::fromJson(bytes, &parseError);
+    if (parseError.error != QJsonParseError::NoError)
+        return fail(QStringLiteral("Invalid project JSON at byte %1: %2")
+                    .arg(parseError.offset).arg(parseError.errorString()));
     if (!json.isObject())
-        return fail(QStringLiteral("Invalid JSON document"));
+        return fail(QStringLiteral("Project JSON must contain an object"));
     const auto root = json.object();
+    if (root.value("format") == QStringLiteral("SOFIT") && root.value("version").toDouble() > projectVersion)
+        return fail(QStringLiteral("This project requires a newer version of SOFIT"));
+    if (root.value("format") != QStringLiteral("SOFIT") || root.value("version").toInt() != projectVersion)
+        return loadPayload(root, false, error);
+
+    const auto payload = root.value("payload").toString().toUtf8();
+    if (payload.isEmpty() || root.value("sha256").toString() != payloadDigest(payload))
+        return fail(QStringLiteral("Project integrity check failed (SHA-256 mismatch)"));
+    const auto decoded = QJsonDocument::fromJson(payload);
+    if (!decoded.isObject())
+        return fail(QStringLiteral("Invalid project payload"));
+    return loadPayload(decoded.object(), true, error);
+}
+
+bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString* error) {
+    auto fail = [error](const QString& message) {
+        if (error) *error = message;
+        return false;
+    };
     const auto format = root.value("format").toString();
     const bool linkedFormat = root.value("version").toDouble() == 13;
     const auto fileVersion = root.value(linkedFormat ? "linkedBaseVersion" : "version").toDouble();
@@ -265,7 +319,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
     const bool current = format == "SOFIT" && version >= 2 && version <= 9 && std::trunc(version) == version;
     const auto objects = root.value(legacy ? "segments" : "objects");
-    if ((!legacy && !current) || !objects.isArray())
+    if ((native && (!current || version < 7)) || (!legacy && !current) || !objects.isArray())
         return fail(QStringLiteral("Unsupported document format"));
 
     std::array<bool, 3> layerVisibility{true, true, true};
@@ -359,7 +413,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
                 return fail(QStringLiteral("Invalid DXF source layer"));
             entity.dxfLayer = sourceLayer.toString();
         }
-        if ((version >= 8 || linkedFormat) && fields.contains("draftName")) {
+        if ((version >= 8 || linkedFormat || native) && fields.contains("draftName")) {
             entity.draftName = fields.value("draftName").toString();
             if (topologyFormat && entity.draftName.startsWith(u'@'))
                 entity.draftName = canonicalContourName(entity.draftName);
@@ -401,6 +455,12 @@ bool PatternDocument::load(const QString& path, QString* error) {
     loaded.layerVisibility_ = layerVisibility;
     // Version 8 stored size measurements for reference only.
     loaded.production_.useDraftMeasurements = version != 8 || loaded.production_.sizes.isEmpty();
+    if (native) {
+        const auto mode = root.value("useDraftMeasurements");
+        if (!mode.isBool())
+            return fail(QStringLiteral("Invalid size measurement mode"));
+        loaded.production_.useDraftMeasurements = mode.toBool();
+    }
     if (historyFormat) {
         const auto steps = root.value("modelingHistory").toArray();
         if (steps.isEmpty())
@@ -504,7 +564,9 @@ bool PatternDocument::load(const QString& path, QString* error) {
                 if (generated == replayed.cend() || stored.shape != generated->shape
                     || stored.piece != generated->piece || stored.layer != generated->layer)
                     return fail(QStringLiteral("Parametric object list does not match the replayed draft"));
+                const auto sourceLayer = stored.dxfLayer;
                 stored = generated.value();
+                stored.dxfLayer = sourceLayer;
                 replayed.remove(stored.draftName);
             }
             if (!replayed.isEmpty())
@@ -512,9 +574,10 @@ bool PatternDocument::load(const QString& path, QString* error) {
         } else {
             for (qsizetype i = 0; i < storedObjects.size(); ++i) {
                 const auto& stored = storedObjects[i];
-                const auto& generated = loaded.entities_[i];
+                auto& generated = loaded.entities_[i];
                 if (stored.draftName != generated.draftName || stored.shape != generated.shape)
                     return fail(QStringLiteral("Parametric object list does not match the draft"));
+                generated.dxfLayer = stored.dxfLayer;
             }
         }
     }

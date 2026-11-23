@@ -5,6 +5,8 @@
 #include "../core/PieceGeometry.h"
 #include <QMainWindow>
 #include <QUndoStack>
+#include <QTimer>
+#include "ProjectRecovery.h"
 #include "../core/PatternDocument.h"
 
 namespace opc { enum class ContourOperation; }
@@ -20,11 +22,15 @@ public:
     MainWindow();
     ~MainWindow() override;
     bool openProject(const QString& path, QString* error);
+    void offerProjectRecovery();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
+    void recoverProject();
+    void autosaveProject();
+    void clearRecovery();
     void newDocument();
     void openDocument();
     bool saveDocument();
@@ -83,6 +89,10 @@ private:
     QLabel* modelingError_ = nullptr;
     QPushButton* removeModelingStep_ = nullptr;
     QString currentPath_;
+    std::unique_ptr<opc::ProjectRecovery> recovery_;
+    QTimer autosaveTimer_;
+    bool recovered_ = false;
+    bool autosavePending_ = false;
     std::array<QAction*, 3> layerActions_{};
     QVector<opc::PieceGeometry> pieces_;
     QSet<QString> overlaySizes_;

@@ -7,6 +7,8 @@
 #include "Production.h"
 
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QGuiApplication>
 #include <QTemporaryDir>
 #include <algorithm>
@@ -482,7 +484,8 @@ void checkContourHistory() {
     check(temporary.isValid(), "Create a directory for the SOFIT 1.8 compatibility fixture");
     const auto legacyPath = temporary.filePath("numeric-seam-names.sofit");
     check(doubleCut.save(legacyPath, &error), error);
-    auto legacy = readFile(legacyPath);
+    const auto envelope = QJsonDocument::fromJson(readFile(legacyPath)).object();
+    auto legacy = envelope.value("payload").toString().toUtf8();
     legacy.replace("@1:seam-A", "@1:seam-65").replace("@1:seam-B", "@1:seam-66")
           .replace("@2:seam-A", "@2:seam-65").replace("@2:seam-B", "@2:seam-66");
     QFile file(legacyPath);

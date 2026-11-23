@@ -45,6 +45,8 @@
 #include <QSaveFile>
 #include <QSettings>
 #include <QFileInfo>
+#include <QDir>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QXmlStreamWriter>
@@ -54,6 +56,11 @@
 #include <utility>
 
 namespace {
+QString recoveryDirectory() {
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation))
+        .filePath(QStringLiteral("recovery"));
+}
+
 QString describeContour(opc::ContourError error) {
     using opc::ContourError;
     switch (error) {
@@ -316,11 +323,24 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
     connect(&undo_, &QUndoStack::indexChanged, this, &MainWindow::refreshObjects);
 
+    connect(&undo_, &QUndoStack::indexChanged, this, [this] {
+        autosavePending_ = recovered_ || !undo_.isClean();
+        if (!autosavePending_)
+            clearRecovery();
+    });
+    autosaveTimer_.setParent(this);
+    autosaveTimer_.setObjectName(QStringLiteral("projectAutosaveTimer"));
+    autosaveTimer_.setInterval(30000);
+    connect(&autosaveTimer_, &QTimer::timeout, this, &MainWindow::autosaveProject);
+    autosaveTimer_.start();
+
     auto* file = menuBar()->addMenu(tr("&File"));
     auto* newAction = file->addAction(tr("&New"), QKeySequence::New, this, &MainWindow::newDocument);
     auto* openAction = file->addAction(tr("&Open"), QKeySequence::Open, this, &MainWindow::openDocument);
     auto* saveAction = file->addAction(tr("&Save"), QKeySequence::Save, this, &MainWindow::saveDocument);
     file->addAction(tr("Save &As…"), QKeySequence::SaveAs, this, &MainWindow::saveDocumentAs);
+    file->addAction(tr("Recover Unsaved Project…"), this, &MainWindow::recoverProject);
+    file->addSeparator();
     file->addAction(tr("Export &SVG"), this, &MainWindow::exportSvg);
     file->addAction(tr("Import DXF…"), this, &MainWindow::importDxf);
     file->addAction(tr("Export &DXF…"), this, &MainWindow::exportDxf);
@@ -349,7 +369,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     connect(objects_, &QTreeWidget::itemSelectionChanged, this, updateDelete);
     connect(&scene_, &QGraphicsScene::selectionChanged, this, updateDelete);
     connect(&undo_, &QUndoStack::indexChanged, this, updateDelete);
-    connect(&undo_, &QUndoStack::cleanChanged, this, [this](bool clean) { setWindowModified(!clean); });
+    connect(&undo_, &QUndoStack::cleanChanged, this, [this](bool clean) { setWindowModified(recovered_ || !clean); });
 
     auto* construction = menuBar()->addMenu(tr("&Construction"));
     auto* modeling = menuBar()->addMenu(tr("&Modeling"));
@@ -2286,7 +2306,7 @@ MainWindow::~MainWindow() {
 }
 
 bool MainWindow::confirmDiscard() {
-    if (undo_.isClean())
+    if (!recovered_ && undo_.isClean())
         return true;
     const auto answer = QMessageBox::warning(this, tr("Unsaved Drawing"),
         tr("Save the changes to the current drawing?"),
@@ -2298,6 +2318,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     const bool closing = confirmDiscard();
     event->setAccepted(closing);
     if (closing) {
+        clearRecovery();
         QSettings settings;
         settings.setValue(QStringLiteral("workspace/geometry"), saveGeometry());
         settings.setValue(QStringLiteral("workspace/layout"), saveState(1));
@@ -2307,8 +2328,13 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::replaceDocument(opc::PatternDocument document, const QString& path) {
+    view_->cancelDrawing();
+    clearRecovery();
+    recovered_ = false;
+    autosavePending_ = false;
     overlaySizes_.clear();
     undo_.clear();
+    setWindowModified(false);
     doc_ = std::move(document);
     currentPath_ = path;
     setWindowFilePath(path);
@@ -2323,11 +2349,9 @@ void MainWindow::newDocument() {
 }
 
 void MainWindow::openDocument() {
-    if (!confirmDiscard())
-        return;
-    const auto path = QFileDialog::getOpenFileName(this, tr("Open pattern"), {},
+    const auto path = QFileDialog::getOpenFileName(this, tr("Open pattern"), currentPath_,
                                                   tr("Patterns (*.sofit *.opcad);;All files (*)"));
-    if (path.isEmpty())
+    if (path.isEmpty() || !confirmDiscard())
         return;
     QString error;
     if (!openProject(path, &error))
@@ -2340,6 +2364,64 @@ bool MainWindow::openProject(const QString& path, QString* error) {
         return false;
     replaceDocument(std::move(document), QFileInfo(path).absoluteFilePath());
     return true;
+}
+
+void MainWindow::clearRecovery() {
+    if (recovery_ && !recovery_->clear())
+        statusBar()->showMessage(tr("Could not remove the previous recovery snapshot."), 8000);
+    recovery_.reset();
+}
+
+void MainWindow::autosaveProject() {
+    if (!autosavePending_)
+        return;
+    if (!recovery_)
+        recovery_ = std::make_unique<opc::ProjectRecovery>();
+    QString error;
+    if (!recovery_->capture(doc_, recoveryDirectory(), currentPath_, &error)) {
+        statusBar()->showMessage(tr("Autosave failed: %1").arg(error), 8000);
+        return;
+    }
+    autosavePending_ = false;
+}
+
+void MainWindow::offerProjectRecovery() {
+    if (!opc::ProjectRecovery::available(recoveryDirectory()).isEmpty())
+        recoverProject();
+}
+
+void MainWindow::recoverProject() {
+    const auto paths = opc::ProjectRecovery::available(recoveryDirectory());
+    if (paths.isEmpty()) {
+        QMessageBox::information(this, tr("Project Recovery"), tr("No recovery snapshots are available."));
+        return;
+    }
+    QStringList labels;
+    for (const auto& path : paths) {
+        const QFileInfo info(path);
+        labels.append(tr("%1 — %2 [%3]").arg(info.completeBaseName().mid(39),
+            QLocale().toString(info.lastModified(), QLocale::ShortFormat), info.fileName().left(8)));
+    }
+    bool accepted = false;
+    const auto choice = QInputDialog::getItem(this, tr("Project Recovery"),
+        tr("Open a recovery snapshot as an unsaved project. Use Save As to choose where to keep it."),
+        labels, 0, false, &accepted);
+    if (!accepted)
+        return;
+
+    auto recovery = std::make_unique<opc::ProjectRecovery>();
+    opc::PatternDocument document;
+    QString error;
+    if (!recovery->claim(paths.at(labels.indexOf(choice)), document, &error)) {
+        QMessageBox::warning(this, tr("Recovery failed"), error);
+        return;
+    }
+    if (!confirmDiscard())
+        return;
+    replaceDocument(std::move(document), {});
+    recovery_ = std::move(recovery);
+    recovered_ = true;
+    setWindowModified(true);
 }
 
 bool MainWindow::saveDocument() {
@@ -2370,7 +2452,11 @@ bool MainWindow::saveProject(const QString& path) {
     }
     currentPath_ = path;
     setWindowFilePath(path);
+    recovered_ = false;
+    autosavePending_ = false;
     undo_.setClean();
+    setWindowModified(false);
+    clearRecovery();
     return true;
 }
 
@@ -2412,6 +2498,11 @@ void MainWindow::importDxf() {
 }
 
 void MainWindow::exportDxf() {
+    if (QMessageBox::question(this, tr("Export DXF"),
+            tr("DXF contains exchange geometry for one size. Keep a SOFIT project to preserve "
+               "formulas, grading rules, modeling history, seam links and fabric layout."),
+            QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok)
+        return;
     QString targetSize;
     if (!doc_.production().sizes.isEmpty()) {
         QDialog dialog(this);
@@ -2431,8 +2522,13 @@ void MainWindow::exportDxf() {
     auto path = QFileDialog::getSaveFileName(this, tr("Export DXF"), {}, tr("DXF (*.dxf)"));
     if (path.isEmpty())
         return;
-    if (!path.endsWith(".dxf", Qt::CaseInsensitive))
+    if (!path.endsWith(".dxf", Qt::CaseInsensitive)) {
         path += ".dxf";
+        if (QFileInfo::exists(path)
+            && QMessageBox::question(this, tr("Replace DXF"),
+                tr("Replace the existing file %1?").arg(QFileInfo(path).fileName())) != QMessageBox::Yes)
+            return;
+    }
     QVector<bool> visibility;
     QVector<opc::PieceGeometry> geometry;
     const auto pattern = exportPattern(targetSize, visibility, geometry);

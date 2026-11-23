@@ -364,6 +364,7 @@ QVector<Entity> PatternDocument::bindDraftGeometry(QVector<Entity> generated) co
             replacement.layer = original.layer;
             replacement.seamAllowanceMm = original.seamAllowanceMm;
             replacement.seamNotches = original.seamNotches;
+            replacement.dxfLayer = original.dxfLayer;
         }
         entities.append(replacement);
         indices.remove(original.draftName);

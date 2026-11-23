@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 2.5.0 LANGUAGES CXX)
+project(SOFIT VERSION 3.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -24,6 +24,7 @@ add_library(sofit_core STATIC
     src/core/DxfImport.cpp
     src/core/ParametricDraft.cpp
     src/core/PatternTemplates.cpp
+    src/core/ProjectRecovery.cpp
     src/core/PatternDocument.cpp
     src/core/PatternDocument.h
     src/core/PieceGeometry.cpp
@@ -59,6 +60,8 @@ set_target_properties(sofit PROPERTIES WIN32_EXECUTABLE TRUE MACOSX_BUNDLE TRUE)
 install(TARGETS sofit BUNDLE DESTINATION . RUNTIME DESTINATION bin)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     install(FILES LICENSE-NOTICE.txt README.md DESTINATION share/doc/sofit)
+    install(FILES docs/SOFIT-format.md DESTINATION share/doc/sofit/docs)
+    install(DIRECTORY examples DESTINATION share/doc/sofit)
     set(CPACK_GENERATOR TGZ)
     set(CPACK_PACKAGE_CHECKSUM SHA256)
     include(CPack)
@@ -66,6 +69,11 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(sofit_project_tests tests/ProjectPersistenceTest.cpp)
+    target_link_libraries(sofit_project_tests PRIVATE sofit_core)
+    add_test(NAME sofit_project_persistence COMMAND sofit_project_tests "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+    set_tests_properties(sofit_project_persistence PROPERTIES TIMEOUT 30)
+
     add_executable(sofit_dxf_tests tests/DxfImportTest.cpp)
     target_link_libraries(sofit_dxf_tests PRIVATE sofit_core)
     add_test(NAME sofit_dxf_import COMMAND sofit_dxf_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")
