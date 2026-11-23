@@ -1,0 +1,1 @@
+SOFIT starter prototype. Intended license: GNU GPL version 3. Before public distribution add the complete GPLv3 license text and verify ownership and dependency licensing.
