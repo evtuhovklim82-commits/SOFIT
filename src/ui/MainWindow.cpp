@@ -304,6 +304,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     redoAction->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Y),
                               QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z)});
     edit->addAction(redoAction);
+    edit->addAction(tr("Edit Geometry…"), this, &MainWindow::editSelectedGeometry);
     auto* deleteAction = edit->addAction(tr("Delete Selection"), QKeySequence(Qt::Key_Delete),
                                          this, &MainWindow::deleteSelection);
     deleteAction->setEnabled(false);
@@ -717,7 +718,7 @@ qsizetype MainWindow::choosePiece(const QString& title) {
     return accepted ? choices.indexOf(choice) : -1;
 }
 
-void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& text) {
+void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& text, bool redraw) {
     QString error;
     if (!document.modelingHistory().isEmpty()
         && !document.validateParametricSizes(document.production(), &error)) {
@@ -727,7 +728,7 @@ void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& 
     }
     const auto selected = selectedObjects();
     view_->cancelDrawing();
-    undo_.push(new PatternCommand(doc_, std::move(document), text));
+    undo_.push(new PatternCommand(doc_, std::move(document), text, redraw ? view_ : nullptr));
     for (const auto index : selected)
         objects_->topLevelItem(index)->setSelected(true);
 }
@@ -1065,8 +1066,24 @@ void MainWindow::diagnoseGradedPieces() {
             const auto& piece = graded.pieces()[i];
             const auto geometry = opc::analyzePiece(graded, i);
             auto* row = new QTreeWidgetItem(&report, {piece.name, describeContour(geometry.error)});
-            if (geometry.allowanceFailed)
+            if (geometry.error == opc::ContourError::None) {
+                new QTreeWidgetItem(row, {tr("Seam dimensions"),
+                    tr("%1 × %2 mm · Perimeter %3 mm")
+                        .arg(geometry.bounds.width(), 0, 'f', 2)
+                        .arg(geometry.bounds.height(), 0, 'f', 2)
+                        .arg(geometry.perimeterMm, 0, 'f', 2)});
+            }
+            if (geometry.allowanceFailed) {
                 new QTreeWidgetItem(row, {tr("Allowance"), tr("Cut outline could not be generated")});
+            } else if (!geometry.allowance.isEmpty()) {
+                const auto bounds = geometry.allowance.boundingRect();
+                new QTreeWidgetItem(row, {tr("Cut dimensions"), tr("%1 × %2 mm")
+                    .arg(bounds.width(), 0, 'f', 2).arg(bounds.height(), 0, 'f', 2)});
+            }
+            if (!piece.grainAngle)
+                new QTreeWidgetItem(row, {tr("Grainline"), tr("Grain direction is unspecified")});
+            if (!piece.showLabel)
+                new QTreeWidgetItem(row, {tr("Label"), tr("Printed label is disabled")});
             qsizetype expected = piece.notches.size();
             for (const auto& edge : graded.entities()) {
                 if (edge.piece == i && edge.layer == opc::Layer::Main)
@@ -1631,8 +1648,31 @@ void MainWindow::modelPiece(opc::ContourOperation operation, const QString& titl
 }
 
 void MainWindow::exactInput() {
+    geometryDialog(-1);
+}
+
+void MainWindow::editSelectedGeometry() {
+    const auto selected = selectedObjects();
+    if (selected.size() != 1) {
+        statusBar()->showMessage(tr("Select one point, line or quadratic curve to edit."), 5000);
+        return;
+    }
+    const auto index = selected.front();
+    const auto& entity = doc_.entities()[index];
+    if (!canModelEdge(entity))
+        return;
+    if (entity.shape == opc::Shape::Rectangle || entity.shape == opc::Shape::Circle) {
+        statusBar()->showMessage(tr("Select a point, line or quadratic curve to edit."), 5000);
+        return;
+    }
+    geometryDialog(index);
+}
+
+void MainWindow::geometryDialog(qsizetype index) {
+    const bool editing = index >= 0;
+    const auto original = editing ? doc_.entities()[index] : opc::Entity{};
     QDialog dialog(this);
-    dialog.setWindowTitle(tr("Exact Input"));
+    dialog.setWindowTitle(editing ? tr("Edit Geometry") : tr("Exact Input"));
     QFormLayout form(&dialog);
     auto* shape = new QComboBox(&dialog);
     shape->addItems({tr("Point"), tr("Line"), tr("Rectangle"), tr("Circle"), tr("Curve")});
@@ -1642,6 +1682,10 @@ void MainWindow::exactInput() {
     case PatternView::Tool::Circle: shape->setCurrentIndex(3); break;
     case PatternView::Tool::Curve: shape->setCurrentIndex(4); break;
     default: shape->setCurrentIndex(1); break;
+    }
+    if (editing) {
+        shape->setCurrentIndex(static_cast<int>(original.shape));
+        shape->setEnabled(false);
     }
     form.addRow(tr("Object"), shape);
 
@@ -1667,6 +1711,28 @@ void MainWindow::exactInput() {
     auto* controlX = field(tr("Control X (mm)"));
     auto* controlY = field(tr("Control Y (mm)"));
     auto* angle = field(tr("Angle (° clockwise from +X)"), -360, 360);
+    QCheckBox connected(tr("Move connected endpoints in the same piece and layer"), &dialog);
+    if (editing) {
+        for (const auto& [spin, value] : {
+                 std::pair{x1, original.a.x()}, {y1, original.a.y()},
+                 {x2, original.b.x()}, {y2, original.b.y()},
+                 {controlX, original.control.x()}, {controlY, original.control.y()}}) {
+            spin->setRange(std::min(spin->minimum(), value), std::max(spin->maximum(), value));
+            spin->setValue(value);
+        }
+        const QLineF line(original.a, original.b);
+        length->setMaximum(std::max(length->maximum(), line.length()));
+        length->setValue(line.length());
+        angle->setValue(-line.angle());
+        connected.setEnabled(original.piece >= 0);
+        connected.setChecked(connected.isEnabled());
+        form.addRow(&connected);
+    }
+    const QPointF shownA(x1->value(), y1->value());
+    const QPointF shownB(x2->value(), y2->value());
+    const QPointF shownControl(controlX->value(), controlY->value());
+    const auto shownLength = length->value();
+    const auto shownAngle = angle->value();
 
     QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     form.addRow(&buttons);
@@ -1690,17 +1756,44 @@ void MainWindow::exactInput() {
     updateFields();
     connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-        const QPointF a(x1->value(), y1->value());
-        QPointF b(x2->value(), y2->value());
+        const auto coordinate = [editing](QPointF entered, QPointF displayed, QPointF old) {
+            if (!editing)
+                return entered;
+            return QPointF(entered.x() == displayed.x() ? old.x() : entered.x(),
+                           entered.y() == displayed.y() ? old.y() : entered.y());
+        };
+        const auto a = coordinate({x1->value(), y1->value()}, shownA, original.a);
+        auto b = coordinate({x2->value(), y2->value()}, shownB, original.b);
+        const auto control = coordinate({controlX->value(), controlY->value()}, shownControl,
+                                        original.control);
+        if (shape->currentIndex() == 1 && mode->currentIndex() == 1) {
+            const auto originalVector = original.b - original.a;
+            if (editing && length->value() == shownLength && angle->value() == shownAngle) {
+                b = a == original.a ? original.b : a + originalVector;
+            } else {
+                const double radians = angle->value() * std::numbers::pi / 180;
+                b = a + QPointF(length->value() * std::cos(radians), length->value() * std::sin(radians));
+            }
+        }
+        if (editing) {
+            if (a != original.a || (original.shape != opc::Shape::Point && b != original.b)
+                || (original.shape == opc::Shape::Curve && control != original.control)) {
+                auto updated = opc::editGeometry(doc_, index, a, b, control, connected.isChecked());
+                if (!updated) {
+                    QMessageBox::warning(&dialog, dialog.windowTitle(),
+                        tr("The edit would collapse an edge or move a connected object that cannot be edited here."));
+                    return;
+                }
+                applyPatternEdit(std::move(*updated), dialog.windowTitle(), true);
+            }
+            dialog.accept();
+            return;
+        }
         switch (shape->currentIndex()) {
         case 0:
             addEntity({opc::Shape::Point, a, a});
             break;
         case 1:
-            if (mode->currentIndex() == 1) {
-                const double radians = angle->value() * std::numbers::pi / 180;
-                b = a + QPointF(length->value() * std::cos(radians), length->value() * std::sin(radians));
-            }
             if (a.x() == b.x() && a.y() == b.y()) {
                 QMessageBox::warning(&dialog, tr("Invalid Line"), tr("Choose two different endpoints."));
                 return;

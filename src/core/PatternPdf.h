@@ -18,4 +18,6 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
                       const QVector<QPolygonF>& allowances,
                       const PatternPdfOptions& options, QString& error);
 
+bool exportFabricPdf(const QString& path, const PatternDocument& document,
+                     const ProductionData& data, const PatternPdfOptions& options, QString& error);
 }

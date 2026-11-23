@@ -23,6 +23,8 @@ struct LayoutPiece {
 LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& placement);
 
 bool canTurn(const ProductionData& data, const FabricPlacement& placement);
+// Omit the fabric fold from the cutting stroke.
+QPolygonF openFoldContour(QPolygonF cut, const QLineF& fold);
 double foldPosition(const FabricPlacement& placement, double fabricWidth, double cutWidth);
 
 struct FabricUsage {
@@ -43,6 +45,8 @@ struct CuttingReportRow {
     qsizetype left = 0;
     qsizetype right = 0;
     qsizetype onFold = 0;
+
+    qsizetype copies() const { return single + left + right + onFold; }
 };
 
 struct CuttingReport {
@@ -50,7 +54,12 @@ struct CuttingReport {
     FabricUsage usage;
     qsizetype orientationViolations = 0;
     qsizetype foldViolations = 0;
+
+    bool canExport(double fabricWidth) const;
 };
+
+// Fill in missing pieces for every size represented in the marker (base for an empty marker).
+QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const CuttingReport& report);
 
 CuttingReport cuttingReport(const PatternDocument& document, const ProductionData& data);
 

@@ -1,4 +1,4 @@
-# SOFIT 1.8 Professional
+# SOFIT 1.9 Professional
 
 Free/open-source clothing-pattern editor prototype. **Not GRAFIS 26**, no proprietary code or assets. Windows build can be run through Wine/Proton on Arch, but a native Linux build is also supported and recommended.
 
@@ -50,6 +50,16 @@ Use `macdeployqt` when packaging the app for distribution.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
 - SOFIT opens `.sofit` formats 1–12 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Silhouette-only history uses format 11 (SOFIT 1.7+). Contour history uses format 12 (SOFIT 1.8+). SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
+
+## Professional workflow in 1.9
+
+1. Select one manual point, line or quadratic Bézier curve and open **Edit → Edit Geometry**. Enter coordinates in millimeters, or use length and angle for a line. With **Move connected endpoints** enabled, coincident endpoints within 0.000001 mm on the same piece and layer move together. The curve control point remains independent. The whole edit is one Undo/Redo step.
+2. Add labels, grainlines, notches, and allowances. Use **Diagnose Pieces by Size** to review seam width, height and perimeter, cut width and height where allowances exist, contour errors and marking warnings. Use the seam tools for length and ease checks.
+3. Define the size table and grade rules, then inspect the overlaid contours and repeat the seam checks in the target size.
+4. In **Fabric Layout**, arrange the copies and open **Cutting report**. It compares each piece's cut count with the plotted count for one kit per represented size, including pieces with zero copies. Review unmatched hands, unspecified grain, invalid outlines, overlaps, fabric bounds, fold and rotation conflicts, and material usage. For multiple kits, compare the reported counts against the intended quantities. Check materials, fit and assembly with a sample before cutting the production run.
+5. Export the layout in millimeters as DXF or as a tiled A4 PDF. Print the PDF at actual size and measure the 50 mm calibration line before assembling the sheets. Layout files contain fabric boundaries, cut outlines, fold lines and configured grainlines. For labels, notch marks and seam geometry use the individual-pattern exports.
+
+Numeric editing covers manually drawn points, straight segments and quadratic curves. Edit formula-driven geometry through **Parametric Draft**. The numeric editor does not move rectangles or circles and leaves pieces with point grading rules to the grading workflow. Valid layout exports can still be written for partial kits. SOFIT 1.9 uses the existing project format.
 
 ## Seam tools
 

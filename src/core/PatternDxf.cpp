@@ -95,26 +95,6 @@ void writeHeader(DxfWriter& dxf, std::initializer_list<const char*> layers) {
     dxf.group(0, "ENDSEC");
 }
 
-// Start on the fold, traverse the cutting perimeter and stop on the fold.
-QPolygonF openFoldContour(QPolygonF cut, const QLineF& fold) {
-    if (cut.front() == cut.back())
-        cut.removeLast();
-    const auto onFold = [&](QPointF point) { return std::abs(point.x() - fold.x1()) <= 1e-7; };
-    QPolygonF outline;
-    for (qsizetype start = 0; start < cut.size(); ++start) {
-        if (!onFold(cut[start]) || onFold(cut[(start + 1) % cut.size()]))
-            continue;
-        outline.append(cut[start]);
-        for (qsizetype step = 1; step < cut.size(); ++step) {
-            const auto point = cut[(start + step) % cut.size()];
-            outline.append(point);
-            if (onFold(point))
-                return outline;
-        }
-    }
-    return {};
-}
-
 QString dxfText(const QString& text) {
     QString escaped;
     for (const QChar character : text) {
@@ -221,9 +201,7 @@ bool exportFabricDxf(const QString& path, const PatternDocument& document,
                      const ProductionData& data, QString& error) {
     const auto report = cuttingReport(document, data);
     const auto& usage = report.usage;
-    if (!(data.fabricWidth > 0) || !std::isfinite(data.fabricWidth)
-        || data.placements.isEmpty() || usage.invalid || usage.outside || usage.overlaps
-        || report.orientationViolations || report.foldViolations) {
+    if (!report.canExport(data.fabricWidth)) {
         error = QStringLiteral("The fabric layout must contain valid, non-overlapping copies within the fabric.");
         return false;
     }

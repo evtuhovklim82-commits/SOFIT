@@ -14,6 +14,7 @@
 #include <QRegularExpression>
 #include <QDoubleSpinBox>
 #include <QFile>
+#include <QFileInfo>
 #include <QFileDialog>
 #include <QGraphicsItem>
 #include <QGraphicsScene>
@@ -95,6 +96,53 @@ int overlayCount(const PatternView& view) {
             ++count;
     }
     return count;
+}
+
+void testGeometryEditing() {
+    MainWindow window;
+    auto& view = *window.findChild<PatternView*>();
+    auto& tree = *window.findChild<QTreeWidget*>();
+    view.entityDrawn({opc::Shape::Curve, {0, 0}, {100, 0}, {50, -10}});
+    view.entityDrawn({opc::Shape::Line, {100, 0}, {50, 80}});
+    view.entityDrawn({opc::Shape::Line, {50, 80}, {0, 0}});
+    for (qsizetype i = 0; i < 3; ++i)
+        tree.topLevelItem(i)->setSelected(true);
+    runDialog<QInputDialog>(action(window, "Create Piece from Selection…"), [](QInputDialog& dialog) {
+        dialog.setTextValue("Front");
+        dialog.accept();
+    });
+    tree.topLevelItem(1)->setCheckState(1, Qt::Unchecked);
+    tree.clearSelection();
+    tree.topLevelItem(0)->setSelected(true);
+    runDialog<QDialog>(action(window, "Edit Geometry…"), [](QDialog& dialog) {
+        const auto fields = dialog.findChildren<QDoubleSpinBox*>();
+        check(fields[2]->value() == 100 && fields[7]->value() == -10,
+              "Populate endpoint and control coordinates from the selected curve");
+        check(dialog.findChild<QCheckBox*>()->isChecked(), "Carry connected endpoints by default");
+        fields[2]->setValue(115);
+        fields[7]->setValue(-20);
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+
+    QTemporaryDir temp;
+    const auto path = temp.filePath("edited.sofit");
+    chooseFile(action(window, "&Save"), path);
+    const auto verify = [&](double x, double controlY) {
+        opc::PatternDocument loaded;
+        check(loaded.load(path) && loaded.entities()[0].b == QPointF(x, 0)
+              && loaded.entities()[1].a == QPointF(x, 0)
+              && loaded.entities()[0].control == QPointF(50, controlY)
+              && opc::analyzePiece(loaded, 0).error == opc::ContourError::None
+              && !view.entityVisible(1),
+              "Edit, undo and redo the connected curve while preserving visibility and contour closure");
+    };
+    verify(115, -20);
+    action(window, "Undo Edit Geometry").trigger();
+    action(window, "&Save").trigger();
+    verify(100, -10);
+    action(window, "Redo Edit Geometry").trigger();
+    action(window, "&Save").trigger();
+    verify(115, -20);
 }
 
 void testModelingWorkflow() {
@@ -233,6 +281,7 @@ void testContourModelingWorkflow() {
 int main(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
+    testGeometryEditing();
     testModelingWorkflow();
     testContourModelingWorkflow();
     MainWindow window;
@@ -433,6 +482,18 @@ int main(int argc, char** argv) {
           && loaded.production().placements.size() == 1 && !loaded.production().placements.front().reversed
           && loaded.production().placements.front().position == QPointF{},
           "Save and reload the automatic arrangement and directional fabric setting");
+    QString markerError;
+    const auto markerPdf = QFileInfo(pattern).absolutePath() + "/layout.pdf";
+    check(opc::exportFabricPdf(markerPdf, loaded, loaded.production(), {}, markerError),
+          "Export the graded layout with the 1:1 A4 print renderer");
+    const auto markerBytes = readPdf(markerPdf);
+    check(pageCount(markerBytes) == 9,
+          "Tile the full 1450 mm fabric width across nine A4 sheets at actual size");
+    auto invalidMarker = loaded.production();
+    invalidMarker.placements[0].reversed = true;
+    check(!opc::exportFabricPdf(markerPdf, loaded, invalidMarker, {}, markerError)
+          && !markerError.isEmpty() && readPdf(markerPdf) == markerBytes,
+          "Decline a forbidden rotation without replacing the existing PDF");
 
     runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
         for (auto* combo : dialog.findChildren<QComboBox*>()) {

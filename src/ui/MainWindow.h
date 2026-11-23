@@ -32,6 +32,8 @@ private:
     void addEntity(const opc::Entity& entity);
     void deleteSelection();
     void exactInput();
+    void editSelectedGeometry();
+    void geometryDialog(qsizetype index);
     void splitSelectedEdge();
     void joinSelectedEdges();
     void shapeSilhouette();
@@ -59,7 +61,7 @@ private:
     void setSelectedLayer(opc::Layer layer);
     QVector<qsizetype> selectedObjects() const;
     qsizetype choosePiece(const QString& title);
-    void applyPatternEdit(opc::PatternDocument document, const QString& text);
+    void applyPatternEdit(opc::PatternDocument document, const QString& text, bool redraw = false);
 
     opc::PatternDocument doc_;
     QGraphicsScene scene_;

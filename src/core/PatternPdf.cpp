@@ -1,6 +1,7 @@
 #include "PatternPdf.h"
 #include "EntityPath.h"
 #include "PieceMarkings.h"
+#include "Production.h"
 
 #include <QCoreApplication>
 #include <QPainter>
@@ -78,6 +79,88 @@ void drawFooter(QPainter& painter, const QRectF& frame, int row, int column,
     painter.drawLine(QLineF(left, top + 4, left, top + 8));
     painter.drawLine(QLineF(left + 50, top + 4, left + 50, top + 8));
 }
+bool writePdf(const QString& path, const QVector<Stroke>& strokes, const QRectF& bounds,
+              const opc::PatternPdfOptions& options, QString& error) {
+    QPageLayout layout(QPageSize(options.paper), options.orientation, QMarginsF(), QPageLayout::Millimeter);
+    layout.setMode(QPageLayout::FullPageMode);
+    const QSizeF paper = layout.fullRect(QPageLayout::Millimeter).size();
+    const QRectF frame(marginMm, marginMm,
+                       paper.width() - 2 * marginMm, paper.height() - 2 * marginMm - footerMm);
+    if (!layout.isValid() || frame.width() <= overlapMm || frame.height() <= overlapMm) {
+        error = tr("The selected paper size cannot fit the print area.");
+        return false;
+    }
+
+    const double columnCount = tileCount(bounds.width(), frame.width());
+    const double rowCount = tileCount(bounds.height(), frame.height());
+    if (!std::isfinite(bounds.left()) || !std::isfinite(bounds.top()) ||
+        !std::isfinite(columnCount * rowCount) || columnCount * rowCount > maxPages) {
+        error = tr("The drawing exceeds the PDF export limit of %1 pages.").arg(maxPages);
+        return false;
+    }
+    const int columns = int(columnCount);
+    const int rows = int(rowCount);
+
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        error = file.errorString();
+        return false;
+    }
+    {
+        QPdfWriter writer(&file);
+        writer.setCreator(QStringLiteral("SOFIT"));
+        writer.setResolution(dpi);
+        QPainter painter;
+        if (!writer.setPageLayout(layout) || !painter.begin(&writer)) {
+            error = tr("Could not start PDF export.");
+            return false;
+        }
+
+        for (int row = 0; row < rows; ++row) {
+            for (int column = 0; column < columns; ++column) {
+                if ((row != 0 || column != 0) && !writer.newPage()) {
+                    error = tr("Could not add a PDF page.");
+                    return false;
+                }
+                const QPointF origin = bounds.topLeft() +
+                    QPointF(column * (frame.width() - overlapMm), row * (frame.height() - overlapMm));
+                painter.save();
+                painter.scale(pixelsPerMm, pixelsPerMm);
+                painter.save();
+                painter.setClipRect(frame);
+                painter.translate(frame.topLeft() - origin);
+                const QRectF tile(origin, frame.size());
+                for (const auto& stroke : strokes) {
+                    if (!tile.intersects(stroke.bounds))
+                        continue;
+                    Qt::PenStyle style = Qt::SolidLine;
+                    if (stroke.layer == opc::Layer::Construction)
+                        style = Qt::DotLine;
+                    if (stroke.layer == opc::Layer::Allowance)
+                        style = Qt::DashLine;
+                    painter.setPen(QPen(Qt::black, 0.28, style));
+                    if (stroke.filled)
+                        painter.setPen(Qt::NoPen);
+                    painter.setBrush(stroke.filled ? QBrush(Qt::black) : QBrush(Qt::NoBrush));
+                    painter.drawPath(stroke.path);
+                }
+                painter.restore();
+                drawRegistration(painter, frame, row, column, rows, columns);
+                drawFooter(painter, frame, row, column, rows, columns);
+                painter.restore();
+            }
+        }
+        if (!painter.end()) {
+            error = tr("Could not finish the PDF.");
+            return false;
+        }
+    }
+    if (file.error() != QFileDevice::NoError || !file.commit()) {
+        error = file.errorString();
+        return false;
+    }
+    return true;
+}
 }
 
 namespace opc {
@@ -139,84 +222,55 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
         return false;
     }
 
-    QPageLayout layout(QPageSize(options.paper), options.orientation, QMarginsF(), QPageLayout::Millimeter);
-    layout.setMode(QPageLayout::FullPageMode);
-    const QSizeF paper = layout.fullRect(QPageLayout::Millimeter).size();
-    const QRectF frame(marginMm, marginMm,
-                       paper.width() - 2 * marginMm, paper.height() - 2 * marginMm - footerMm);
-    if (!layout.isValid() || frame.width() <= overlapMm || frame.height() <= overlapMm) {
-        error = tr("The selected paper size cannot fit the print area.");
+    return writePdf(path, strokes, bounds, options, error);
+}
+
+bool exportFabricPdf(const QString& path, const PatternDocument& document,
+                     const ProductionData& data, const PatternPdfOptions& options, QString& error) {
+    error.clear();
+    const auto report = cuttingReport(document, data);
+    if (!report.canExport(data.fabricWidth)) {
+        error = tr("The fabric layout must contain valid, non-overlapping copies within the fabric.");
         return false;
     }
 
-    const double columnCount = tileCount(bounds.width(), frame.width());
-    const double rowCount = tileCount(bounds.height(), frame.height());
-    if (!std::isfinite(bounds.left()) || !std::isfinite(bounds.top()) ||
-        !std::isfinite(columnCount * rowCount) || columnCount * rowCount > maxPages) {
-        error = tr("The drawing exceeds the PDF export limit of %1 pages.").arg(maxPages);
-        return false;
-    }
-    const int columns = int(columnCount);
-    const int rows = int(rowCount);
-
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly)) {
-        error = file.errorString();
-        return false;
-    }
-    {
-        QPdfWriter writer(&file);
-        writer.setCreator(QStringLiteral("SOFIT"));
-        writer.setResolution(dpi);
-        QPainter painter;
-        if (!writer.setPageLayout(layout) || !painter.begin(&writer)) {
-            error = tr("Could not start PDF export.");
+    QVector<Stroke> strokes;
+    const auto append = [&](QPainterPath stroke, Layer layer) {
+        const auto extent = stroke.boundingRect().adjusted(-paddingMm, -paddingMm, paddingMm, paddingMm);
+        strokes.append({std::move(stroke), extent, layer});
+    };
+    const QRectF fabric(0, 0, data.fabricWidth, report.usage.length);
+    QPainterPath boundary;
+    boundary.addRect(fabric);
+    append(std::move(boundary), Layer::Construction);
+    QMap<QString, PatternDocument> graded;
+    for (const auto& placement : data.placements) {
+        if (!graded.contains(placement.size))
+            graded.insert(placement.size, gradedPattern(document, placement.size));
+        const auto geometry = fabricPiece(graded.constFind(placement.size).value(), placement);
+        const bool onFold = !geometry.fold.isNull();
+        const auto outline = onFold ? openFoldContour(geometry.cut, geometry.fold) : geometry.cut;
+        if (outline.size() < 3) {
+            error = tr("Could not separate a cutting contour from its fold line.");
             return false;
         }
-
-        for (int row = 0; row < rows; ++row) {
-            for (int column = 0; column < columns; ++column) {
-                if ((row != 0 || column != 0) && !writer.newPage()) {
-                    error = tr("Could not add a PDF page.");
-                    return false;
-                }
-                const QPointF origin = bounds.topLeft() +
-                    QPointF(column * (frame.width() - overlapMm), row * (frame.height() - overlapMm));
-                painter.save();
-                painter.scale(pixelsPerMm, pixelsPerMm);
-                painter.save();
-                painter.setClipRect(frame);
-                painter.translate(frame.topLeft() - origin);
-                const QRectF tile(origin, frame.size());
-                for (const auto& stroke : strokes) {
-                    if (!tile.intersects(stroke.bounds))
-                        continue;
-                    Qt::PenStyle style = Qt::SolidLine;
-                    if (stroke.layer == Layer::Construction)
-                        style = Qt::DotLine;
-                    if (stroke.layer == Layer::Allowance)
-                        style = Qt::DashLine;
-                    painter.setPen(QPen(Qt::black, 0.28, style));
-                    if (stroke.filled)
-                        painter.setPen(Qt::NoPen);
-                    painter.setBrush(stroke.filled ? QBrush(Qt::black) : QBrush(Qt::NoBrush));
-                    painter.drawPath(stroke.path);
-                }
-                painter.restore();
-                drawRegistration(painter, frame, row, column, rows, columns);
-                drawFooter(painter, frame, row, column, rows, columns);
-                painter.restore();
-            }
+        QPainterPath cut;
+        cut.addPolygon(outline.translated(placement.position));
+        if (!onFold)
+            cut.closeSubpath();
+        append(std::move(cut), Layer::Main);
+        if (onFold) {
+            QPainterPath fold(geometry.fold.p1() + placement.position);
+            fold.lineTo(geometry.fold.p2() + placement.position);
+            append(std::move(fold), Layer::Allowance);
         }
-        if (!painter.end()) {
-            error = tr("Could not finish the PDF.");
-            return false;
+        if (document.pieces()[placement.piece].grainAngle) {
+            QPainterPath grain(geometry.grain.p1() + placement.position);
+            grain.lineTo(geometry.grain.p2() + placement.position);
+            append(std::move(grain), Layer::Construction);
         }
     }
-    if (file.error() != QFileDevice::NoError || !file.commit()) {
-        error = file.errorString();
-        return false;
-    }
-    return true;
+    return writePdf(path, strokes, fabric.adjusted(-paddingMm, -paddingMm, paddingMm, paddingMm),
+                    options, error);
 }
 }

@@ -138,6 +138,12 @@ int main(int argc, char** argv) {
     check(report.orientationViolations == 1 && report.foldViolations == 1 && report.rows.size() == 1
           && report.rows[0].left == 1 && report.rows[0].right == 1 && report.rows[0].onFold == 1,
           "Group by piece and size and report rotation and fold violations");
+    const auto kit = cuttingKitRows(triangle, report);
+    check(kit.size() == 2 && kit[0].copies() == 3 && kit[1].piece == 1 && kit[1].copies() == 0,
+          "Include pieces entirely missing from the marker and count a fold as one");
+    const auto emptyKit = cuttingKitRows(triangle, {});
+    check(emptyKit.size() == 2 && emptyKit[0].size.isEmpty() && emptyKit[0].copies() == 0,
+          "Audit the base kit when the marker is empty");
     const auto constrained = arrangeFabric(triangle, triangleBatch);
     check(constrained.error == FabricLayoutError::None && constrained.placements.size() == 3
           && constrained.placements[0].hand == CutHand::Left

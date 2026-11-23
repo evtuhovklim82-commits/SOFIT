@@ -1,4 +1,5 @@
 #include "ProductionDialogs.h"
+#include "PatternPdf.h"
 #include "Production.h"
 #include "PatternDxf.h"
 
@@ -321,6 +322,8 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     cutControls->addWidget(reportButton);
     auto* dxf = new QPushButton(tr("Export layout DXF…"));
     cutControls->addWidget(dxf);
+    auto* pdf = new QPushButton(tr("Export layout A4 PDF…"));
+    cutControls->addWidget(pdf);
 
     auto* automaticControls = new QHBoxLayout;
     layout->addLayout(automaticControls);
@@ -541,6 +544,16 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         if (!opc::exportFabricDxf(path, document, data, error))
             QMessageBox::warning(&dialog, dialog.windowTitle(), error);
     });
+    QObject::connect(pdf, &QPushButton::clicked, &dialog, [&] {
+        auto path = QFileDialog::getSaveFileName(&dialog, tr("Export 1:1 fabric layout"), {}, tr("PDF (*.pdf)"));
+        if (path.isEmpty())
+            return;
+        if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive))
+            path += QStringLiteral(".pdf");
+        QString error;
+        if (!opc::exportFabricPdf(path, document, data, {}, error))
+            QMessageBox::warning(&dialog, dialog.windowTitle(), error);
+    });
     QObject::connect(reportButton, &QPushButton::clicked, &dialog, [&] {
         const auto report = opc::cuttingReport(document, data);
         const auto& usage = report.usage;
@@ -556,13 +569,37 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
                    "\nRotation conflicts: %4 · Off fold: %5\n")
             .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid)
             .arg(report.orientationViolations).arg(report.foldViolations);
-        for (const auto& row : report.rows) {
-            text += tr("\n%1 · %2 | Single: %3 | Left: %4 | Right: %5 | On fold: %6")
-                .arg(document.pieces()[row.piece].name, row.size.isEmpty() ? tr("Base") : row.size)
-                .arg(row.single).arg(row.left).arg(row.right).arg(row.onFold);
-            if (row.left != row.right)
-                text += tr(" | Unmatched left/right copies");
+        qsizetype countIssues = 0;
+        qsizetype pairIssues = 0;
+        QString details;
+        for (const auto& row : opc::cuttingKitRows(document, report)) {
+            const auto& piece = document.pieces()[row.piece];
+            details += tr("\n%1 · %2 | Expected: %3 | Plotted: %4 (single %5, left %6, right %7, on fold %8)")
+                .arg(piece.name, row.size.isEmpty() ? tr("Base") : row.size)
+                .arg(piece.cutCount).arg(row.copies()).arg(row.single).arg(row.left)
+                .arg(row.right).arg(row.onFold);
+            if (row.copies() < piece.cutCount) {
+                details += tr(" | Missing: %1").arg(piece.cutCount - row.copies());
+                ++countIssues;
+            } else if (row.copies() > piece.cutCount) {
+                details += tr(" | Extra: %1").arg(row.copies() - piece.cutCount);
+                ++countIssues;
+            }
+            if (row.left != row.right) {
+                details += tr(" | Unmatched left/right copies");
+                ++pairIssues;
+            }
+            if (!piece.grainAngle)
+                details += tr(" | Grain direction unspecified");
         }
+        if (data.placements.isEmpty() || usage.invalid || usage.outside || usage.overlaps
+            || report.orientationViolations || report.foldViolations || countIssues || pairIssues) {
+            text += tr("\nReview the issues below before cutting.\n");
+        } else {
+            text += tr("\nLayout geometry, copy counts and handed pairs pass the checks.\n");
+        }
+        text += tr("Counts compare one kit per plotted size. Check fabric, markings and fit with a sample before production.\n");
+        text += details;
         QDialog reportDialog(&dialog);
         reportDialog.setWindowTitle(tr("Cutting report"));
         reportDialog.resize(700, 440);

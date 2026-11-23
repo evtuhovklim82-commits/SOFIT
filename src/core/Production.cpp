@@ -255,6 +255,28 @@ double foldPosition(const FabricPlacement& placement, double fabricWidth, double
     return 0;
 }
 
+// Start on the fold, traverse the cutting perimeter and stop on the fold.
+QPolygonF openFoldContour(QPolygonF cut, const QLineF& fold) {
+    if (cut.isEmpty())
+        return {};
+    if (cut.front() == cut.back())
+        cut.removeLast();
+    const auto onFold = [&](QPointF point) { return std::abs(point.x() - fold.x1()) <= 1e-7; };
+    QPolygonF outline;
+    for (qsizetype start = 0; start < cut.size(); ++start) {
+        if (!onFold(cut[start]) || onFold(cut[(start + 1) % cut.size()]))
+            continue;
+        outline.append(cut[start]);
+        for (qsizetype step = 1; step < cut.size(); ++step) {
+            const auto point = cut[(start + step) % cut.size()];
+            outline.append(point);
+            if (onFold(point))
+                return outline;
+        }
+    }
+    return {};
+}
+
 LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& placement) {
     if (placement.piece < 0 || placement.piece >= graded.pieces().size())
         return {};
@@ -383,6 +405,12 @@ FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width) {
     return usage;
 }
 
+bool CuttingReport::canExport(double fabricWidth) const {
+    return std::isfinite(fabricWidth) && fabricWidth > 0 && !rows.isEmpty()
+        && !usage.invalid && !usage.outside && !usage.overlaps
+        && !orientationViolations && !foldViolations;
+}
+
 CuttingReport cuttingReport(const PatternDocument& document, const ProductionData& data) {
     CuttingReport report;
     QMap<QString, PatternDocument> graded;
@@ -416,6 +444,21 @@ CuttingReport cuttingReport(const PatternDocument& document, const ProductionDat
     report.rows = counts.values();
     report.usage = fabricUsage(polygons, data.fabricWidth);
     return report;
+}
+
+QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const CuttingReport& report) {
+    QMap<QString, QMap<qsizetype, CuttingReportRow>> bySize;
+    for (const auto& row : report.rows)
+        bySize[row.size].insert(row.piece, row);
+    if (bySize.isEmpty())
+        bySize.insert(QString{}, {});
+
+    QVector<CuttingReportRow> rows;
+    for (auto size = bySize.cbegin(); size != bySize.cend(); ++size) {
+        for (qsizetype i = 0; i < document.pieces().size(); ++i)
+            rows.append(size->value(i, {i, size.key()}));
+    }
+    return rows;
 }
 
 AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const ProductionData& data) {

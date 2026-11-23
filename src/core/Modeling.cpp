@@ -106,6 +106,67 @@ std::optional<EdgePair> joinEdges(const PatternDocument& document, qsizetype fir
     return joined;
 }
 
+std::optional<PatternDocument> editGeometry(const PatternDocument& document, qsizetype index,
+                                            QPointF a, QPointF b, QPointF control, bool moveConnected) {
+    const auto& entities = document.entities();
+    if (index < 0 || index >= entities.size())
+        return std::nullopt;
+    const auto& original = entities[index];
+    auto replacement = original;
+    replacement.a = a;
+    replacement.b = original.shape == Shape::Point ? a : b;
+    if (original.shape == Shape::Curve)
+        replacement.control = control;
+
+    if (!original.draftName.isEmpty()
+        || (original.shape == Shape::Point ? !validPoint(a) : !validEdge(replacement)))
+        return std::nullopt;
+    for (const auto& rule : document.production().rules) {
+        if (rule.piece == original.piece)
+            return std::nullopt;
+    }
+
+    auto updated = document;
+    updated.replace(index, replacement);
+    if (!moveConnected || original.piece < 0)
+        return updated;
+
+    // Match the old geometry so moving both ends cannot chain through a new position.
+    const auto move = [&](QPointF point) {
+        if (a != original.a && distance(point, original.a) <= endpointTolerance)
+            return a;
+        if (original.shape != Shape::Point && b != original.b
+            && distance(point, original.b) <= endpointTolerance)
+            return b;
+        return point;
+    };
+    for (qsizetype i = 0; i < entities.size(); ++i) {
+        const auto& entity = entities[i];
+        if (i == index || entity.piece != original.piece || entity.layer != original.layer)
+            continue;
+        if (entity.shape == Shape::Rectangle || entity.shape == Shape::Circle) {
+            if (move(entity.a) != entity.a || move(entity.b) != entity.b)
+                return std::nullopt;
+            if (entity.shape == Shape::Rectangle) {
+                const QPointF c(entity.a.x(), entity.b.y());
+                const QPointF d(entity.b.x(), entity.a.y());
+                if (move(c) != c || move(d) != d)
+                    return std::nullopt;
+            }
+            continue;
+        }
+        auto moved = entity;
+        moved.a = move(entity.a);
+        moved.b = entity.shape == Shape::Point ? moved.a : move(entity.b);
+        if (moved.a == entity.a && moved.b == entity.b)
+            continue;
+        if (!entity.draftName.isEmpty() || (entity.shape != Shape::Point && !validEdge(moved)))
+            return std::nullopt;
+        updated.replace(i, moved);
+    }
+    return updated;
+}
+
 std::optional<EdgePair> dartLegs(QPointF first, QPointF apex, QPointF second) {
     if (!validPoint(first) || !validPoint(apex) || !validPoint(second)
         || distance(first, second) <= endpointTolerance)
