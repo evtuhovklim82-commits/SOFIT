@@ -2,14 +2,24 @@
 #include <QPointF>
 #include <QString>
 #include <QVector>
+#include <array>
 
 namespace opc {
 enum class Shape { Point, Line, Rectangle, Circle, Curve };
+
+enum class Layer { Main, Construction, Allowance };
+
+struct Piece {
+    QString name;
+    double allowanceMm = 0;
+};
 
 struct Entity {
     Shape shape;
     QPointF a, b;
     QPointF control{};
+    qsizetype piece = -1;
+    Layer layer = Layer::Main;
 };
 
 class PatternDocument {
@@ -18,10 +28,16 @@ public:
     void replace(qsizetype index, const Entity& entity) { entities_[index] = entity; }
     void remove(qsizetype index) { entities_.removeAt(index); }
     const QVector<Entity>& entities() const { return entities_; }
+    QVector<Piece>& pieces() { return pieces_; }
+    const QVector<Piece>& pieces() const { return pieces_; }
+    bool layerVisible(Layer layer) const { return layerVisibility_[static_cast<int>(layer)]; }
+    void setLayerVisible(Layer layer, bool visible) { layerVisibility_[static_cast<int>(layer)] = visible; }
     bool save(const QString& path, QString* error = nullptr) const;
     bool load(const QString& path, QString* error = nullptr);
 
 private:
     QVector<Entity> entities_;
+    QVector<Piece> pieces_;
+    std::array<bool, 3> layerVisibility_{true, true, true};
 };
 }

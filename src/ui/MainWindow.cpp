@@ -5,6 +5,8 @@
 #include <QCloseEvent>
 #include <QDockWidget>
 #include <QHeaderView>
+#include <QInputDialog>
+#include <QPushButton>
 #include <QSignalBlocker>
 #include <QTreeWidget>
 #include <QComboBox>
@@ -22,10 +24,24 @@
 #include <QStatusBar>
 #include <QToolBar>
 #include <QXmlStreamWriter>
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 
 namespace {
+class PatternCommand : public QUndoCommand {
+public:
+    PatternCommand(opc::PatternDocument& document, opc::PatternDocument after, const QString& text)
+        : QUndoCommand(text), document_(document), before_(document), after_(std::move(after)) {}
+
+    void undo() override { document_ = before_; }
+    void redo() override { document_ = after_; }
+
+private:
+    opc::PatternDocument& document_;
+    opc::PatternDocument before_, after_;
+};
+
 class MoveCommand : public QUndoCommand {
 public:
     MoveCommand(opc::PatternDocument& document, PatternView& view, qsizetype index,
@@ -88,7 +104,7 @@ private:
 }
 
 MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
-    setWindowTitle(QStringLiteral("SOFIT 0.3[*]"));
+    setWindowTitle(QStringLiteral("SOFIT 0.4[*]"));
     resize(1100, 750);
     setCentralWidget(view_);
     setStyleSheet(QStringLiteral(
@@ -102,24 +118,30 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
 
     auto* dock = new QDockWidget(tr("Drawing Objects"), this);
     dock->setObjectName(QStringLiteral("drawingObjects"));
-    dock->setMinimumWidth(220);
+    dock->setMinimumWidth(330);
     objects_ = new QTreeWidget(dock);
-    objects_->setHeaderLabels({tr("Object"), tr("Visible")});
+    objects_->setHeaderLabels({tr("Object"), tr("Visible"), tr("Piece"), tr("Layer")});
     objects_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     objects_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    objects_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    objects_->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    objects_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     objects_->setRootIsDecorated(false);
     objects_->setAlternatingRowColors(true);
     dock->setWidget(objects_);
     addDockWidget(Qt::RightDockWidgetArea, dock);
     connect(objects_, &QTreeWidget::itemSelectionChanged, this, [this] {
         const auto selected = objects_->selectedItems();
-        view_->selectEntity(selected.isEmpty() ? -1 : objects_->indexOfTopLevelItem(selected.front()));
+        const QSignalBlocker blocker(objects_);
+        view_->selectEntity(selected.size() == 1 ? objects_->indexOfTopLevelItem(selected.front()) : -1);
     });
     connect(objects_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
         if (column == 1)
             view_->setEntityVisible(objects_->indexOfTopLevelItem(item), item->checkState(1) == Qt::Checked);
     });
     connect(&scene_, &QGraphicsScene::selectionChanged, this, [this] {
+        if (objects_->signalsBlocked())
+            return;
         const QSignalBlocker blocker(objects_);
         const auto index = view_->selectedIndex();
         objects_->clearSelection();
@@ -148,12 +170,51 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     auto* deleteAction = edit->addAction(tr("Delete Selection"), QKeySequence(Qt::Key_Delete),
                                          this, &MainWindow::deleteSelection);
     deleteAction->setEnabled(false);
-    connect(&scene_, &QGraphicsScene::selectionChanged, this,
-            [this, deleteAction] { deleteAction->setEnabled(!scene_.selectedItems().isEmpty()); });
+    const auto updateDelete = [this, deleteAction] {
+        deleteAction->setEnabled(!objects_->selectedItems().isEmpty());
+    };
+    connect(objects_, &QTreeWidget::itemSelectionChanged, this, updateDelete);
+    connect(&scene_, &QGraphicsScene::selectionChanged, this, updateDelete);
+    connect(&undo_, &QUndoStack::indexChanged, this, updateDelete);
     connect(&undo_, &QUndoStack::cleanChanged, this, [this](bool clean) { setWindowModified(!clean); });
+
+    auto* pattern = menuBar()->addMenu(tr("&Pattern"));
+    pattern->addAction(tr("Create Piece from Selection…"), this, &MainWindow::createPiece);
+    pattern->addAction(tr("Assign Selection to Piece…"), this, &MainWindow::assignPiece);
+    pattern->addAction(tr("Remove Selection from Piece"), this, [this] {
+        auto updated = doc_;
+        bool changed = false;
+        for (const auto index : selectedObjects()) {
+            auto entity = updated.entities()[index];
+            changed |= entity.piece >= 0;
+            entity.piece = -1;
+            updated.replace(index, entity);
+        }
+        if (changed)
+            applyPatternEdit(std::move(updated), tr("Remove Objects from Piece"));
+    });
+    pattern->addAction(tr("Piece, Contour and Allowance…"), this, &MainWindow::managePiece);
+    pattern->addSeparator();
+    pattern->addAction(tr("Move Selection to Main Layer"), this,
+                       [this] { setSelectedLayer(opc::Layer::Main); });
+    pattern->addAction(tr("Move Selection to Construction Layer"), this,
+                       [this] { setSelectedLayer(opc::Layer::Construction); });
 
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(dock->toggleViewAction());
+    auto* layers = viewMenu->addMenu(tr("Layers"));
+    const std::array layerNames{tr("Main Lines"), tr("Construction Lines"), tr("Seam Allowances")};
+    for (int index = 0; index < static_cast<int>(layerNames.size()); ++index) {
+        auto* action = layers->addAction(layerNames[index]);
+        layerActions_[index] = action;
+        action->setCheckable(true);
+        action->setChecked(true);
+        connect(action, &QAction::triggered, this, [this, index](bool visible) {
+            auto updated = doc_;
+            updated.setLayerVisible(static_cast<opc::Layer>(index), visible);
+            applyPatternEdit(std::move(updated), tr("Change Layer Visibility"));
+        });
+    }
     auto* objectSnap = viewMenu->addAction(tr("Snap to Objects"));
     objectSnap->setCheckable(true);
     objectSnap->setChecked(true);
@@ -171,6 +232,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     connect(cancelAction, &QAction::triggered, this, [this] {
         view_->cancelDrawing();
         scene_.clearSelection();
+        objects_->clearSelection();
     });
     addAction(cancelAction);
 
@@ -240,11 +302,24 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
 
 void MainWindow::refreshObjects() {
     const QSignalBlocker blocker(objects_);
+    pieces_.clear();
+    QVector<QPolygonF> allowances;
+    for (qsizetype index = 0; index < doc_.pieces().size(); ++index) {
+        auto geometry = opc::analyzePiece(doc_, index);
+        if (!geometry.allowance.isEmpty())
+            allowances.append(geometry.allowance);
+        pieces_.append(std::move(geometry));
+    }
+    view_->applyLayers(doc_, allowances);
+    for (int index = 0; index < static_cast<int>(layerActions_.size()); ++index)
+        layerActions_[index]->setChecked(doc_.layerVisible(static_cast<opc::Layer>(index)));
+
     objects_->clear();
     const auto selected = view_->selectedIndex();
     for (qsizetype index = 0; index < doc_.entities().size(); ++index) {
         QString name;
-        switch (doc_.entities()[index].shape) {
+        const auto& entity = doc_.entities()[index];
+        switch (entity.shape) {
         case opc::Shape::Point: name = tr("Point"); break;
         case opc::Shape::Line: name = tr("Line"); break;
         case opc::Shape::Rectangle: name = tr("Rectangle"); break;
@@ -252,9 +327,203 @@ void MainWindow::refreshObjects() {
         case opc::Shape::Curve: name = tr("Curve"); break;
         }
         auto* item = new QTreeWidgetItem(objects_, {tr("%1 · %2").arg(index + 1).arg(name)});
+        if (entity.piece >= 0)
+            item->setText(2, doc_.pieces()[entity.piece].name);
+        item->setText(3, entity.layer == opc::Layer::Main ? tr("Main") : tr("Construction"));
         item->setCheckState(1, view_->entityVisible(index) ? Qt::Checked : Qt::Unchecked);
         if (index == selected)
             objects_->setCurrentItem(item);
+    }
+}
+
+QVector<qsizetype> MainWindow::selectedObjects() const {
+    QVector<qsizetype> indices;
+    for (auto* item : objects_->selectedItems())
+        indices.append(objects_->indexOfTopLevelItem(item));
+    return indices;
+}
+
+qsizetype MainWindow::choosePiece(const QString& title) {
+    if (doc_.pieces().isEmpty()) {
+        QMessageBox::information(this, title, tr("Create a piece from drawing objects first."));
+        return -1;
+    }
+
+    QStringList choices;
+    for (const auto& piece : doc_.pieces())
+        choices.append(tr("%1. %2").arg(choices.size() + 1).arg(piece.name));
+    const auto selected = selectedObjects();
+    const auto current = selected.isEmpty() ? -1 : doc_.entities()[selected.front()].piece;
+    if (choices.size() == 1)
+        return 0;
+    bool accepted = false;
+    const auto choice = QInputDialog::getItem(this, title, tr("Piece"), choices,
+                                             current < 0 ? 0 : current, false, &accepted);
+    return accepted ? choices.indexOf(choice) : -1;
+}
+
+void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& text) {
+    const auto selected = selectedObjects();
+    view_->cancelDrawing();
+    undo_.push(new PatternCommand(doc_, std::move(document), text));
+    for (const auto index : selected)
+        objects_->topLevelItem(index)->setSelected(true);
+}
+
+void MainWindow::createPiece() {
+    const auto selected = selectedObjects();
+    if (selected.isEmpty()) {
+        QMessageBox::information(this, tr("Create Piece"),
+                                 tr("Select objects in the list. Use Ctrl or Shift to select several."));
+        return;
+    }
+    bool accepted = false;
+    const auto name = QInputDialog::getText(this, tr("Create Piece"), tr("Name"), QLineEdit::Normal,
+                                            {}, &accepted).trimmed();
+    if (!accepted || name.isEmpty())
+        return;
+
+    auto updated = doc_;
+    const auto piece = updated.pieces().size();
+    updated.pieces().append({name});
+    for (const auto index : selected) {
+        auto entity = updated.entities()[index];
+        entity.piece = piece;
+        updated.replace(index, entity);
+    }
+    applyPatternEdit(std::move(updated), tr("Create Piece"));
+}
+
+void MainWindow::assignPiece() {
+    const auto selected = selectedObjects();
+    if (selected.isEmpty()) {
+        QMessageBox::information(this, tr("Assign Selection"), tr("Select objects in the list first."));
+        return;
+    }
+    const auto piece = choosePiece(tr("Assign Selection"));
+    if (piece < 0)
+        return;
+
+    auto updated = doc_;
+    bool changed = false;
+    for (const auto index : selected) {
+        auto entity = updated.entities()[index];
+        changed |= entity.piece != piece;
+        entity.piece = piece;
+        updated.replace(index, entity);
+    }
+    if (changed)
+        applyPatternEdit(std::move(updated), tr("Assign Objects to Piece"));
+}
+
+void MainWindow::setSelectedLayer(opc::Layer layer) {
+    auto updated = doc_;
+    bool changed = false;
+    for (const auto index : selectedObjects()) {
+        auto entity = updated.entities()[index];
+        changed |= entity.layer != layer;
+        entity.layer = layer;
+        updated.replace(index, entity);
+    }
+    if (changed)
+        applyPatternEdit(std::move(updated), tr("Change Object Layer"));
+}
+
+void MainWindow::managePiece() {
+    const auto piece = choosePiece(tr("Piece, Contour and Allowance"));
+    if (piece < 0)
+        return;
+
+    const auto& original = doc_.pieces()[piece];
+    const auto& geometry = pieces_[piece];
+    QString contour;
+    using opc::ContourError;
+    switch (geometry.error) {
+    case ContourError::None: contour = tr("One closed contour"); break;
+    case ContourError::Empty: contour = tr("No objects on the main layer"); break;
+    case ContourError::UnsupportedShape: contour = tr("Use lines, rectangles or quadratic curves on the main layer"); break;
+    case ContourError::Degenerate: contour = tr("A zero-length or folded edge"); break;
+    case ContourError::Open: contour = tr("Open ends"); break;
+    case ContourError::Branched: contour = tr("Multiple edges meet at an endpoint"); break;
+    case ContourError::Disconnected: contour = tr("More than one closed contour"); break;
+    case ContourError::SelfIntersecting: contour = tr("Contour intersects, overlaps, or folds onto itself"); break;
+    case ContourError::UncertainCurves: contour = tr("Curves are too close to verify a simple contour"); break;
+    case ContourError::TooComplex: contour = tr("Contour exceeds the geometry limits"); break;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Piece, Contour and Allowance"));
+    auto* form = new QFormLayout(&dialog);
+    auto* name = new QLineEdit(original.name, &dialog);
+    form->addRow(tr("Name"), name);
+    form->addRow(tr("Contour check"), new QLabel(contour, &dialog));
+    if (geometry.error == ContourError::None) {
+        const QLocale locale;
+        form->addRow(tr("Perimeter"), new QLabel(tr("%1 mm").arg(locale.toString(geometry.perimeterMm, 'f', 2)), &dialog));
+        form->addRow(tr("Width × height"), new QLabel(tr("%1 × %2 mm").arg(
+            locale.toString(geometry.bounds.width(), 'f', 2),
+            locale.toString(geometry.bounds.height(), 'f', 2)), &dialog));
+    }
+    if (original.allowanceMm > 0 && (geometry.error != ContourError::None || geometry.allowanceFailed))
+        form->addRow(new QLabel(tr("The stored allowance cannot be drawn on this contour."), &dialog));
+
+    auto* width = new QDoubleSpinBox(&dialog);
+    width->setDecimals(3);
+    width->setRange(0, std::max(100000.0, original.allowanceMm));
+    width->setSpecialValueText(tr("None"));
+    width->setSuffix(tr(" mm"));
+    width->setValue(original.allowanceMm);
+    form->addRow(tr("Seam allowance"), width);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    auto* remove = buttons->addButton(tr("Delete Piece…"), QDialogButtonBox::DestructiveRole);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(remove, &QPushButton::clicked, &dialog, [&] {
+        if (QMessageBox::question(&dialog, tr("Delete Piece"),
+                                  tr("Delete the piece and keep its drawing objects?")) == QMessageBox::Yes)
+            dialog.done(2);
+    });
+    const auto displayedWidth = width->value();
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        if (name->text().trimmed().isEmpty()) {
+            name->setFocus();
+            return;
+        }
+        if (width->value() > 0 && width->value() != displayedWidth) {
+            auto updated = doc_;
+            updated.pieces()[piece].allowanceMm = width->value();
+            const auto check = opc::analyzePiece(updated, piece);
+            if (check.error != ContourError::None || check.allowanceFailed) {
+                QMessageBox::warning(&dialog, tr("Allowance unavailable"),
+                    tr("The contour cannot produce an outward allowance at this width. "
+                       "Check the contour or try a smaller width."));
+                return;
+            }
+        }
+        dialog.accept();
+    });
+
+    const int result = dialog.exec();
+    if (result == QDialog::Rejected)
+        return;
+    auto updated = doc_;
+    if (result == 2) {
+        updated.pieces().removeAt(piece);
+        for (qsizetype index = 0; index < updated.entities().size(); ++index) {
+            auto entity = updated.entities()[index];
+            if (entity.piece < piece)
+                continue;
+            entity.piece = entity.piece == piece ? -1 : entity.piece - 1;
+            updated.replace(index, entity);
+        }
+        applyPatternEdit(std::move(updated), tr("Delete Piece"));
+    } else {
+        const auto newWidth = width->value() == displayedWidth ? original.allowanceMm : width->value();
+        const auto newName = name->text().trimmed();
+        if (newName != original.name || newWidth != original.allowanceMm) {
+            updated.pieces()[piece] = {newName, newWidth};
+            applyPatternEdit(std::move(updated), tr("Edit Piece"));
+        }
     }
 }
 
@@ -267,9 +536,14 @@ void MainWindow::addEntity(const opc::Entity& entity) {
 }
 
 void MainWindow::deleteSelection() {
-    const auto index = view_->selectedIndex();
-    if (index >= 0)
+    auto selected = selectedObjects();
+    if (selected.isEmpty())
+        return;
+    std::sort(selected.begin(), selected.end(), std::greater<>());
+    undo_.beginMacro(tr("Delete Objects"));
+    for (const auto index : selected)
         undo_.push(new EntityCommand(doc_, *view_, index, doc_.entities().at(index), false, tr("Delete Object")));
+    undo_.endMacro();
 }
 
 void MainWindow::exactInput() {
@@ -392,6 +666,7 @@ void MainWindow::replaceDocument(opc::PatternDocument document, const QString& p
     setWindowFilePath(path);
     view_->setEntities(doc_.entities());
     refreshObjects();
+    view_->fitDrawing();
 }
 
 void MainWindow::newDocument() {
@@ -448,8 +723,13 @@ void MainWindow::exportSvg() {
     }
 
     const auto& entities = doc_.entities();
+    const auto isExported = [this](const opc::Entity& entity) {
+        return doc_.layerVisible(entity.layer);
+    };
     QRectF bounds;
     for (const auto& entity : entities) {
+        if (!isExported(entity))
+            continue;
         QRectF extent = QRectF(entity.a, entity.b).normalized();
         if (entity.shape == opc::Shape::Circle) {
             const auto radius = QLineF(entity.a, entity.b).length();
@@ -462,7 +742,13 @@ void MainWindow::exportSvg() {
         }
         bounds = bounds.united(extent.adjusted(-5, -5, 5, 5));
     }
-    if (entities.isEmpty())
+    if (doc_.layerVisible(opc::Layer::Allowance)) {
+        for (const auto& geometry : pieces_) {
+            if (!geometry.allowance.isEmpty())
+                bounds = bounds.united(geometry.allowance.boundingRect().adjusted(-5, -5, 5, 5));
+        }
+    }
+    if (bounds.isNull())
         bounds = QRectF(-500, -350, 1000, 700);
     QXmlStreamWriter xml(&file);
     xml.setAutoFormatting(true);
@@ -478,6 +764,8 @@ void MainWindow::exportSvg() {
     xml.writeAttribute("viewBox", QStringLiteral("%1 %2 %3 %4").arg(
         number(bounds.x()), number(bounds.y()), number(bounds.width()), number(bounds.height())));
     for (const auto& entity : entities) {
+        if (!isExported(entity))
+            continue;
         switch (entity.shape) {
         case opc::Shape::Point:
             xml.writeStartElement("circle");
@@ -520,10 +808,28 @@ void MainWindow::exportSvg() {
         }
         }
         if (entity.shape != opc::Shape::Point) {
-            xml.writeAttribute("stroke", "#1e64be");
+            xml.writeAttribute("stroke", entity.layer == opc::Layer::Main ? "#1e64be" : "#58657d");
+            if (entity.layer == opc::Layer::Construction)
+                xml.writeAttribute("stroke-dasharray", "3 2");
             xml.writeAttribute("stroke-width", "0.5");
         }
         xml.writeEndElement();
+    }
+    if (doc_.layerVisible(opc::Layer::Allowance)) {
+        for (const auto& geometry : pieces_) {
+            if (geometry.allowance.isEmpty())
+                continue;
+            QStringList points;
+            for (const auto& point : geometry.allowance)
+                points.append(number(point.x()) + "," + number(point.y()));
+            xml.writeStartElement("polygon");
+            xml.writeAttribute("points", points.join(' '));
+            xml.writeAttribute("fill", "none");
+            xml.writeAttribute("stroke", "#ac5f13");
+            xml.writeAttribute("stroke-width", "0.5");
+            xml.writeAttribute("stroke-dasharray", "3 2");
+            xml.writeEndElement();
+        }
     }
     xml.writeEndElement();
     xml.writeEndDocument();

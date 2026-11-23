@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsofit_widgets.a CMakeFiles/sofit_widgets.dir/sofit_widgets_autogen/mocs_compilation.cpp.o CMakeFiles/sofit_widgets.dir/src/ui/MainWindow.cpp.o CMakeFiles/sofit_widgets.dir/src/ui/PatternView.cpp.o
+/usr/bin/ranlib libsofit_widgets.a

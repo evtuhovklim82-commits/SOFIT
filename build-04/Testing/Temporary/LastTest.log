@@ -1,0 +1,40 @@
+Start testing: Nov 23 19:43 MSK
+----------------------------------------------------------
+1/2 Testing: sofit_core
+1/2 Test: sofit_core
+Command: "/mnt/A/SOFIT/build-04/sofit_core_tests"
+Directory: /mnt/A/SOFIT/build-04
+"sofit_core" start time: Nov 23 19:43 MSK
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"sofit_core" end time: Nov 23 19:43 MSK
+"sofit_core" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/2 Testing: sofit_pattern_workflow
+2/2 Test: sofit_pattern_workflow
+Command: "/mnt/A/SOFIT/build-04/sofit_ui_tests"
+Directory: /mnt/A/SOFIT/build-04
+"sofit_pattern_workflow" start time: Nov 23 19:43 MSK
+Output:
+----------------------------------------------------------
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+This plugin does not support propagateSizeHints()
+<end of output>
+Test time =   0.05 sec
+----------------------------------------------------------
+Test Passed.
+"sofit_pattern_workflow" end time: Nov 23 19:43 MSK
+"sofit_pattern_workflow" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Nov 23 19:43 MSK

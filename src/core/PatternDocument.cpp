@@ -35,14 +35,21 @@ QJsonArray coordinates(const Entity& entity) {
 
 bool PatternDocument::save(const QString& path, QString* error) const {
     QJsonArray objects;
-    int version = 2;
     for (const auto& entity : entities_) {
-        if (entity.shape == Shape::Circle || entity.shape == Shape::Curve)
-            version = 3;
         objects.append(QJsonObject{{"type", shapeName(entity.shape)},
-                                   {"coordinates", coordinates(entity)}});
+                                   {"coordinates", coordinates(entity)},
+                                   {"piece", entity.piece},
+                                   {"layer", entity.layer == Layer::Main ? "main" : "construction"}});
     }
-    const QJsonObject root{{"format", "SOFIT"}, {"version", version}, {"objects", objects}};
+    QJsonArray pieces;
+    for (const auto& piece : pieces_) {
+        pieces.append(QJsonObject{{"name", piece.name}, {"allowanceMm", piece.allowanceMm}});
+    }
+    QJsonArray layerVisibility;
+    for (bool visible : layerVisibility_)
+        layerVisibility.append(visible);
+    const QJsonObject root{{"format", "SOFIT"}, {"version", 4}, {"objects", objects},
+                           {"pieces", pieces}, {"layerVisibility", layerVisibility}};
     const auto data = QJsonDocument(root).toJson();
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
@@ -68,10 +75,34 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto format = root.value("format").toString();
     const auto version = root.value("version").toDouble();
     const bool legacy = version == 1 && (format == "SOFIT" || format == "OpenPatternCAD");
-    const bool current = (version == 2 || version == 3) && format == "SOFIT";
+    const bool current = (version == 2 || version == 3 || version == 4) && format == "SOFIT";
     const auto objects = root.value(legacy ? "segments" : "objects");
     if ((!legacy && !current) || !objects.isArray())
         return fail(QStringLiteral("Unsupported document format"));
+
+    std::array<bool, 3> layerVisibility{true, true, true};
+    QVector<Piece> pieces;
+    if (version == 4) {
+        const auto visibility = root.value("layerVisibility").toArray();
+        if (visibility.size() != static_cast<qsizetype>(layerVisibility.size()))
+            return fail(QStringLiteral("Invalid layer visibility"));
+        for (qsizetype i = 0; i < visibility.size(); ++i) {
+            if (!visibility[i].isBool())
+                return fail(QStringLiteral("Invalid layer visibility"));
+            layerVisibility[i] = visibility[i].toBool();
+        }
+        const auto list = root.value("pieces");
+        if (!list.isArray())
+            return fail(QStringLiteral("Invalid pieces list"));
+        for (const auto& value : list.toArray()) {
+            const auto piece = value.toObject();
+            const auto name = piece.value("name").toString().trimmed();
+            const auto allowance = piece.value("allowanceMm").toDouble(-1);
+            if (name.isEmpty() || !std::isfinite(allowance) || allowance < 0)
+                return fail(QStringLiteral("Invalid piece"));
+            pieces.append({name, allowance});
+        }
+    }
 
     QVector<Entity> parsed;
     for (const auto& object : objects.toArray()) {
@@ -81,8 +112,8 @@ bool PatternDocument::load(const QString& path, QString* error) {
         if (!legacy) {
             if (type == "point") shape = Shape::Point;
             else if (type == "rectangle") shape = Shape::Rectangle;
-            else if (version == 3 && type == "circle") shape = Shape::Circle;
-            else if (version == 3 && type == "quadratic") shape = Shape::Curve;
+            else if (version >= 3 && type == "circle") shape = Shape::Circle;
+            else if (version >= 3 && type == "quadratic") shape = Shape::Curve;
             else if (type != "line") return fail(QStringLiteral("Unknown object type"));
         }
 
@@ -99,9 +130,21 @@ bool PatternDocument::load(const QString& path, QString* error) {
         QPointF control;
         if (shape == Shape::Curve)
             control = QPointF(values[4].toDouble(), values[5].toDouble());
-        parsed.append({shape, a, b, control});
+        Entity entity{shape, a, b, control};
+        if (version == 4) {
+            const auto piece = fields.value("piece").toDouble(-2);
+            const auto layer = fields.value("layer").toString();
+            if (!std::isfinite(piece) || piece < -1 || piece >= pieces.size()
+                || std::trunc(piece) != piece || (layer != "main" && layer != "construction"))
+                return fail(QStringLiteral("Invalid object piece or layer"));
+            entity.piece = static_cast<qsizetype>(piece);
+            entity.layer = layer == "main" ? Layer::Main : Layer::Construction;
+        }
+        parsed.append(entity);
     }
     entities_ = std::move(parsed);
+    pieces_ = std::move(pieces);
+    layerVisibility_ = layerVisibility;
     return true;
 }
 }

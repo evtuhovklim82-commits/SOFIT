@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/sofit.dir/link.d CMakeFiles/sofit.dir/sofit_autogen/mocs_compilation.cpp.o CMakeFiles/sofit.dir/src/app/main.cpp.o -o sofit  libsofit_widgets.a libsofit_core.a /usr/lib/libQt6Widgets.so.6.12.0 /usr/lib/libQt6Gui.so.6.12.0 /usr/lib/libGLX.so /usr/lib/libOpenGL.so /usr/lib/libQt6Core.so.6.12.0

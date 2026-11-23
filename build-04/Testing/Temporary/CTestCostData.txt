@@ -1,0 +1,3 @@
+sofit_core 1 0.0101188
+sofit_pattern_workflow 1 0.0500781
+---

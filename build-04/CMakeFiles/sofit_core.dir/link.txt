@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsofit_core.a CMakeFiles/sofit_core.dir/sofit_core_autogen/mocs_compilation.cpp.o CMakeFiles/sofit_core.dir/src/core/PatternDocument.cpp.o CMakeFiles/sofit_core.dir/src/core/PieceGeometry.cpp.o
+/usr/bin/ranlib libsofit_core.a

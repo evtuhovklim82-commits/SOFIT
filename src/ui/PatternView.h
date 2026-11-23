@@ -1,5 +1,6 @@
 #pragma once
 #include <QGraphicsView>
+#include <QPolygonF>
 #include <optional>
 #include "../core/PatternDocument.h"
 
@@ -19,6 +20,7 @@ public:
     void selectEntity(qsizetype index);
     bool entityVisible(qsizetype index) const;
     void setEntityVisible(qsizetype index, bool visible);
+    void applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances);
     void setEntities(const QVector<opc::Entity>& entities);
     void insertEntity(qsizetype index, const opc::Entity& entity);
     void removeEntity(qsizetype index);
@@ -49,6 +51,7 @@ private:
     opc::Entity draftEntity(const QPointF& point) const;
     void moveView(const QPointF& scenePoint, const QPoint& viewportPoint);
     void zoomAt(qreal factor, const QPoint& anchor);
+    void updateEntityStyle(qsizetype index);
 
     Tool tool_ = Tool::Select;
     bool snapToGrid_ = false;
@@ -64,4 +67,8 @@ private:
     QVector<opc::Entity> entities_;
     QGraphicsPathItem* preview_ = nullptr;
     QVector<QGraphicsPathItem*> items_;
+    QVector<bool> entityVisibility_;
+    QVector<QGraphicsPathItem*> allowances_;
+    bool mainVisible_ = true;
+    bool constructionVisible_ = true;
 };

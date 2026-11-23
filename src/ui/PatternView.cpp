@@ -11,6 +11,8 @@
 namespace {
 constexpr qreal gridStep = 10.0;
 const QColor drawingColor(118, 208, 230);
+const QColor constructionColor(161, 173, 200);
+const QColor allowanceColor(255, 185, 104);
 const QRectF initialBounds(-500, -350, 1000, 700);
 
 QPainterPath entityPath(const opc::Entity& entity) {
@@ -256,18 +258,15 @@ void PatternView::setEntities(const QVector<opc::Entity>& entities) {
     cancelDrawing();
     items_.clear();
     entities_.clear();
+    entityVisibility_.clear();
+    allowances_.clear();
     scene()->clear();
     for (const auto& entity : entities)
         insertEntity(items_.size(), entity);
-    fitDrawing();
 }
 
 void PatternView::insertEntity(qsizetype index, const opc::Entity& entity) {
-    QPen pen(drawingColor, 0);
-    QBrush brush = Qt::NoBrush;
-    if (entity.shape == opc::Shape::Point)
-        brush = drawingColor;
-    auto* item = scene()->addPath(entityPath(entity), pen, brush);
+    auto* item = scene()->addPath(entityPath(entity));
     item->setFlag(QGraphicsItem::ItemIsSelectable);
     if (entity.shape == opc::Shape::Point) {
         item->setPos(entity.a);
@@ -277,11 +276,14 @@ void PatternView::insertEntity(qsizetype index, const opc::Entity& entity) {
         item->stackBefore(items_[index]);
     items_.insert(index, item);
     entities_.insert(index, entity);
+    entityVisibility_.insert(index, true);
+    updateEntityStyle(index);
 }
 
 void PatternView::removeEntity(qsizetype index) {
     auto* item = items_.takeAt(index);
     entities_.removeAt(index);
+    entityVisibility_.removeAt(index);
     delete item;
 }
 
@@ -291,7 +293,8 @@ void PatternView::replaceEntity(qsizetype index, const opc::Entity& entity) {
     entities_[index] = entity;
     item->setPath(entityPath(entity));
     item->setPos(entity.shape == opc::Shape::Point ? entity.a : QPointF());
-    item->setSelected(selected);
+    updateEntityStyle(index);
+    item->setSelected(selected && item->isVisible());
 }
 
 void PatternView::selectEntity(qsizetype index) {
@@ -303,12 +306,44 @@ void PatternView::selectEntity(qsizetype index) {
 }
 
 bool PatternView::entityVisible(qsizetype index) const {
-    return items_[index]->isVisible();
+    return entityVisibility_[index];
 }
 
 void PatternView::setEntityVisible(qsizetype index, bool visible) {
     cancelDrawing();
-    items_[index]->setVisible(visible);
+    entityVisibility_[index] = visible;
+    updateEntityStyle(index);
+}
+
+void PatternView::updateEntityStyle(qsizetype index) {
+    const auto& entity = entities_[index];
+    const bool construction = entity.layer == opc::Layer::Construction;
+    const auto& color = construction ? constructionColor : drawingColor;
+    items_[index]->setPen(QPen(color, 0, construction ? Qt::DashLine : Qt::SolidLine));
+    items_[index]->setBrush(entity.shape == opc::Shape::Point ? QBrush(color) : QBrush(Qt::NoBrush));
+    items_[index]->setVisible(entityVisibility_[index] && (construction ? constructionVisible_ : mainVisible_));
+}
+
+void PatternView::applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances) {
+    mainVisible_ = document.layerVisible(opc::Layer::Main);
+    constructionVisible_ = document.layerVisible(opc::Layer::Construction);
+    for (qsizetype index = 0; index < entities_.size(); ++index) {
+        entities_[index].layer = document.entities()[index].layer;
+        updateEntityStyle(index);
+    }
+    qDeleteAll(allowances_);
+    allowances_.clear();
+    if (!document.layerVisible(opc::Layer::Allowance))
+        return;
+
+    for (const auto& polygon : allowances) {
+        QPainterPath path;
+        path.addPolygon(polygon);
+        path.closeSubpath();
+        auto* item = scene()->addPath(path, QPen(allowanceColor, 0, Qt::DashLine));
+        item->setZValue(-1);
+        allowances_.append(item);
+    }
 }
 
 qsizetype PatternView::selectedIndex() const {
@@ -324,6 +359,8 @@ void PatternView::fitDrawing() {
         if (item->isVisible())
             bounds = bounds.united(item->sceneBoundingRect());
     }
+    for (const auto* item : allowances_)
+        bounds = bounds.united(item->sceneBoundingRect());
     if (bounds.isNull()) {
         resetTransform();
         setSceneRect(initialBounds);
