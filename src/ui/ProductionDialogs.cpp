@@ -35,6 +35,7 @@
 #include <QVariant>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 
@@ -70,11 +71,64 @@ QDialogButtonBox* dialogButtons(QVBoxLayout* layout, QDialog& dialog) {
     return buttons;
 }
 
+std::optional<QVector<QRectF>> editFabricFlaws(QWidget* parent, const QVector<QRectF>& flaws) {
+    QDialog dialog(parent);
+    dialog.setWindowTitle(tr("Fabric Flaws"));
+    dialog.resize(550, 320);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* hint = new QLabel(tr("Enter the position and size of each rectangular area to avoid, in millimetres. "
+                               "The origin is the top-left corner of the fabric."));
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+    auto* table = makeTable(layout, {tr("X across"), tr("Y along"), tr("Width"), tr("Length")});
+    const auto add = [table](const QRectF& flaw) {
+        const auto row = table->rowCount();
+        table->insertRow(row);
+        const std::array values{flaw.x(), flaw.y(), flaw.width(), flaw.height()};
+        for (int column = 0; column < int(values.size()); ++column)
+            table->setItem(row, column, new QTableWidgetItem(number(values[column])));
+    };
+    for (const auto& flaw : flaws)
+        add(flaw);
+    auto* actions = tableButtons(layout, table);
+    auto* addRow = new QPushButton(tr("Add flaw"));
+    actions->insertWidget(0, addRow);
+    QObject::connect(addRow, &QPushButton::clicked, &dialog, [&] {
+        if (table->rowCount() < 100)
+            add(QRectF(0, 0, 10, 10));
+    });
+    auto* buttons = dialogButtons(layout, dialog);
+    QVector<QRectF> result;
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        result.clear();
+        for (int row = 0; row < table->rowCount(); ++row) {
+            std::array<double, 4> values;
+            for (int column = 0; column < int(values.size()); ++column) {
+                bool valid;
+                values[column] = table->item(row, column)->text().toDouble(&valid);
+                if (!valid) {
+                    QMessageBox::warning(&dialog, dialog.windowTitle(), tr("Row %1 needs four numbers.").arg(row + 1));
+                    return;
+                }
+            }
+            result.append(QRectF(values[0], values[1], values[2], values[3]));
+            if (!opc::validFabricFlaws(result)) {
+                QMessageBox::warning(&dialog, dialog.windowTitle(),
+                    tr("Row %1 needs positive dimensions and coordinates within 0–1,000,000 mm.").arg(row + 1));
+                return;
+            }
+        }
+        dialog.accept();
+    });
+    return dialog.exec() == QDialog::Accepted ? std::optional(std::move(result)) : std::nullopt;
+}
+
 class PlacementItem : public QGraphicsPolygonItem {
 public:
-    PlacementItem(qsizetype index, const QPolygonF& cut, std::optional<double> lockedX,
+    PlacementItem(qsizetype index, const opc::LayoutPiece& layout, std::optional<double> lockedX,
                   std::function<void()> moved)
-        : QGraphicsPolygonItem(cut), index(index), valid(!cut.isEmpty()), lockedX_(lockedX),
+        : QGraphicsPolygonItem(layout.cut), index(index), valid(!layout.cut.isEmpty()),
+          repeatPoint(layout.repeatPoint), lockedX_(lockedX),
           moved_(std::move(moved)) {
         if (!valid)
             setPolygon(QPolygonF(QRectF(0, 0, 100, 40)));
@@ -82,6 +136,7 @@ public:
     }
     const qsizetype index;
     const bool valid;
+    const std::optional<QPointF> repeatPoint;
 
 protected:
     QVariant itemChange(GraphicsItemChange change, const QVariant& value) override {
@@ -393,6 +448,8 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     auto* directional = new QCheckBox(tr("One-way nap or print"));
     directional->setChecked(data.directionalFabric);
     automaticControls->addWidget(directional);
+    auto* flawsButton = new QPushButton(tr("Fabric flaws…"));
+    automaticControls->addWidget(flawsButton);
     halfTurns->setEnabled(!data.directionalFabric);
     automaticControls->addStretch();
 
@@ -414,7 +471,38 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     auto* lengthRepeat = repeatInput(tr("Repeat along length"), data.fabricRepeatMm.y(), "markerLengthRepeat");
     repeatControls->addStretch();
 
-    auto* hint = new QLabel(tr("Grain runs along the fabric length. Fold copies need a straight outer edge and a finished cutting contour with zero added allowance. Set the width of the folded fabric for fold layouts. Repeat matching uses the top-left of each cutting outline. Fold copies match along the length only."));
+    auto* registrationControls = new QHBoxLayout;
+    layout->addLayout(registrationControls);
+    auto* registration = new QComboBox;
+    registration->setObjectName(QStringLiteral("markerRepeatEdge"));
+    registrationControls->addWidget(new QLabel(tr("Match motif at")));
+    registrationControls->addWidget(registration, 1);
+    auto* registrationParameter = new QDoubleSpinBox;
+    registrationParameter->setObjectName(QStringLiteral("markerRepeatParameter"));
+    registrationParameter->setRange(0, 100);
+    registrationParameter->setValue(50);
+    registrationParameter->setDecimals(2);
+    registrationParameter->setSuffix(tr("%"));
+    registrationParameter->setAccessibleName(tr("Parameter from the start of the seam edge"));
+    registrationControls->addWidget(registrationParameter);
+    auto* setRegistration = new QPushButton(tr("Apply to selected copy"));
+    setRegistration->setEnabled(false);
+    registrationControls->addWidget(setRegistration);
+    const auto fillRegistration = [&] {
+        registration->clear();
+        registration->addItem(tr("Cutting outline corner"), QString{});
+        for (const auto& edge : document.entities()) {
+            if (edge.piece == piece->currentIndex() && edge.layer == opc::Layer::Main
+                && !edge.draftName.isEmpty() && (edge.shape == opc::Shape::Line || edge.shape == opc::Shape::Curve))
+                registration->addItem(edge.draftName, edge.draftName);
+        }
+    };
+    QObject::connect(registration, &QComboBox::currentIndexChanged, &dialog, [&](int) {
+        registrationParameter->setEnabled(registration->currentIndex() > 0);
+    });
+    fillRegistration();
+
+    auto* hint = new QLabel(tr("Grain runs along the fabric length. Fold copies need a straight outer edge and a finished cutting contour with zero added allowance. Set the width of the folded fabric for fold layouts. Each copy matches at its cutting outline corner or a named seam point. Fold copies match along the length only."));
     if (document.pieces().isEmpty()) {
         hint->setText(tr("To begin a layout, close this window and use Pieces → Create Piece from Selection. "
                          "Select the objects that form a closed outline first."));
@@ -445,11 +533,11 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         for (auto* item : items) {
             auto& placement = data.placements[item->index];
             placement.position = item->pos();
-            if (!opc::matchesFabricRepeat(data, placement))
+            if (!opc::matchesFabricRepeat(data, placement, item->repeatPoint))
                 ++repeats;
             placed.append(item->valid ? item->polygon().translated(item->pos()) : QPolygonF{});
         }
-        const auto usage = opc::fabricUsage(placed, data.fabricWidth, data.pieceClearanceMm);
+        const auto usage = opc::fabricUsage(placed, data.fabricWidth, data.pieceClearanceMm, data.fabricFlaws);
         const double displayLength = std::max(1000.0, usage.length + 200);
         fabric->setRect(0, 0, data.fabricWidth, displayLength);
         automatic->setEnabled(!items.isEmpty());
@@ -457,8 +545,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         auto summary = tr("Used length: %1 m · Copies: %2 · Outside fabric: %3 · Overlap or clearance conflicts: %4 · Invalid contours: %5")
                            .arg(usage.length / 1000, 0, 'f', 3).arg(items.size())
                            .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid);
-        if (!data.fabricRepeatMm.isNull())
-            summary += tr(" · Off repeat: %1").arg(repeats);
+        if (!data.fabricFlaws.isEmpty())
+            summary += tr(" · Copies over flaws: %1").arg(usage.flawConflicts);
+        if (!data.fabricRepeatMm.isNull() || repeats > 0)
+            summary += tr(" · Off repeat or missing seam point: %1").arg(repeats);
         if (const auto utilization = usage.utilization(data.fabricWidth)) {
             const double fabricArea = data.fabricWidth * usage.length;
             summary += QLatin1Char('\n') + tr("Cut area: %1 m² · Unused area: %2 m² · Fabric utilization: %3%")
@@ -480,7 +570,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         if (placement.fold != opc::FoldEdge::None && !cut.cut.isEmpty()) {
             lockedX = opc::foldPosition(placement, data.fabricWidth, cut.cut.boundingRect().width());
         }
-        auto* item = new PlacementItem(index, cut.cut, lockedX, updateUsage);
+        auto* item = new PlacementItem(index, cut, lockedX, updateUsage);
         item->setPen(QPen(QColor("#173b5e"), 0));
         item->setBrush(placement.hand == opc::CutHand::Right ? QColor(208, 146, 89, 140)
                                                            : QColor(86, 167, 222, 125));
@@ -514,6 +604,13 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             auto* line = new QGraphicsPathItem(arrow, item);
             line->setPen(QPen(QColor("#1b6645"), 0));
         }
+        if (cut.repeatPoint) {
+            const auto point = *cut.repeatPoint;
+            auto* marker = new QGraphicsEllipseItem(-3, -3, 6, 6, item);
+            marker->setPos(point);
+            marker->setFlag(QGraphicsItem::ItemIgnoresTransformations);
+            marker->setBrush(QColor("#b04c26"));
+        }
         if (!cut.fold.isNull()) {
             auto* line = new QGraphicsLineItem(cut.fold, item);
             line->setPen(QPen(QColor("#654590"), 0, Qt::DashLine));
@@ -525,21 +622,52 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         items.clear();
         scene.clear();
         fabric = scene.addRect(0, 0, data.fabricWidth, 1000, QPen(QColor("#71806d"), 0), QColor("#eef4e7"));
-        fabric->setZValue(-1);
+        fabric->setZValue(-2);
+        for (const auto& flaw : data.fabricFlaws) {
+            auto* area = scene.addRect(flaw, QPen(QColor("#972a26"), 0), QColor(197, 66, 61, 125));
+            area->setZValue(-1);
+        }
         for (qsizetype index = 0; index < data.placements.size(); ++index)
             addItem(index);
         updateUsage();
         updateSceneBounds();
     };
+    QObject::connect(flawsButton, &QPushButton::clicked, &dialog, [&] {
+        if (auto updated = editFabricFlaws(&dialog, data.fabricFlaws)) {
+            data.fabricFlaws = std::move(*updated);
+            rebuild();
+        }
+    });
     const auto selected = [&]() -> PlacementItem* {
         const auto selection = scene.selectedItems();
         return selection.isEmpty() ? nullptr : static_cast<PlacementItem*>(selection.front());
     };
+    const auto updateRegistrationAction = [&] {
+        const auto* item = selected();
+        setRegistration->setEnabled(item && data.placements[item->index].piece == piece->currentIndex());
+    };
+    QObject::connect(piece, &QComboBox::currentIndexChanged, &dialog, [&](int) {
+        fillRegistration();
+        updateRegistrationAction();
+    });
     QObject::connect(&scene, &QGraphicsScene::selectionChanged, &dialog, [&] {
         const auto* item = selected();
         turn->setEnabled(item && (data.placements[item->index].reversed
                                   || opc::canTurn(data, data.placements[item->index])));
         remove->setEnabled(selected());
+        updateRegistrationAction();
+    });
+    const auto assignRegistration = [&](opc::FabricPlacement& placement) {
+        placement.repeatEdge = registration->currentData().toString();
+        placement.repeatParameter = registrationParameter->value() / 100;
+    };
+    QObject::connect(setRegistration, &QPushButton::clicked, &dialog, [&] {
+        if (const auto* item = selected()) {
+            const auto index = item->index;
+            assignRegistration(data.placements[index]);
+            rebuild();
+            items[index]->setSelected(true);
+        }
     });
     turn->setEnabled(false);
     remove->setEnabled(false);
@@ -560,6 +688,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     QObject::connect(add, &QPushButton::clicked, &dialog, [&] {
         opc::FabricPlacement placement{piece->currentIndex(), size->currentData().toString(), {}};
         placement.fixedOrientation = fixedOrientation->isChecked();
+        assignRegistration(placement);
         const int mode = cutMode->currentIndex();
         const bool pair = mode == 1;
         if (pair || mode == 2)
@@ -662,9 +791,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         text += tr("\nPlotted copies: %1. On-fold entries each count as one unfolded piece. Other counts are per cutting layer.")
             .arg(data.placements.size());
         text += tr("\nOutside: %1 · Overlap or clearance conflicts: %2 · Invalid outlines: %3"
-                   "\nRotation conflicts: %4 · Off fold: %5 · Off repeat: %6\n")
+                   "\nRotation conflicts: %4 · Off fold: %5 · Off repeat: %6 · Copies over flaws: %7\n")
             .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid)
-            .arg(report.orientationViolations).arg(report.foldViolations).arg(report.repeatViolations);
+            .arg(report.orientationViolations).arg(report.foldViolations).arg(report.repeatViolations)
+            .arg(usage.flawConflicts);
         qsizetype countIssues = 0;
         qsizetype pairIssues = 0;
         QString details;
@@ -718,7 +848,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
                 }
             }
         }
-        if (data.placements.isEmpty() || usage.invalid || usage.outside || usage.overlaps
+        if (data.placements.isEmpty() || usage.invalid || usage.outside || usage.overlaps || usage.flawConflicts
             || report.orientationViolations || report.foldViolations || report.repeatViolations || countIssues || pairIssues || seamIssues) {
             text += tr("\nReview the issues below before cutting.\n");
         } else {
@@ -757,7 +887,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             error = tr("Enter a piece clearance from 0 to 1000 mm.");
             break;
         case opc::FabricLayoutError::InvalidRepeat:
-            error = tr("Enter fabric repeats from 0 to 10000 mm.");
+            error = tr("Check the repeat dimensions and make sure the named seam point exists in the selected size.");
+            break;
+        case opc::FabricLayoutError::InvalidFlaws:
+            error = tr("Check the dimensions and coordinates of the fabric flaws.");
             break;
         case opc::FabricLayoutError::InvalidContour:
             error = tr("The cutting outline, seam allowance, or required straight fold edge is invalid.");

@@ -232,7 +232,7 @@ bool exportFabricPdf(const QString& path, const PatternDocument& document,
     error.clear();
     const auto report = cuttingReport(document, data);
     if (!report.canExport(data.fabricWidth)) {
-        error = tr("The fabric layout must contain valid copies within the fabric and meet overlap, clearance, repeat, orientation and fold checks.");
+        error = tr("The fabric layout must contain valid copies within the fabric and meet overlap, clearance, flaw, repeat, orientation and fold checks.");
         return false;
     }
 

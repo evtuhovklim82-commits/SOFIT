@@ -96,6 +96,13 @@ if(BUILD_TESTING)
     add_test(NAME sofit_professional_modeling COMMAND sofit_professional_tests)
     set_tests_properties(sofit_professional_modeling PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+    add_test(NAME sofit_production_automation COMMAND ${CMAKE_COMMAND}
+        "-DSOFIT=$<TARGET_FILE:sofit>"
+        "-DEXAMPLES=${CMAKE_CURRENT_SOURCE_DIR}/examples"
+        "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/automation-test"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/ProductionAutomation.cmake")
+    set_tests_properties(sofit_production_automation PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 30)
+
     add_executable(sofit_ui_tests tests/PatternWorkflowTest.cpp)
     target_link_libraries(sofit_ui_tests PRIVATE sofit_widgets)
     add_test(NAME sofit_pattern_workflow COMMAND sofit_ui_tests "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures")

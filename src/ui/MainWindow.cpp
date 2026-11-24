@@ -410,6 +410,81 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         if (info != doc_.productInformation())
             undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Tech Pack Options"), nullptr));
     });
+    product->addAction(tr("Finished Measurements…"), this, [this] {
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Finished Measurements"));
+        dialog.resize(650, 420);
+        QVBoxLayout layout(&dialog);
+        QLabel hint(tr("Choose two named pattern points for each straight-line measurement. "
+                       "The tech pack recalculates the distances for every size."));
+        hint.setWordWrap(true);
+        layout.addWidget(&hint);
+        QTableWidget table(0, 3);
+        table.setHorizontalHeaderLabels({tr("Measurement"), tr("First point"), tr("Second point")});
+        table.horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        table.setSelectionBehavior(QAbstractItemView::SelectRows);
+        layout.addWidget(&table);
+        QStringList points;
+        for (const auto& point : doc_.parametricDraft().points)
+            points.append(point.name);
+        const auto add = [&](const opc::FinishedMeasurement& measurement) {
+            const auto row = table.rowCount();
+            table.insertRow(row);
+            table.setItem(row, 0, new QTableWidgetItem(measurement.label));
+            const auto addPoint = [&](int column, const QString& name) {
+                auto* box = new QComboBox;
+                box->addItems(points);
+                if (!name.isEmpty() && !points.contains(name))
+                    box->addItem(name);
+                box->setCurrentText(name);
+                table.setCellWidget(row, column, box);
+            };
+            addPoint(1, measurement.first);
+            addPoint(2, measurement.second);
+        };
+        for (const auto& measurement : doc_.productInformation().finishedMeasurements)
+            add(measurement);
+        QHBoxLayout actions;
+        QPushButton insert(tr("Add measurement")), remove(tr("Remove selected measurement"));
+        insert.setEnabled(points.size() >= 2);
+        actions.addWidget(&insert);
+        actions.addWidget(&remove);
+        layout.addLayout(&actions);
+        connect(&insert, &QPushButton::clicked, &dialog, [&] {
+            if (table.rowCount() < 100)
+                add({{}, points[0], points[1]});
+        });
+        connect(&remove, &QPushButton::clicked, &dialog, [&] {
+            if (table.currentRow() >= 0)
+                table.removeRow(table.currentRow());
+        });
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        layout.addWidget(&buttons);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        QVector<opc::FinishedMeasurement> measurements;
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+            measurements.clear();
+            QSet<QString> labels;
+            for (int row = 0; row < table.rowCount(); ++row) {
+                const auto label = table.item(row, 0)->text().trimmed();
+                const auto first = qobject_cast<QComboBox*>(table.cellWidget(row, 1))->currentText();
+                const auto second = qobject_cast<QComboBox*>(table.cellWidget(row, 2))->currentText();
+                if (label.isEmpty() || labels.contains(label) || first.isEmpty() || second.isEmpty() || first == second) {
+                    QMessageBox::warning(&dialog, dialog.windowTitle(),
+                        tr("Row %1 needs a unique name and two different points.").arg(row + 1));
+                    return;
+                }
+                labels.insert(label);
+                measurements.append({label, first, second});
+            }
+            dialog.accept();
+        });
+        if (dialog.exec() == QDialog::Accepted && measurements != doc_.productInformation().finishedMeasurements) {
+            auto updated = doc_;
+            updated.productInformation().finishedMeasurements = std::move(measurements);
+            undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Finished Measurements"), nullptr));
+        }
+    });
     product->addAction(tr("Export Product Information PDF…"), this, [this] {
         auto path = QFileDialog::getSaveFileName(this, tr("Export Product Information PDF"), {}, tr("PDF (*.pdf)"));
         if (path.isEmpty())
@@ -592,6 +667,23 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         settings.setValue(QStringLiteral("construction/libraryFolder"), QFileInfo(path).absolutePath());
         replaceDocument({}, {});
         undo_.push(new PatternCommand(doc_, std::move(construction), tr("Create Pattern from Library"), view_));
+        view_->fitDrawing();
+    });
+    library->addAction(tr("Insert Construction into Current Pattern…"), this, [this] {
+        QSettings settings;
+        const auto path = QFileDialog::getOpenFileName(this, tr("Insert Construction into Current Pattern"),
+            settings.value(QStringLiteral("construction/libraryFolder")).toString(), tr("SOFIT constructions (*.sofit)"));
+        if (path.isEmpty())
+            return;
+        opc::PatternDocument source;
+        auto updated = doc_;
+        QString error;
+        if (!source.load(path, &error) || !updated.insertConstruction(source, &error)) {
+            QMessageBox::warning(this, tr("Construction Library"), error);
+            return;
+        }
+        settings.setValue(QStringLiteral("construction/libraryFolder"), QFileInfo(path).absolutePath());
+        applyPatternEdit(std::move(updated), tr("Insert Library Construction"));
         view_->fitDrawing();
     });
     auto* draftAction = construction->addAction(tr("Parametric Draft…"), this, [this] {

@@ -18,11 +18,13 @@ struct LayoutPiece {
     QPolygonF cut;
     QLineF grain;
     QLineF fold;
+    std::optional<QPointF> repeatPoint;
 };
 
 LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& placement);
 
-bool matchesFabricRepeat(const ProductionData& data, const FabricPlacement& placement);
+bool matchesFabricRepeat(const ProductionData& data, const FabricPlacement& placement,
+                         std::optional<QPointF> repeatPoint = std::nullopt);
 bool canTurn(const ProductionData& data, const FabricPlacement& placement);
 // Omit the fabric fold from the cutting stroke.
 QPolygonF openFoldContour(QPolygonF cut, const QLineF& fold);
@@ -33,11 +35,14 @@ struct FabricUsage {
     qsizetype invalid = 0;
     qsizetype outside = 0;
     qsizetype overlaps = 0;
+    qsizetype flawConflicts = 0;
     double cutArea = 0;
     std::optional<double> utilization(double width) const;
 };
 
-FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double clearanceMm = 0);
+FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double clearanceMm = 0,
+                        const QVector<QRectF>& flaws = {});
+bool validFabricFlaws(const QVector<QRectF>& flaws);
 
 struct CuttingReportRow {
     qsizetype piece;
@@ -66,7 +71,7 @@ QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const 
 CuttingReport cuttingReport(const PatternDocument& document, const ProductionData& data);
 
 inline constexpr qsizetype maxAutomaticCopies = 200;
-enum class FabricLayoutError { None, InvalidWidth, InvalidClearance, InvalidRepeat, TooManyCopies, InvalidContour, TooWide, VerificationFailed };
+enum class FabricLayoutError { None, InvalidWidth, InvalidClearance, InvalidRepeat, InvalidFlaws, TooManyCopies, InvalidContour, TooWide, VerificationFailed };
 
 struct AutomaticFabricLayout {
     QVector<FabricPlacement> placements;

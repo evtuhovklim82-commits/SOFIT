@@ -2,6 +2,7 @@
 
 #include <QMap>
 #include <QPointF>
+#include <QRectF>
 #include <QString>
 #include <QVector>
 
@@ -30,6 +31,8 @@ struct FabricPlacement {
     CutHand hand = CutHand::Single;
     FoldEdge fold = FoldEdge::None;
     bool fixedOrientation = false;
+    QString repeatEdge;
+    double repeatParameter = 0.5;
 };
 
 struct ProductionData {
@@ -43,6 +46,7 @@ struct ProductionData {
 
     double pieceClearanceMm = 0;
     QPointF fabricRepeatMm;
+    QVector<QRectF> fabricFlaws;
 
     void removePiece(qsizetype piece);
 };

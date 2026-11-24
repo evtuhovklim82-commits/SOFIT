@@ -58,9 +58,15 @@ QVector<QString> boundaryTopology(const PatternDocument& source, const QVector<q
                 hits.append({0, id});
             else if (QLineF(point, edge.b).length() <= tolerance)
                 hits.append({length, id});
-            else if (interior && distance > tolerance && distance < length - tolerance
-                     && QLineF(point, projection).length() <= tolerance)
-                hits.append({distance, id});
+            else if (interior) {
+                if (edge.shape == Shape::Curve) {
+                    if (const auto t = contourEdgeParameter(edge, point))
+                        hits.append({*t * length, id});
+                } else if (distance > tolerance && distance < length - tolerance
+                           && QLineF(point, projection).length() <= tolerance) {
+                    hits.append({distance, id});
+                }
+            }
         };
         for (qsizetype i = 0; i < entities.size(); ++i) {
             const auto& other = entities[i];
@@ -401,8 +407,8 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
         for (qsizetype j = 0; j < working.entities().size(); ++j) {
             const auto& entity = working.entities()[j];
             if (entity.shape != Shape::Line && !(dividesPiece(*step.contour)
-                && entity.shape == Shape::Curve && guideIndices.contains(j)))
-                return fail(QStringLiteral("Contour history requires straight source edges and a compatible guide."));
+                && entity.shape == Shape::Curve))
+                return fail(QStringLiteral("Contour history requires compatible source edges and guides."));
         }
 
         const auto target = step.secondPiece;

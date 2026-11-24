@@ -20,6 +20,34 @@ const QColor constructionColor(161, 173, 200);
 const QColor allowanceColor(255, 185, 104);
 const QRectF initialBounds(-500, -350, 1000, 700);
 
+QPointF closestCurvePoint(const opc::Entity& edge, QPointF target) {
+    const auto at = [&edge](double t) {
+        const auto u = 1 - t;
+        return u * u * edge.a + 2 * u * t * edge.control + t * t * edge.b;
+    };
+    const auto distanceSquared = [&](double t) {
+        const auto delta = at(t) - target;
+        return QPointF::dotProduct(delta, delta);
+    };
+    constexpr int samples = 16;
+    int best = 0;
+    for (int i = 1; i <= samples; ++i) {
+        if (distanceSquared(double(i) / samples) < distanceSquared(double(best) / samples))
+            best = i;
+    }
+    double left = double(std::max(0, best - 1)) / samples;
+    double right = double(std::min(samples, best + 1)) / samples;
+    for (int i = 0; i < 24; ++i) {
+        const auto a = std::lerp(left, right, 1.0 / 3);
+        const auto b = std::lerp(left, right, 2.0 / 3);
+        if (distanceSquared(a) < distanceSquared(b))
+            right = b;
+        else
+            left = a;
+    }
+    return at((left + right) / 2);
+}
+
 QPainterPath viewEntityPath(opc::Entity entity) {
     if (entity.shape == opc::Shape::Point)
         entity.a = {};
@@ -98,6 +126,12 @@ QPointF PatternView::drawingPoint(QPointF scenePoint) const {
             consider(entity.b);
             if (entity.shape == opc::Shape::Line)
                 addEdge(entity.a, entity.b);
+            if (entity.shape == opc::Shape::Curve) {
+                const auto bounds = viewEntityPath(entity).controlPointRect();
+                if (bounds.left() <= region.right() && bounds.right() >= region.left()
+                    && bounds.top() <= region.bottom() && bounds.bottom() >= region.top())
+                    consider(closestCurvePoint(entity, scenePoint));
+            }
             if (entity.shape == opc::Shape::Rectangle) {
                 const QPointF c(entity.a.x(), entity.b.y());
                 const QPointF d(entity.b.x(), entity.a.y());

@@ -1534,5 +1534,17 @@ int main(int argc, char** argv) {
     check(loaded.load(copied) && loaded.parametricDraft() == library.parametricDraft()
           && opc::saveProduction(loaded.production()) == opc::saveProduction(library.production()),
           "Start an independent editable pattern with the library formulas and sizes");
+    chooseFile(action(fromLibrary, "Insert Construction into Current Pattern…"), libraryPath);
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.pieces().size() == 2 * library.pieces().size(),
+          "Insert the library construction in the current project");
+    action(fromLibrary, "Undo Insert Library Construction").trigger();
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.parametricDraft() == library.parametricDraft(),
+          "Undo the complete insertion as one action");
+    action(fromLibrary, "Redo Insert Library Construction").trigger();
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.pieces().size() == 2 * library.pieces().size(),
+          "Restore the inserted pieces through Redo");
 
 }

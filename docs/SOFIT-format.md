@@ -1,15 +1,15 @@
 # SOFIT project format
 
-SOFIT 4.0 opens older SOFIT projects and writes schema 14 with default production and product options. Product information and piece clearance use schema 15. A configured repeat or customized tech pack uses schema 16. A project contains the editable pattern and its production data. DXF carries exchange geometry and PDF carries print output. GRAFIS MDL support requires a separate analysis of actual MDL files.
+SOFIT 4.0 opens older SOFIT projects and writes schema 14 with default production and product options. Product information and piece clearance use schema 15. A configured repeat or customized tech pack uses schema 16. Named seam repeat points, fabric flaws and finished pattern measurements use schema 17. A project contains the editable pattern and its production data. DXF carries exchange geometry and PDF carries print output. GRAFIS MDL support requires a separate analysis of actual MDL files.
 
-## Schemas 14–16
+## Schemas 14–17
 
 The file is a UTF-8 JSON object with these fields.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `format` | string | `SOFIT` |
-| `version` | integer | `14`, `15` or `16` |
+| `version` | integer | `14`, `15`, `16` or `17` |
 | `payload` | string | A serialized UTF-8 JSON project object, escaped as a JSON string |
 | `sha256` | string | Lowercase hexadecimal SHA-256 of the UTF-8 bytes of the decoded payload string |
 
@@ -18,6 +18,8 @@ Validate the digest before parsing the payload. Hash the decoded string verbatim
 The payload reuses the SOFIT 7–13 records and includes an explicit boolean `useDraftMeasurements`. Schema 15 uses the same envelope. Its optional `productInformation` object has string fields `styleCode`, `title`, `revision`, `material` and `notes`. The optional `production.pieceClearanceMm` is a number between 0 and 1000. Omitted fields give empty product information and zero clearance. SOFIT 3.0 reads schema 14. SOFIT versions before 3.0 require the older project structure.
 
 Schema 16 adds the optional `production.fabricRepeatMm` array `[across, along]`. Each value is zero (disabled) or 0.001–10,000 mm. It also adds an optional `techPack` object with the strings `reportTitle`, `billOfMaterials`, `assemblyInstructions` and the booleans `includeCuttingQuantities` and `includeSizeMeasurements`. By default the quantities are included and the draft measurements are omitted.
+
+Schema 17 adds optional `production.fabricFlaws` rectangles as arrays `[x, y, width, length]` in millimetres from the fabric origin. Up to 100 rectangles are supported. Coordinates are non-negative, both dimensions are at least 0.001 mm, and every rectangle ends within 1,000,000 mm. A placement can store the two fields `repeatEdge` (a named main-layer line or quadratic curve on its piece) and `repeatParameter` (0–1 in edge parameter order). The matching point is evaluated on the graded seam, then transformed using the placement's grain, rotation and hand. Omitting those fields uses the oriented cutting outline's top-left extent. For curves the parameter is a Bézier parameter, independent of the arc-length fractions used for notches. The optional `finishedMeasurements` array stores up to 100 rows with a unique `label` and distinct named draft points `first` and `second`. The PDF computes their straight-line distance by size. A missing point produces an unavailable entry.
 
 | Payload record | Contents |
 | --- | --- |

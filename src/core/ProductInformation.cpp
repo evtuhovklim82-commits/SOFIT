@@ -9,8 +9,18 @@
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextTable>
+#include <algorithm>
 
 namespace opc {
+
+std::optional<double> finishedMeasurementMm(const PatternDocument& graded, const FinishedMeasurement& measurement) {
+    const auto& entities = graded.entities();
+    const auto a = std::ranges::find(entities, measurement.first, &Entity::draftName);
+    const auto b = std::ranges::find(entities, measurement.second, &Entity::draftName);
+    if (a == entities.end() || b == entities.end() || a->shape != Shape::Point || b->shape != Shape::Point)
+        return {};
+    return QLineF(a->a, b->a).length();
+}
 
 bool exportProductInformationPdf(const QString& path, const PatternDocument& document, QString& error) {
     const auto tr = [](const char* text) { return QCoreApplication::translate("ProductInformation", text); };
@@ -89,6 +99,35 @@ bool exportProductInformationPdf(const QString& path, const PatternDocument& doc
             }
             cursor.setPosition(table->lastPosition() + 1);
         }
+    }
+
+    if (!info.finishedMeasurements.isEmpty()) {
+        section(tr("Finished pattern measurements (mm)"));
+        cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
+        QTextTableFormat format;
+        format.setHeaderRowCount(1);
+        format.setCellPadding(3);
+        QVector<QString> sizes{QString{}};
+        for (const auto& size : document.production().sizes)
+            sizes.append(size.name);
+        auto* table = cursor.insertTable(1 + sizes.size() * info.finishedMeasurements.size(), 3, format);
+        const auto cell = [table](int row, int column, const QString& value) {
+            table->cellAt(row, column).firstCursorPosition().insertText(value);
+        };
+        cell(0, 0, tr("Size"));
+        cell(0, 1, tr("Measurement"));
+        cell(0, 2, tr("Millimetres"));
+        int row = 1;
+        for (const auto& size : sizes) {
+            const auto graded = gradedPattern(document, size);
+            for (const auto& measurement : info.finishedMeasurements) {
+                const auto value = finishedMeasurementMm(graded, measurement);
+                cell(row, 0, size.isEmpty() ? tr("Base") : size);
+                cell(row, 1, measurement.label);
+                cell(row++, 2, value ? QString::number(*value, 'f', 2) : tr("Unavailable"));
+            }
+        }
+        cursor.setPosition(table->lastPosition() + 1);
     }
 
     if (info.includeCuttingQuantities && !document.pieces().isEmpty()) {

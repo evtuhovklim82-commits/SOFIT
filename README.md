@@ -11,10 +11,24 @@ Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native
 - **Layout → Fabric Layout → Piece clearance** sets the minimum gap between cutting outlines in mm. With a positive gap, clearance conflicts prevent fabric PDF or DXF export.
 
 - Drag a highlighted draft point with **Select** to adjust its coordinate formulas. SOFIT previews dependent edges, validates the result across sizes and records the move as one Undo step.
-- **Construction → Construction Library** saves a parametric project as a reusable template. **New Pattern from Library** opens an independent, unsaved copy with its formulas, pieces and production setup.
+- **Construction → Construction Library** saves a parametric project as a reusable template. **New Pattern from Library** opens an independent copy. **Insert Construction into Current Pattern** adds its pieces, formulas, modeling steps and seam links in one undoable edit. Existing measurements with the same name drive the imported formulas. Imported symbols are renamed as needed. Imported geometry keeps its original coordinate origin.
 - The bodice wizard offers a two-piece sleeve with a linked elbow seam and paired notches, a pointed collar with adjustable extension, and waist dart intake and position controls.
-- **Layout → Fabric Layout** can register the top-left bounds of each oriented cutting outline to repeats across and along the fabric. Click **Auto arrange** to register copies. The cutting report counts manual placements off repeat. Folded copies align to the fold first and register along the length.
-- **Product → Tech Pack Options** sets the PDF title, bill of materials, assembly instructions and whether it includes cutting quantities and draft inputs by size.
+- **Layout → Fabric Layout** registers copies to repeats across and along the fabric. In **Match motif at**, select the cutting outline corner or a named seam edge and its position from start to end. Use **Apply to selected copy** to update a copy of the piece selected in the piece list, or set the point before **Add copy**. **Auto arrange** registers these points after grading, mirroring and rotation. Folded copies register along the length. **Fabric flaws** records rectangular zones that the cutting outlines must avoid.
+- **Product → Tech Pack Options** sets the PDF title, bill of materials, assembly instructions and whether it includes cutting quantities and draft inputs by size. **Product → Finished Measurements** defines named distances between draft points. The PDF recalculates these measurements for the base and every stored size.
+
+- **Modeling → Cut Piece, Relief Seam and Yoke** accept straight or quadratic guides across a contour made of lines and quadratic curves. Enable **Snap to Objects** to place a guide endpoint on a curve. Parametric guides can use an exact point formula on the source edge.
+
+### Production automation
+
+Pass one option and one `.sofit` project to the SOFIT executable.
+
+```text
+sofit --production-report check.json style.sofit
+sofit --marker-dxf marker.dxf style.sofit
+sofit --marker-pdf marker.pdf style.sofit
+```
+
+The JSON check evaluates the base and every stored size for closed contours, allowances and linked-seam tolerance, plus validity of the saved marker when it contains copies. It writes a report even when validation fails. A blank size denotes the base. Exit status 0 indicates success, 1 indicates failed production checks, and 2 indicates an input or output error. The DXF and PDF commands use the same marker verification as the desktop export. For a terminal without a graphical session, set `QT_QPA_PLATFORM=offscreen`.
 
 The [GRAFIS 26 audit](docs/GRAFIS-26-audit.md) lists source evidence and remaining gaps.
 
@@ -87,7 +101,7 @@ Use `macdeployqt` when packaging the app for distribution.
 - **Snap to Grid (10 mm)** rounds mouse input to the nearest grid intersection. Typed coordinates keep their entered precision. The status bar shows cursor X/Y in millimeters.
 - Use **Select** and click an object to select it. Press Delete to remove it, Ctrl+Z to undo, or Ctrl+Y to redo.
 - The mouse wheel zooms around the cursor. Drag with the middle button to pan. Press F or click **Fit Drawing** to frame the drawing.
-- SOFIT opens `.sofit` formats 1–13 and legacy format 1 `.opcad` drawings. It writes format 9 for drafts with size measurements enabled and at least one size, format 8 for other drafts, and format 7 for projects without a draft. Edge allowances or automatic notches use format 10. Silhouette-only history uses format 11 (SOFIT 1.7+). Contour history uses format 12 (SOFIT 1.8+). Saved seam links use format 13 (SOFIT 2.1+). SVG export includes enabled layers and uses millimeters.
+- SOFIT reads legacy `.opcad` drawings and `.sofit` formats 1–17. It writes a protected SOFIT envelope. See the format guide for version selection. SVG export includes enabled layers and uses millimeters.
 - SOFIT prompts to save changes before replacing or closing a modified drawing.
 
 ## Workspace

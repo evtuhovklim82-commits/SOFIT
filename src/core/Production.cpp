@@ -39,8 +39,11 @@ bool validRepeat(QPointF repeat) {
     return valid(repeat.x()) && valid(repeat.y());
 }
 
-double nextRepeat(double coordinate, double period) {
-    return period == 0 ? coordinate : std::max(0.0, std::ceil((coordinate - layoutTolerance) / period) * period);
+double nextRepeat(double coordinate, double period, double anchor) {
+    if (period == 0)
+        return coordinate;
+    return std::max(0.0, std::ceil((std::max(0.0, coordinate) + anchor - layoutTolerance) / period)
+        * period - anchor);
 }
 
 QJsonArray pair(QPointF point) { return {point.x(), point.y()}; }
@@ -52,6 +55,13 @@ bool readPoint(const QJsonValue& value, QPointF& point) {
     point = {values[0].toDouble(), values[1].toDouble()};
     return std::isfinite(point.x()) && std::isfinite(point.y());
 }
+}
+
+bool validFabricFlaws(const QVector<QRectF>& flaws) {
+    return flaws.size() <= 100 && std::ranges::all_of(flaws, [](const auto& flaw) {
+        return flaw.left() >= 0 && flaw.top() >= 0 && flaw.width() >= 0.001 && flaw.height() >= 0.001
+            && flaw.right() <= 1000000 && flaw.bottom() <= 1000000;
+    });
 }
 
 void ProductionData::removePiece(qsizetype piece) {
@@ -169,17 +179,29 @@ QJsonObject saveProduction(const ProductionData& data) {
     for (const auto& rule : data.rules)
         rules.append(QJsonObject{{"size", rule.size}, {"piece", rule.piece},
                                  {"point", pair(rule.point)}, {"offset", pair(rule.offset)}});
-    for (const auto& placement : data.placements)
-        placements.append(QJsonObject{{"piece", placement.piece}, {"size", placement.size},
-                                      {"position", pair(placement.position)}, {"reversed", placement.reversed},
-                                      {"hand", int(placement.hand)}, {"fold", int(placement.fold)},
-                                      {"fixedOrientation", placement.fixedOrientation}});
+    for (const auto& placement : data.placements) {
+        QJsonObject row{{"piece", placement.piece}, {"size", placement.size},
+                        {"position", pair(placement.position)}, {"reversed", placement.reversed},
+                        {"hand", int(placement.hand)}, {"fold", int(placement.fold)},
+                        {"fixedOrientation", placement.fixedOrientation}};
+        if (!placement.repeatEdge.isEmpty()) {
+            row.insert("repeatEdge", placement.repeatEdge);
+            row.insert("repeatParameter", placement.repeatParameter);
+        }
+        placements.append(row);
+    }
     QJsonObject result{{"sizes", sizes}, {"rules", rules}, {"fabricWidth", data.fabricWidth}, {"placements", placements},
             {"allowHalfTurns", data.allowHalfTurns}, {"directionalFabric", data.directionalFabric}};
     if (data.pieceClearanceMm != 0)
         result.insert("pieceClearanceMm", data.pieceClearanceMm);
     if (!data.fabricRepeatMm.isNull())
         result.insert("fabricRepeatMm", pair(data.fabricRepeatMm));
+    if (!data.fabricFlaws.isEmpty()) {
+        QJsonArray flaws;
+        for (const auto& flaw : data.fabricFlaws)
+            flaws.append(QJsonArray{flaw.x(), flaw.y(), flaw.width(), flaw.height()});
+        result.insert("fabricFlaws", flaws);
+    }
     return result;
 }
 
@@ -200,6 +222,24 @@ bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionDat
     if (json.contains("fabricRepeatMm")
         && (!readPoint(json.value("fabricRepeatMm"), parsed.fabricRepeatMm) || !validRepeat(parsed.fabricRepeatMm)))
         return false;
+
+    if (json.contains("fabricFlaws")) {
+        if (!json.value("fabricFlaws").isArray())
+            return false;
+        const auto flaws = json.value("fabricFlaws").toArray();
+        if (flaws.size() > 100)
+            return false;
+        for (const auto& value : flaws) {
+            const auto row = value.toArray();
+            if (row.size() != 4 || !row[0].isDouble() || !row[1].isDouble()
+                || !row[2].isDouble() || !row[3].isDouble())
+                return false;
+            parsed.fabricFlaws.append(QRectF(row[0].toDouble(), row[1].toDouble(),
+                                           row[2].toDouble(), row[3].toDouble()));
+        }
+        if (!validFabricFlaws(parsed.fabricFlaws))
+            return false;
+    }
 
     if (json.contains("allowHalfTurns")) {
         if (!json.value("allowHalfTurns").isBool())
@@ -266,20 +306,29 @@ bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionDat
         placement.hand = CutHand(hand);
         placement.fold = FoldEdge(fold);
         placement.fixedOrientation = row.value("fixedOrientation").toBool();
+        if (row.contains("repeatEdge") || row.contains("repeatParameter")) {
+            placement.repeatEdge = row.value("repeatEdge").toString();
+            placement.repeatParameter = row.value("repeatParameter").toDouble(-1);
+            if (placement.repeatEdge.isEmpty() || placement.repeatEdge.size() > 64
+                || !(placement.repeatParameter >= 0 && placement.repeatParameter <= 1))
+                return false;
+        }
         parsed.placements.append(placement);
     }
     data = std::move(parsed);
     return true;
 }
 
-bool matchesFabricRepeat(const ProductionData& data, const FabricPlacement& placement) {
-    if (!validRepeat(data.fabricRepeatMm))
+bool matchesFabricRepeat(const ProductionData& data, const FabricPlacement& placement,
+                         std::optional<QPointF> repeatPoint) {
+    if (!validRepeat(data.fabricRepeatMm) || (!placement.repeatEdge.isEmpty() && !repeatPoint))
         return false;
     const auto onRepeat = [](double position, double period) {
         return period == 0 || std::abs(std::remainder(position, period)) <= layoutTolerance;
     };
-    return (placement.fold != FoldEdge::None || onRepeat(placement.position.x(), data.fabricRepeatMm.x()))
-        && onRepeat(placement.position.y(), data.fabricRepeatMm.y());
+    const auto registered = placement.position + repeatPoint.value_or(QPointF{});
+    return (placement.fold != FoldEdge::None || onRepeat(registered.x(), data.fabricRepeatMm.x()))
+        && onRepeat(registered.y(), data.fabricRepeatMm.y());
 }
 
 bool canTurn(const ProductionData& data, const FabricPlacement& placement) {
@@ -325,10 +374,25 @@ LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& pl
     rotation.rotate(90 - piece.grainAngle.value_or(90) + (placement.reversed ? 180 : 0));
     auto cut = rotation.map(geometry.allowance.isEmpty() ? geometry.contour : geometry.allowance);
     auto center = rotation.map(geometry.bounds.center());
+    std::optional<QPointF> repeatPoint;
+    if (!placement.repeatEdge.isEmpty()) {
+        const auto edge = std::ranges::find(graded.entities(), placement.repeatEdge, &Entity::draftName);
+        const auto t = placement.repeatParameter;
+        if (edge != graded.entities().end() && edge->piece == placement.piece && edge->layer == Layer::Main
+            && t >= 0 && t <= 1 && (edge->shape == Shape::Curve || edge->shape == Shape::Line)) {
+            const auto u = 1 - t;
+            const auto point = edge->shape == Shape::Curve
+                ? u * u * edge->a + 2 * u * t * edge->control + t * t * edge->b
+                : u * edge->a + t * edge->b;
+            repeatPoint = rotation.map(point);
+        }
+    }
     if (placement.hand == CutHand::Right) {
         const auto reflection = QTransform::fromScale(-1, 1);
         cut = reflection.map(cut);
         center = reflection.map(center);
+        if (repeatPoint)
+            repeatPoint = reflection.map(*repeatPoint);
     }
     QLineF fold;
     if (placement.fold != FoldEdge::None) {
@@ -358,10 +422,12 @@ LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& pl
     const auto bounds = cut.boundingRect();
     cut.translate(-bounds.topLeft());
     center -= bounds.topLeft();
+    if (repeatPoint)
+        *repeatPoint -= bounds.topLeft();
     const double halfLength = std::min(bounds.height(), bounds.width()) / 4;
     return {cut, QLineF(center - QPointF(0, placement.reversed ? -halfLength : halfLength),
                           center + QPointF(0, placement.reversed ? -halfLength : halfLength)),
-            fold.isNull() ? fold : fold.translated(-bounds.topLeft())};
+            fold.isNull() ? fold : fold.translated(-bounds.topLeft()), repeatPoint};
 }
 
 namespace {
@@ -414,25 +480,37 @@ struct PositionedCut {
     QPainterPath path;
 };
 
+QVector<PositionedCut> flawPaths(const QVector<QRectF>& flaws) {
+    QVector<PositionedCut> result;
+    for (const auto& bounds : flaws) {
+        QPainterPath path;
+        path.addRect(bounds);
+        result.append({bounds, std::move(path)});
+    }
+    return result;
+}
+
 struct CutOptions {
-    std::array<QPolygonF, 2> cuts;
+    std::array<LayoutPiece, 2> layouts;
     double area;
 };
 }
 
 std::optional<double> FabricUsage::utilization(double width) const {
     const double total = width * length;
-    if (invalid || outside || overlaps || !(total > 0) || !std::isfinite(total))
+    if (invalid || outside || overlaps || flawConflicts || !(total > 0) || !std::isfinite(total))
         return std::nullopt;
     return std::clamp(cutArea / total, 0.0, 1.0);
 }
 
-FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double clearanceMm) {
+FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double clearanceMm,
+                        const QVector<QRectF>& flaws) {
     FabricUsage usage;
-    if (!(clearanceMm >= 0 && clearanceMm <= 1000)) {
+    if (!(clearanceMm >= 0 && clearanceMm <= 1000) || !validFabricFlaws(flaws)) {
         ++usage.invalid;
         return usage;
     }
+    const auto obstacles = flawPaths(flaws);
     QVector<QPainterPath> previous;
     for (const auto& cut : polygons) {
         const auto bounds = cut.boundingRect();
@@ -446,6 +524,11 @@ FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double
         usage.length = std::max(usage.length, bounds.bottom());
         if (outsideFabric(bounds, width))
             ++usage.outside;
+        if (!obstacles.isEmpty()) {
+            const auto outline = cutPath(cut);
+            if (std::ranges::any_of(obstacles, [&](const auto& flaw) { return overlap(outline, flaw.path); }))
+                ++usage.flawConflicts;
+        }
         const auto path = clearancePath(cut, clearanceMm);
         for (const auto& other : previous) {
             if (overlap(path, other))
@@ -458,7 +541,7 @@ FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double
 
 bool CuttingReport::canExport(double fabricWidth) const {
     return std::isfinite(fabricWidth) && fabricWidth > 0 && !rows.isEmpty()
-        && !usage.invalid && !usage.outside && !usage.overlaps
+        && !usage.invalid && !usage.outside && !usage.overlaps && !usage.flawConflicts
         && !orientationViolations && !foldViolations && !repeatViolations;
 }
 
@@ -483,9 +566,10 @@ CuttingReport cuttingReport(const PatternDocument& document, const ProductionDat
             ++row.single;
         if (!graded.contains(placement.size))
             graded.insert(placement.size, gradedPattern(document, placement.size));
-        const auto cut = fabricPiece(graded.constFind(placement.size).value(), placement).cut;
+        const auto layout = fabricPiece(graded.constFind(placement.size).value(), placement);
+        const auto& cut = layout.cut;
         polygons.append(cut.translated(placement.position));
-        if (!matchesFabricRepeat(data, placement))
+        if (!matchesFabricRepeat(data, placement, layout.repeatPoint))
             ++report.repeatViolations;
         if (placement.reversed && !canTurn(data, placement))
             ++report.orientationViolations;
@@ -495,7 +579,7 @@ CuttingReport cuttingReport(const PatternDocument& document, const ProductionDat
             ++report.foldViolations;
     }
     report.rows = counts.values();
-    report.usage = fabricUsage(polygons, data.fabricWidth, data.pieceClearanceMm);
+    report.usage = fabricUsage(polygons, data.fabricWidth, data.pieceClearanceMm, data.fabricFlaws);
     return report;
 }
 
@@ -521,6 +605,9 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
         return {{}, FabricLayoutError::InvalidClearance};
     if (!validRepeat(data.fabricRepeatMm))
         return {{}, FabricLayoutError::InvalidRepeat};
+    if (!validFabricFlaws(data.fabricFlaws))
+        return {{}, FabricLayoutError::InvalidFlaws};
+    const auto obstacles = flawPaths(data.fabricFlaws);
     const double gap = placementGap + data.pieceClearanceMm;
     if (data.placements.size() > maxAutomaticCopies)
         return {{}, FabricLayoutError::TooManyCopies};
@@ -528,12 +615,15 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
         return {};
 
     QMap<QString, PatternDocument> graded;
-    QMap<std::tuple<QString, qsizetype, CutHand, FoldEdge, bool>, CutOptions> cached;
+    QMap<std::tuple<QString, qsizetype, CutHand, FoldEdge, bool, QString, double>, CutOptions> cached;
     QVector<const CutOptions*> options;
     for (qsizetype i = 0; i < data.placements.size(); ++i) {
         auto copy = data.placements[i];
         const bool turns = data.allowHalfTurns && canTurn(data, copy);
-        const auto key = std::tuple(copy.size, copy.piece, copy.hand, copy.fold, turns);
+        if (!(copy.repeatParameter >= 0 && copy.repeatParameter <= 1))
+            return {{}, FabricLayoutError::InvalidRepeat, i};
+        const auto key = std::tuple(copy.size, copy.piece, copy.hand, copy.fold, turns,
+                                    copy.repeatEdge, copy.repeatParameter);
         auto found = cached.constFind(key);
         if (found == cached.cend()) {
             if (!graded.contains(copy.size)) {
@@ -545,17 +635,19 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
             }
             const auto& pattern = graded.constFind(copy.size).value();
             copy.reversed = false;
-            auto normal = fabricPiece(pattern, copy).cut;
-            const double area = polygonArea(normal);
-            const auto bounds = normal.boundingRect();
+            auto normal = fabricPiece(pattern, copy);
+            if (!copy.repeatEdge.isEmpty() && !normal.repeatPoint)
+                return {{}, FabricLayoutError::InvalidRepeat, i};
+            const double area = polygonArea(normal.cut);
+            const auto bounds = normal.cut.boundingRect();
             if (!(area > 0) || !std::isfinite(area) || !std::isfinite(bounds.height()))
                 return {{}, FabricLayoutError::InvalidContour, i};
             if (outsideFabric(bounds, data.fabricWidth))
                 return {{}, FabricLayoutError::TooWide, i};
             copy.reversed = true;
-            auto reversed = turns ? fabricPiece(pattern, copy).cut : QPolygonF{};
-            if (reversed == normal)
-                reversed.clear();
+            auto reversed = turns ? fabricPiece(pattern, copy) : LayoutPiece{};
+            if (reversed.cut == normal.cut && reversed.repeatPoint == normal.repeatPoint)
+                reversed.cut.clear();
             found = cached.insert(key, {{std::move(normal), std::move(reversed)}, area});
         }
         options.append(&found.value());
@@ -566,8 +658,8 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
         for (qsizetype i = 0; i < copies.size(); ++i) {
             const auto& copy = copies[i];
             // An identical half-turn is elided from the search.
-            const auto& cuts = options[i]->cuts;
-            const auto& cut = copy.reversed && !cuts[1].isEmpty() ? cuts[1] : cuts[0];
+            const auto& layouts = options[i]->layouts;
+            const auto& cut = copy.reversed && !layouts[1].cut.isEmpty() ? layouts[1].cut : layouts[0].cut;
             polygons.append(cut.translated(copy.position));
         }
         return polygons;
@@ -576,8 +668,9 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
     AutomaticFabricLayout best;
     double bestLength = std::numeric_limits<double>::infinity();
     const auto consider = [&](const QVector<FabricPlacement>& copies) {
-        const auto usage = fabricUsage(polygonsFor(copies), data.fabricWidth, data.pieceClearanceMm);
-        if (!usage.invalid && !usage.outside && !usage.overlaps && usage.length < bestLength) {
+        const auto usage = fabricUsage(polygonsFor(copies), data.fabricWidth, data.pieceClearanceMm, data.fabricFlaws);
+        if (!usage.invalid && !usage.outside && !usage.overlaps && !usage.flawConflicts
+            && usage.length < bestLength) {
             bestLength = usage.length;
             best.placements = copies;
         }
@@ -589,7 +682,7 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
     for (int pass = 0; pass < 3; ++pass) {
         const auto priority = [&](qsizetype index) {
             const auto& cut = *options[index];
-            const auto bounds = cut.cuts[0].boundingRect();
+            const auto bounds = cut.layouts[0].cut.boundingRect();
             return pass == 0 ? cut.area : pass == 1 ? bounds.height() : bounds.width();
         };
         std::ranges::sort(order, [&](qsizetype a, qsizetype b) {
@@ -605,16 +698,19 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
             auto bestScore = std::tuple(std::numeric_limits<double>::infinity(), 0.0, 0.0, false);
             PositionedCut chosen;
             for (int orientation = 0; orientation < 2; ++orientation) {
-                const auto& cut = options[index]->cuts[orientation];
+                const auto& layout = options[index]->layouts[orientation];
+                const auto& cut = layout.cut;
+                const auto anchor = layout.repeatPoint.value_or(QPointF{});
                 if (cut.isEmpty())
                     continue;
                 const auto bounds = cut.boundingRect();
                 const auto path = clearancePath(cut, data.pieceClearanceMm);
+                const auto outline = cutPath(cut);
                 const double rightEdge = std::max(0.0, data.fabricWidth - bounds.width());
                 const auto tryPosition = [&](double x, double y) {
-                    x = copy.fold == FoldEdge::None ? nextRepeat(x, data.fabricRepeatMm.x())
+                    x = copy.fold == FoldEdge::None ? nextRepeat(x, data.fabricRepeatMm.x(), anchor.x())
                         : foldPosition(copy, data.fabricWidth, bounds.width());
-                    y = nextRepeat(y, data.fabricRepeatMm.y());
+                    y = nextRepeat(y, data.fabricRepeatMm.y(), anchor.y());
                     const QPointF point(x, y);
                     const auto candidate = bounds.translated(point);
                     const auto score = std::tuple(std::max(length, candidate.bottom()), y, x, orientation != 0);
@@ -626,6 +722,13 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
                         if (overlap(translated, other.path))
                             return;
                     }
+                    if (!obstacles.isEmpty()) {
+                        const auto translatedOutline = outline.translated(point);
+                        if (std::ranges::any_of(obstacles, [&](const auto& flaw) {
+                                return overlap(translatedOutline, flaw.path);
+                            }))
+                            return;
+                    }
                     position = point;
                     chosen = {candidate, translated};
                     bestScore = score;
@@ -634,9 +737,17 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
                 // Stacking below all previous copies provides a fallback.
                 tryPosition(0, placed.isEmpty() ? 0 : length + gap);
                 const double repeatX = data.fabricRepeatMm.x();
-                const double rightmost = repeatX == 0 ? rightEdge : std::floor(rightEdge / repeatX) * repeatX;
+                const double rightmost = repeatX == 0 ? rightEdge : std::floor((rightEdge + anchor.x()) / repeatX) * repeatX - anchor.x();
                 tryPosition(rightmost, 0);
                 tryPosition(0, 0);
+                for (const auto& flaw : obstacles) {
+                    const auto bounds = flaw.bounds;
+                    tryPosition(0, std::max(length + gap, bounds.bottom()));
+                    tryPosition(0, bounds.bottom());
+                    tryPosition(bounds.right(), bounds.top());
+                    tryPosition(bounds.right(), 0);
+                    tryPosition(rightmost, bounds.bottom());
+                }
                 for (const auto& other : placed) {
                     const auto b = other.bounds;
                     const std::array xs{0.0, rightEdge, b.left(), b.right() + gap,
@@ -665,13 +776,15 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
     bool existingValid = true;
     for (qsizetype index = 0; index < data.placements.size(); ++index) {
         const auto& copy = data.placements[index];
-        if (!matchesFabricRepeat(data, copy))
+        const auto& layouts = options[index]->layouts;
+        const auto& current = copy.reversed && !layouts[1].cut.isEmpty() ? layouts[1] : layouts[0];
+        if (!matchesFabricRepeat(data, copy, current.repeatPoint))
             existingValid = false;
         if (copy.reversed && (!data.allowHalfTurns || !canTurn(data, copy)))
             existingValid = false;
         if (copy.fold != FoldEdge::None
             && std::abs(copy.position.x() - foldPosition(copy, data.fabricWidth,
-                        options[index]->cuts[0].boundingRect().width())) > layoutTolerance)
+                        layouts[0].cut.boundingRect().width())) > layoutTolerance)
             existingValid = false;
     }
     if (existingValid)

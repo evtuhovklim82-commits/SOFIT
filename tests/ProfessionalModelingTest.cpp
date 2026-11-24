@@ -579,6 +579,102 @@ void checkCurvedReliefAndHandles() {
     roundTripAndExport(pattern, "L");
 }
 
+void checkCurvedSourceAndLibraryInsertion() {
+    ParametricDraft draft;
+    draft.measurements = {{"width", 100}};
+    draft.parameters = {{"reach", "positive(width + 1e-2) - 0.01"}};
+    draft.points = {{"A", "0", "0"}, {"B", "reach", "0"}, {"C", "B.x", "80"},
+                    {"D", "0", "80"}, {"Side", "B.x + 20", "40"},
+                    {"Start", "0", "40"}, {"End", "B.x + 10", "40"},
+                    {"Handle", "B.x / 2", "50"}};
+    draft.edges = {{"top", "A", "B", {}}, {"right", "B", "C", "Side"},
+                   {"bottom", "C", "D", {}}, {"left", "D", "A", {}},
+                   {"cut", "Start", "End", "Handle"}};
+    auto source = formulaPanel(draft, {"cut"});
+    const auto sideIndex = namedEdge(source, "right");
+    auto side = source.entities()[sideIndex];
+    side.piece = 0;
+    source.replace(sideIndex, side);
+    source.production().sizes.append({"L", {{"width", 130}}});
+    QString error;
+    check(source.appendContour(0, ContourOperation::Yoke, {namedEdge(source, "cut")}, 0, &error), error);
+    check(source.addSeamLink({{"@1:seam-A"}, {"@1:seam-B"}, false, true, 0, 0.1, 2}, &error), error);
+    for (const auto& size : {QString{}, QString("L")}) {
+        const auto pattern = gradedPattern(source, size);
+        const double width = size.isEmpty() ? 100 : 130;
+        const auto& edges = pattern.entities();
+        check(std::ranges::count_if(edges, [width](const Entity& edge) {
+            return edge.shape == Shape::Curve && edge.control.x() == width + 10;
+        }) == 2, "Keep the two exact subdivisions of the original contour");
+        const auto& seam = edges[namedEdge(pattern, "@1:seam-A")];
+        check(seam.shape == Shape::Curve && near(std::max(seam.a.x(), seam.b.x()), width + 10),
+              "Attach the yoke seam at the interior of the graded curved edge");
+    }
+    roundTripAndExport(source, "L");
+
+    auto destination = source;
+    destination.production().sizes[0].measurements["width"] = 150;
+    check(destination.insertConstruction(source, &error), error);
+    check(destination.pieces().size() == 4 && destination.modelingHistory().size() == 2
+          && destination.parametricDraft().measurements.size() == 1
+          && namedEdge(destination, "End_2") >= 0 && namedEdge(destination, "@2:seam-A") >= 0
+          && destination.seamLinks().last().first == QVector<QString>{"@2:seam-A"},
+          "Keep destination measurements and remap imported formulas, piece indices and seam references");
+    auto graded = gradedPattern(destination, "L");
+    for (const auto* name : {"@1:seam-A", "@2:seam-A"}) {
+        const auto& seam = graded.entities()[namedEdge(graded, QString::fromLatin1(name))];
+        check(near(std::max(seam.a.x(), seam.b.x()), 160),
+              "Both constructions use the destination grading values");
+    }
+    const auto before = destination.parametricDraft();
+    check(!destination.insertConstruction({}, &error) && destination.parametricDraft() == before
+          && destination.pieces().size() == 4, "Reject a source with no construction atomically");
+    const FinishedMeasurement width{"Panel width", "A_2", "B_2"};
+    destination.productInformation().finishedMeasurements = {width};
+    check(finishedMeasurementMm(destination, width).value_or(-1) == 100
+          && finishedMeasurementMm(graded, width).value_or(-1) == 150,
+          "Measure the placed pattern points in base and graded sizes");
+    auto marker = destination.production();
+    marker.fabricWidth = 400;
+    marker.fabricRepeatMm = {37, 29};
+    marker.placements = {{0, "L", {}, false, CutHand::Left}, {1, "L", {}, false, CutHand::Right}};
+    marker.placements[0].repeatEdge = "@1:seam-A";
+    marker.placements[1].repeatEdge = "@1:seam-B";
+    marker.placements[0].repeatParameter = 0.25;
+    marker.placements[1].repeatParameter = 0.75;
+    auto arranged = arrangeFabric(destination, marker);
+    check(arranged.error == FabricLayoutError::None && arranged.placements.size() == 2,
+          "Arrange graded seam matching points on left and mirrored right copies");
+    marker.placements = arranged.placements;
+    for (const auto& copy : marker.placements) {
+        const auto layout = fabricPiece(graded, copy);
+        check(layout.repeatPoint.has_value() && matchesFabricRepeat(marker, copy, layout.repeatPoint),
+              "Align the transformed seam point to the repeat grid");
+    }
+    QTemporaryDir directory;
+    check(directory.isValid(), "Create a directory for marker outputs");
+    check(exportProductInformationPdf(directory.filePath("finished-measurements.pdf"), destination, error), error);
+    const auto dxf = directory.filePath("motif.dxf");
+    const auto pdf = directory.filePath("motif.pdf");
+    check(exportFabricDxf(dxf, destination, marker, error)
+          && exportFabricPdf(pdf, destination, marker, {}, error), error);
+    destination.production() = marker;
+    const auto project = directory.filePath("motif.sofit");
+    PatternDocument restored;
+    check(destination.save(project, &error) && restored.load(project, &error)
+          && saveProduction(restored.production()) == saveProduction(marker)
+          && restored.productInformation().finishedMeasurements == QVector<FinishedMeasurement>{width}, error);
+    marker.placements[0].position.ry() += 0.5;
+    check(cuttingReport(restored, marker).repeatViolations == 1
+          && !exportFabricDxf(dxf, restored, marker, error)
+          && !exportFabricPdf(pdf, restored, marker, {}, error),
+          "Block both marker exports if a seam point is off repeat");
+    marker.placements[0].repeatEdge = "missing";
+    check(arrangeFabric(restored, marker).error == FabricLayoutError::InvalidRepeat,
+          "Report a missing named seam instead of falling back to the bounding box");
+    roundTripAndExport(destination, "L");
+}
+
 void checkTemplates() {
     const BodiceMeasurements m{920, 740, 420, 210, 68, 75, 22, 116, 38, 60, 40,
                                115, 300, 50, 220, 285, 87};
@@ -769,6 +865,7 @@ int main(int argc, char** argv) {
     checkModeling();
     checkContourHistory();
     checkCurvedReliefAndHandles();
+    checkCurvedSourceAndLibraryInsertion();
     checkRotationHistory();
     checkSeamLinks();
     checkLinkedTrouserBlock();

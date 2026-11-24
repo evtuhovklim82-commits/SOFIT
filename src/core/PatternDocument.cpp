@@ -17,7 +17,8 @@ namespace opc {
 namespace {
 constexpr int legacyEnvelopeVersion = 14;
 constexpr int productEnvelopeVersion = 15;
-constexpr int projectVersion = 16;
+constexpr int repeatEnvelopeVersion = 16;
+constexpr int projectVersion = 17;
 constexpr qint64 maxProjectBytes = 64 * 1024 * 1024;
 
 QString payloadDigest(const QByteArray& bytes) {
@@ -250,7 +251,17 @@ bool PatternDocument::save(const QString& path, QString* error) const {
             {"assemblyInstructions", info.assemblyInstructions}, {"includeCuttingQuantities", info.includeCuttingQuantities},
             {"includeSizeMeasurements", info.includeSizeMeasurements}});
     }
-    const int envelopeVersion = info.usesTechPackOptions() || !production_.fabricRepeatMm.isNull() ? projectVersion
+    if (!info.finishedMeasurements.isEmpty()) {
+        QJsonArray measurements;
+        for (const auto& row : info.finishedMeasurements)
+            measurements.append(QJsonObject{{"label", row.label}, {"first", row.first}, {"second", row.second}});
+        root.insert("finishedMeasurements", measurements);
+    }
+    const bool hasSeamRepeatPoints = std::ranges::any_of(production_.placements,
+        [](const auto& placement) { return !placement.repeatEdge.isEmpty(); });
+    const int envelopeVersion = hasSeamRepeatPoints || !production_.fabricFlaws.isEmpty()
+        || !info.finishedMeasurements.isEmpty() ? projectVersion
+        : info.usesTechPackOptions() || !production_.fabricRepeatMm.isNull() ? repeatEnvelopeVersion
         : hasProductInformation || production_.pieceClearanceMm != 0 ? productEnvelopeVersion : legacyEnvelopeVersion;
     const auto payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
     const QJsonObject envelope{{"format", "SOFIT"}, {"version", envelopeVersion},
@@ -305,7 +316,8 @@ bool PatternDocument::load(const QString& path, QString* error) {
         return fail(QStringLiteral("This project requires a newer version of SOFIT"));
     const auto envelopeVersion = root.value("version").toDouble();
     if (root.value("format") != QStringLiteral("SOFIT")
-        || (envelopeVersion != projectVersion && envelopeVersion != productEnvelopeVersion
+        || (envelopeVersion != projectVersion && envelopeVersion != repeatEnvelopeVersion
+            && envelopeVersion != productEnvelopeVersion
             && envelopeVersion != legacyEnvelopeVersion))
         return loadPayload(root, false, error);
 
@@ -488,6 +500,23 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
         info.assemblyInstructions = pack.value("assemblyInstructions").toString();
         info.includeCuttingQuantities = pack.value("includeCuttingQuantities").toBool();
         info.includeSizeMeasurements = pack.value("includeSizeMeasurements").toBool();
+    }
+    if (native && root.contains("finishedMeasurements")) {
+        const auto measurements = root.value("finishedMeasurements").toArray();
+        if (!root.value("finishedMeasurements").isArray() || measurements.size() > 100)
+            return fail(QStringLiteral("Invalid finished measurement table"));
+        QSet<QString> labels;
+        for (const auto& value : measurements) {
+            const auto row = value.toObject();
+            FinishedMeasurement item{row.value("label").toString(), row.value("first").toString(),
+                                     row.value("second").toString()};
+            if (item.label.trimmed().isEmpty() || labels.contains(item.label)
+                || item.first.isEmpty() || item.second.isEmpty() || item.first == item.second
+                || item.first.size() > 64 || item.second.size() > 64)
+                return fail(QStringLiteral("Invalid finished measurement reference"));
+            labels.insert(item.label);
+            loaded.productInformation_.finishedMeasurements.append(std::move(item));
+        }
     }
     loaded.production_ = std::move(production);
     loaded.entities_ = std::move(parsed);

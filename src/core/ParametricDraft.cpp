@@ -11,6 +11,7 @@
 #include <QSet>
 #include <cmath>
 #include <functional>
+#include <iterator>
 #include <utility>
 
 namespace opc {
@@ -469,6 +470,159 @@ bool PatternDocument::moveDraftPoint(const QString& name, QPointF offset, QStrin
         for (const auto& size : production_.sizes) {
             if (!preservesContours(gradedPattern(*this, size.name), gradedPattern(candidate, size.name), size.name))
                 return false;
+        }
+    }
+    *this = std::move(candidate);
+    return true;
+}
+
+bool PatternDocument::insertConstruction(const PatternDocument& source, QString* error) {
+    if (source.draft_.points.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("The selected project has no parametric draft.");
+        return false;
+    }
+
+    auto candidate = *this;
+    auto draft = draft_;
+    QSet<QString> scalars, objects, sharedMeasurements;
+    QHash<QString, QString> scalarNames, objectNames;
+    for (const auto& measurement : draft.measurements) {
+        scalars.insert(measurement.name);
+        sharedMeasurements.insert(measurement.name);
+    }
+    for (const auto& parameter : draft.parameters)
+        scalars.insert(parameter.name);
+    // Size tables can retain overrides for measurements that are not currently in the draft.
+    for (const auto& size : production_.sizes) {
+        for (auto it = size.measurements.cbegin(); it != size.measurements.cend(); ++it)
+            scalars.insert(it.key());
+    }
+    for (const auto& point : draft.points)
+        objects.insert(point.name);
+    for (const auto& edge : draft.edges)
+        objects.insert(edge.name);
+    const auto reserveName = [](const QString& name, QSet<QString>& used) {
+        auto unique = name;
+        for (qsizetype index = 2; used.contains(unique); ++index) {
+            const auto suffix = QStringLiteral("_%1").arg(index);
+            unique = name.left(64 - suffix.size()) + suffix;
+        }
+        used.insert(unique);
+        return unique;
+    };
+    for (const auto& measurement : source.draft_.measurements) {
+        const bool shared = sharedMeasurements.contains(measurement.name);
+        const auto name = shared ? measurement.name : reserveName(measurement.name, scalars);
+        scalarNames.insert(measurement.name, name);
+        if (!shared)
+            draft.measurements.append({name, measurement.mm});
+    }
+    for (const auto& parameter : source.draft_.parameters)
+        scalarNames.insert(parameter.name, reserveName(parameter.name, scalars));
+    for (const auto& point : source.draft_.points)
+        objectNames.insert(point.name, reserveName(point.name, objects));
+    for (const auto& edge : source.draft_.edges)
+        objectNames.insert(edge.name, reserveName(edge.name, objects));
+
+    const auto rewriteFormula = [&](const QString& formula) {
+        static const QRegularExpression tokens(QStringLiteral(
+            R"regex((?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|([A-Za-z_][A-Za-z_0-9]*)(\.[xy])?)regex"));
+        QString result;
+        qsizetype end = 0;
+        auto matches = tokens.globalMatch(formula);
+        while (matches.hasNext()) {
+            const auto match = matches.next();
+            result += formula.mid(end, match.capturedStart() - end);
+            end = match.capturedEnd();
+            const auto name = match.captured(1);
+            const auto coordinate = match.captured(2);
+            const bool function = coordinate.isEmpty() && (name == u"quadlen" || name == u"positive")
+                && QStringView(formula).sliced(end).trimmed().startsWith(u'(');
+            if (name.isEmpty() || function)
+                result += match.captured();
+            else if (coordinate.isEmpty())
+                result += scalarNames.value(name, name);
+            else
+                result += objectNames.value(name, name) + coordinate;
+        }
+        return result + formula.mid(end);
+    };
+    for (const auto& parameter : source.draft_.parameters)
+        draft.parameters.append({scalarNames.value(parameter.name), rewriteFormula(parameter.formula)});
+    for (const auto& point : source.draft_.points)
+        draft.points.append({objectNames.value(point.name), rewriteFormula(point.x), rewriteFormula(point.y)});
+    for (const auto& edge : source.draft_.edges)
+        draft.edges.append({objectNames.value(edge.name), objectNames.value(edge.start),
+                            objectNames.value(edge.end), objectNames.value(edge.control)});
+
+    const auto pieceOffset = pieces_.size();
+    const auto stepOffset = history_.size();
+    const auto mapPiece = [pieceOffset](qsizetype piece) { return piece < 0 ? piece : piece + pieceOffset; };
+    const auto mapObject = [&](const QString& name) {
+        if (!name.startsWith(u'@'))
+            return objectNames.value(name, name);
+        const auto colon = name.indexOf(u':');
+        return QStringLiteral("@%1").arg(name.mid(1, colon - 1).toLongLong() + stepOffset)
+            + name.mid(colon);
+    };
+    const auto mapObjects = [&](QVector<QString>& names) {
+        for (auto& name : names)
+            name = mapObject(name);
+    };
+    candidate.pieces_ += source.pieces_;
+    for (auto entity : source.entities_) {
+        entity.piece = mapPiece(entity.piece);
+        entity.draftName = mapObject(entity.draftName);
+        candidate.entities_.append(std::move(entity));
+    }
+    for (auto binding : source.hiddenSources_) {
+        binding.name = mapObject(binding.name);
+        binding.piece = mapPiece(binding.piece);
+        candidate.hiddenSources_.append(std::move(binding));
+    }
+    for (auto step : source.history_) {
+        mapObjects(step.objects);
+        mapObjects(step.guides);
+        step.rotationPivot = mapObject(step.rotationPivot);
+        step.secondPiece = mapPiece(step.secondPiece);
+        candidate.history_.append(std::move(step));
+    }
+    for (auto seam : source.seamLinks_) {
+        mapObjects(seam.first);
+        mapObjects(seam.second);
+        candidate.seamLinks_.append(std::move(seam));
+    }
+
+    for (const auto& size : source.production_.sizes) {
+        auto& sizes = candidate.production_.sizes;
+        auto target = std::ranges::find(sizes, size.name, &PatternSize::name);
+        const bool existing = target != sizes.end();
+        if (!existing) {
+            sizes.append({size.name, {}});
+            target = std::prev(sizes.end());
+        }
+        if (!source.production_.useDraftMeasurements)
+            continue;
+        for (auto it = size.measurements.cbegin(); it != size.measurements.cend(); ++it) {
+            if (scalarNames.contains(it.key()) && (!existing || !sharedMeasurements.contains(it.key())))
+                target->measurements.insert(scalarNames.value(it.key()), it.value());
+        }
+    }
+    for (auto rule : source.production_.rules) {
+        rule.piece = mapPiece(rule.piece);
+        candidate.production_.rules.append(std::move(rule));
+    }
+
+    if (!candidate.setParametricDraft(std::move(draft), error))
+        return false;
+    for (const auto& rule : std::as_const(candidate.production_.rules)) {
+        if (rule.piece >= pieceOffset && !gradingPoints(candidate, rule.piece).contains(rule.point)) {
+            if (error)
+                *error = QStringLiteral("A grade rule for '%1' no longer matches an imported point. "
+                                        "Check the shared base measurements before inserting.")
+                    .arg(candidate.pieces_[rule.piece].name);
+            return false;
         }
     }
     *this = std::move(candidate);

@@ -23,6 +23,8 @@ struct ContourEditResult {
     QString error;
 };
 
+std::optional<double> contourEdgeParameter(const Entity& edge, QPointF point);
+
 // Explicit dart operations take both legs followed by the chosen outlet.
 ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
                                ContourOperation operation, const QVector<qsizetype>& guides,

@@ -290,6 +290,23 @@ int main(int argc, char** argv) {
           && !loadProduction(saveProduction(repeat), 2, reopenedMarker.production()),
           "Reject an invalid repeat on arrangement and on load");
 
+    ProductionData flawed;
+    flawed.fabricWidth = 160;
+    flawed.fabricFlaws = {QRectF(0, 0, 160, 75)};
+    flawed.placements = {{1, {}, {}}};
+    check(cuttingReport(triangle, flawed).usage.flawConflicts == 1
+          && !exportFabricDxf(temp.filePath("flaw-conflict.dxf"), triangle, flawed, dxfError),
+          "Block output when a copy overlaps a fabric flaw");
+    const auto avoidFlaw = arrangeFabric(triangle, flawed);
+    check(avoidFlaw.error == FabricLayoutError::None && avoidFlaw.placements.front().position.y() >= 75,
+          "Arrange the copy below a width-spanning flaw");
+    flawed.placements = avoidFlaw.placements;
+    triangle.production() = flawed;
+    check(cuttingReport(triangle, flawed).canExport(flawed.fabricWidth)
+          && triangle.save(marker) && reopenedMarker.load(marker)
+          && reopenedMarker.production().fabricFlaws == flawed.fabricFlaws,
+          "Verify and round-trip a marker with excluded fabric zones");
+
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());
     check(!loadProduction(saveProduction(duplicate), 2, loaded.production())
