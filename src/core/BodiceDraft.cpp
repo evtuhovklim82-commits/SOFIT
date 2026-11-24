@@ -34,6 +34,7 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
     if ((options.neckFinish != NeckFinish::None && !inRange(options.finishDepth, 10, 120))
         || (options.neckFinish == NeckFinish::PointedCollar && !inRange(options.collarPointExtension, 5, 100))
         || (twoPiece && (!inRange(options.elbowShape, 5, 60) || !inRange(options.elbowLevel, 25, 75)))
+        || (!skirt && !inRange(options.capEase, 0, 30))
         || !inRange(options.dartIntakeShare, 10, 90) || !inRange(options.dartPosition, 30, 70)
         || ((wide || puff) && !inRange(options.extraWidth, 10, 500))
         || (puff && (!inRange(options.crownRise, 5, 150) || !inRange(options.gatherPerCapSection, 0, 200)
@@ -103,7 +104,7 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
     if (!skirt) {
         draft.measurements.append({
             {"upper_arm", m.upperArm}, {"upper_arm_ease", m.upperArmEase}, {"cuff", m.cuff},
-            {"sleeve_length", m.sleeveLength}, {"cap_height", m.capHeight}
+            {"sleeve_length", m.sleeveLength}, {"cap_height", m.capHeight}, {"sleeve_cap_ease", options.capEase}
         });
         if (wide || puff)
             draft.measurements.append({"sleeve_extra_width", options.extraWidth});
@@ -119,12 +120,20 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             {"sleeve_center", wide || puff ? "2 * (chest + 40) + sleeve_half + sleeve_hem_width / 2"
                                          : "2 * (chest + 40) + sleeve_half"}
         });
+        const auto capControl = [&](const QString& prefix, const QString& sign) {
+            const QString armhole = "quadlen(" + prefix + "ShoulderEnd.x, " + prefix + "ShoulderEnd.y, "
+                + prefix + "ArmControl.x, " + prefix + "ArmControl.y, "
+                + prefix + "Underarm.x, " + prefix + "Underarm.y)";
+            const QString gather = puff ? " + sleeve_cap_gather" : "";
+            return "sleeve_center " + sign + " capcontrol(sleeve_half, cap_height - sleeve_crown, "
+                + armhole + " + sleeve_cap_ease" + gather + ")";
+        };
         draft.points.append({
             {"SFront", "sleeve_center - sleeve_half", "cap_height"},
             {"SBack", "sleeve_center + sleeve_half", "cap_height"},
             {"SCrown", "sleeve_center", "sleeve_crown"},
-            {"SFrontControl", "sleeve_center - sleeve_half * 0.70", "sleeve_crown"},
-            {"SBackControl", "sleeve_center + sleeve_half * 0.55", "sleeve_crown"},
+            {"SFrontControl", capControl("F", "-"), "sleeve_crown"},
+            {"SBackControl", capControl("B", "+"), "sleeve_crown"},
             {"SHemFront", "sleeve_center - sleeve_hem_width / 2", "sleeve_hem_y"},
             {"SHemBack", "sleeve_center + sleeve_hem_width / 2", "sleeve_hem_y"}
         });

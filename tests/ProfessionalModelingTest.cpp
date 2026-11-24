@@ -695,7 +695,8 @@ void checkTemplates() {
         for (const auto& size : {QString{}, QString("L")}) {
             const auto checkResult = checkFittingBlock(*draft, size);
             check(checkResult.invalidPieces.isEmpty() && checkResult.missingSeams.isEmpty(),
-                  "Closed base and graded contours with all sewing sections measured");
+                  size + ": invalid pieces " + checkResult.invalidPieces.join(", ")
+                  + "; missing seams " + checkResult.missingSeams.join(", "));
             int finishMatches = 0;
             int bandMatches = 0;
             for (const auto& seam : checkResult.seams) {
@@ -789,6 +790,111 @@ void checkTemplates() {
           "Add facings to the sleeveless dress without losing the skirt seam checks");
 }
 
+void checkGarmentProduction(const QString& name, std::optional<PatternDocument> draft,
+                            PatternSize larger, PatternSize taller) {
+    check(draft.has_value(), name + ": construct base");
+    auto& data = draft->production();
+    data.sizes = {larger, taller};
+    data.pieceClearanceMm = 2;
+    data.directionalFabric = true;
+    QString error;
+    check(draft->validateParametricSizes(data, &error), name + ": validate size and height changes: " + error);
+    for (const auto& size : {QString{}, larger.name, taller.name}) {
+        const auto fitting = checkFittingBlock(*draft, size);
+        check(fitting.invalidPieces.isEmpty() && fitting.missingSeams.isEmpty(),
+              name + "/" + size + ": verify closed contours and available seam measurements");
+        int capSections = 0;
+        int collarSections = 0;
+        for (const auto& seam : fitting.seams) {
+            const bool cap = seam.label.contains("armhole and sleeve cap");
+            const bool collar = seam.label.contains("neckline and collar");
+            capSections += cap;
+            collarSections += collar;
+            const double deviation = std::abs((seam.second - seam.first) - seam.targetDifference);
+            if (cap)
+                check(near(seam.targetDifference, size == "48/176" ? 5 : 4), "Use the expected cap ease for the size");
+            if (cap || collar)
+                std::cout << qPrintable(QStringLiteral("%1 / %2 / %3: target %4 mm, measured %5 mm, deviation %6 mm")
+                    .arg(name, size.isEmpty() ? QStringLiteral("Base") : size, seam.label)
+                    .arg(seam.targetDifference, 0, 'f', 3)
+                    .arg(seam.second - seam.first, 0, 'f', 3)
+                    .arg(deviation, 0, 'f', 3)) << '\n';
+            check(deviation <= (cap || collar ? 0.01 : 2), name + "/" + size + ": " + seam.label
+                  + " deviates by " + QString::number(deviation) + " mm");
+        }
+        if (name == "Shirt construction" || name == "Jacket construction")
+            check(capSections == 2 && collarSections == 2, name + "/" + size + ": measure each cap and collar section");
+        const auto graded = gradedPattern(*draft, size);
+        for (qsizetype piece = 0; piece < graded.pieces().size(); ++piece) {
+            const auto geometry = analyzePiece(graded, piece);
+            check(geometry.error == ContourError::None && !geometry.allowanceFailed,
+                  name + "/" + size + ": verify cutting allowance for " + graded.pieces()[piece].name);
+            if (size == taller.name) {
+                for (int copy = 0; copy < graded.pieces()[piece].cutCount; ++copy)
+                    data.placements.append({piece, size, {}});
+            }
+        }
+    }
+    if (name == "A-line skirt") {
+        data.fabricRepeatMm = {20, 30};
+        for (auto& copy : data.placements)
+            copy.repeatEdge = "hem";
+    }
+    const auto arranged = arrangeFabric(*draft, data);
+    check(arranged.error == FabricLayoutError::None, name + ": nest the taller size");
+    data.placements = arranged.placements;
+    const auto report = cuttingReport(*draft, data);
+    const auto rows = cuttingKitRows(*draft, report);
+    check(report.canExport(data.fabricWidth) && rows.size() == draft->pieces().size()
+          && std::ranges::all_of(rows, [&](const auto& row) {
+              return row.copies() == draft->pieces()[row.piece].cutCount;
+          }), name + ": verify marker and cut quantities");
+
+    draft->productInformation().reportTitle = name;
+    draft->productInformation().includeSizeMeasurements = true;
+    roundTripAndExport(*draft, taller.name);
+    QTemporaryDir outputs;
+    check(outputs.isValid(), name + ": create export directory");
+    const auto pack = outputs.filePath("tech-pack.pdf");
+    const auto pdf = outputs.filePath("marker.pdf");
+    const auto dxf = outputs.filePath("marker.dxf");
+    check(exportProductInformationPdf(pack, *draft, error), name + ": export tech pack: " + error);
+    check(exportFabricPdf(pdf, *draft, data, {}, error), name + ": export marker PDF: " + error);
+    check(exportFabricDxf(dxf, *draft, data, error), name + ": export marker DXF: " + error);
+    for (const auto& file : {pack, pdf}) {
+        const auto bytes = readFile(file);
+        check(bytes.startsWith("%PDF-") && bytes.contains("/Type /Page")
+              && bytes.trimmed().endsWith("%%EOF"), name + ": verify PDF output");
+    }
+    check(readFile(dxf).contains("ENTITIES"), name + ": verify DXF output");
+}
+
+void checkGarmentProductionScenarios() {
+    const BodiceMeasurements bodice{920, 740, 420, 210, 68, 75, 22, 116, 38, 60, 40,
+                                    115, 300, 50, 220, 285, 87};
+    checkGarmentProduction("A-line skirt", draftPullOnSkirt(SkirtStyle::ALine, {1000, 600, 60, 200, 35}),
+                           {"48/164", {{"hip", 1040}, {"hip_ease", 70}}},
+                           {"48/176", {{"hip", 1040}, {"length", 660}, {"casing", 40}, {"hem_flare", 220}}});
+    checkGarmentProduction("Trousers",
+                           draftTrousersWithSeamLinks({740, 1000, 40, 60, 195, 270, 600, 1030, 460, 380, 100}),
+                           {"48/164", {{"waist", 780}, {"hip", 1040}}},
+                           {"48/176", {{"waist", 780}, {"hip", 1040}, {"length", 1090}, {"knee_depth", 630}}});
+    checkGarmentProduction("Dress with facings",
+                           draftDress(bodice, {1000, 60, 195, 620, 160, 100}, BodiceOptions{NeckFinish::Facing}),
+                           {"48/164", {{"bust", 960}, {"waist", 780}, {"hip", 1040}}},
+                           {"48/176", {{"bust", 960}, {"waist", 780}, {"hip", 1040},
+                                       {"bodice_length", 445}, {"skirt_length", 680}}});
+    const PatternSize larger{"48/164", {{"bust", 960}, {"waist", 780}}};
+    const PatternSize taller{"48/176", {{"bust", 960}, {"waist", 780}, {"bodice_length", 445},
+                                       {"sleeve_length", 320}, {"cap_height", 90}, {"sleeve_cap_ease", 5},
+                                       {"neck_width", 70}, {"front_neck_depth", 79}, {"back_neck_depth", 24}}};
+    checkGarmentProduction("Shirt construction",
+                           draftBodiceAndSleeve(bodice, BodiceOptions{NeckFinish::PointedCollar}), larger, taller);
+    BodiceOptions jacket{NeckFinish::PointedCollar};
+    jacket.sleeveStyle = SleeveStyle::TwoPiece;
+    checkGarmentProduction("Jacket construction", draftBodiceAndSleeve(bodice, jacket), larger, taller);
+}
+
 void checkApronKit() {
     const ApronMeasurements measurements{700, 780, 260, 250, 600, 420, 25};
     QString error;
@@ -870,6 +976,7 @@ int main(int argc, char** argv) {
     checkSeamLinks();
     checkLinkedTrouserBlock();
     checkTemplates();
+    checkGarmentProductionScenarios();
     checkApronKit();
     checkPatchPocket();
 }

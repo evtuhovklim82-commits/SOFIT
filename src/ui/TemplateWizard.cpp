@@ -243,7 +243,7 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                 static_cast<opc::NeckFinish>(neckFinish->currentIndex()), finishDepth->value(),
                 static_cast<opc::SleeveStyle>(sleeveStyle->currentIndex()), extraWidth->value(),
                 crownRise->value(), capGather->value(), elbowShape->value(), pointExtension->value(),
-                dartShare->value(), dartPosition->value(), elbowLevel->value()
+                dartShare->value(), dartPosition->value(), elbowLevel->value(), capEase->value()
             };
             if (index == Dress) {
                 if (auto document = opc::draftDress(bodice, {

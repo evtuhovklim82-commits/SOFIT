@@ -10,7 +10,8 @@ namespace opc {
 
 QVector<QPointF> gradingPoints(const PatternDocument& document, qsizetype piece);
 PatternDocument gradedPattern(const PatternDocument& document, const QString& size,
-                              QVector<qsizetype>* sourceIndices = nullptr);
+                              QVector<qsizetype>* sourceIndices = nullptr,
+                              GradeEdgeNames edgeNames = GradeEdgeNames::ForSeamLinks);
 QJsonObject saveProduction(const ProductionData& data);
 bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionData& data);
 

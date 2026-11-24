@@ -31,6 +31,6 @@ std::optional<PatternDocument> draftTrousersWithSeamLinks(const TrouserMeasureme
                                                          QString* error = nullptr);
 // An empty size checks the base. Named sizes include any manual grade offsets.
 FittingCheck checkFittingBlock(const PatternDocument& document, const QString& size = {},
-                              double capEase = 4);
+                              std::optional<double> capEase = std::nullopt);
 
 }

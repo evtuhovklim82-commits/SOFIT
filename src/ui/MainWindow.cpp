@@ -734,7 +734,10 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         auto* capEase = new QDoubleSpinBox(&dialog);
         capEase->setSuffix(tr(" mm"));
         capEase->setValue(4);
-        form->addRow(tr("Ease per sleeve cap section"), capEase);
+        auto* overrideEase = new QCheckBox(tr("Override cap ease for this check"), &dialog);
+        capEase->setEnabled(false);
+        form->addRow(overrideEase, capEase);
+        connect(overrideEase, &QCheckBox::toggled, capEase, &QWidget::setEnabled);
         auto* report = new QPlainTextEdit(&dialog);
         report->setReadOnly(true);
         form->addRow(report);
@@ -743,7 +746,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         form->addRow(buttons);
 
         const auto refresh = [&] {
-            const auto check = opc::checkFittingBlock(doc_, size->currentData().toString(), capEase->value());
+            const auto ease = overrideEase->isChecked() ? std::optional{capEase->value()} : std::nullopt;
+            const auto check = opc::checkFittingBlock(doc_, size->currentData().toString(), ease);
             QStringList lines;
             lines.append(check.invalidPieces.isEmpty()
                 ? (doc_.pieces().isEmpty() ? tr("No pieces to check.") : tr("All piece contours are closed and simple."))
@@ -764,6 +768,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         };
         connect(size, &QComboBox::currentIndexChanged, &dialog, refresh);
         connect(tolerance, &QDoubleSpinBox::valueChanged, &dialog, refresh);
+        connect(overrideEase, &QCheckBox::toggled, &dialog, refresh);
         connect(capEase, &QDoubleSpinBox::valueChanged, &dialog, refresh);
         refresh();
         dialog.resize(680, 340);

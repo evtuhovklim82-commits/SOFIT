@@ -131,7 +131,7 @@ std::optional<PatternDocument> draftTrousersWithSeamLinks(const TrouserMeasureme
     return document;
 }
 
-FittingCheck checkFittingBlock(const PatternDocument& document, const QString& size, double capEase) {
+FittingCheck checkFittingBlock(const PatternDocument& document, const QString& size, std::optional<double> capEase) {
     QVector<qsizetype> sources;
     const auto drawing = gradedPattern(document, size, &sources);
     QHash<QString, Entity> edgesByName;
@@ -195,10 +195,10 @@ FittingCheck checkFittingBlock(const PatternDocument& document, const QString& s
         compare("Bodice side seam (front, back)", sum({"front_side"}), sum({"back_side"}));
         compare("Shoulder seam (front, back)", sum({"front_shoulder"}), sum({"back_shoulder"}));
     }
-    const auto measurement = [&](const QString& name) {
+    const auto measurement = [&](const QString& name, double defaultValue = 0) {
         const auto& values = document.parametricDraft().measurements;
         const auto base = std::ranges::find(values, name, &Measurement::name);
-        const double fallback = base != values.end() ? base->mm : 0;
+        const double fallback = base != values.end() ? base->mm : defaultValue;
         const auto& production = document.production();
         const auto target = std::ranges::find(production.sizes, size, &PatternSize::name);
         return !size.isEmpty() && production.useDraftMeasurements && target != production.sizes.end()
@@ -215,7 +215,7 @@ FittingCheck checkFittingBlock(const PatternDocument& document, const QString& s
         compare("Facing shoulder (front, back)", sum({"finish_front_shoulder"}), sum({"finish_back_shoulder"}));
     }
     if (hasEdge("sleeve_front_cap")) {
-        const double targetCap = capEase + measurement("sleeve_cap_gather");
+        const double targetCap = capEase.value_or(measurement("sleeve_cap_ease", 4)) + measurement("sleeve_cap_gather");
         compare("Front armhole and sleeve cap", sum({"front_armhole"}), sum({"sleeve_front_cap"}), targetCap);
         compare("Back armhole and sleeve cap", sum({"back_armhole"}), sum({"sleeve_back_cap"}), targetCap);
         compare("Sleeve underarm seam (front, back)", sum({"sleeve_front_seam"}), sum({"sleeve_back_seam"}));

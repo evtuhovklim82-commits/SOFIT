@@ -23,6 +23,7 @@
 #include <QGraphicsScene>
 #include <QMenu>
 #include <QMessageBox>
+#include <QShortcut>
 #include <QKeyEvent>
 #include <QKeySequenceEdit>
 #include <QSettings>
@@ -442,6 +443,24 @@ void testStageNavigationAndPreferences() {
         for (auto* label : dialog.findChildren<QLabel*>())
             hasPieceGuidance |= label->text().contains("Pieces → Create Piece from Selection");
         check(hasPieceGuidance, "Empty layout explains the required prior stage");
+        auto* buttons = dialog.findChild<QDialogButtonBox*>();
+        QPushButton* helpButton = nullptr;
+        check(buttons, "Find the layout dialog buttons");
+        for (auto* button : buttons->buttons()) {
+            if (buttons->buttonRole(button) == QDialogButtonBox::HelpRole)
+                helpButton = qobject_cast<QPushButton*>(button);
+        }
+        check(helpButton && helpButton->text() == QStringLiteral("Справка"),
+              "Show the Russian help entry in the layout dialog");
+        auto* helpShortcut = dialog.findChild<QShortcut*>();
+        check(helpShortcut && helpShortcut->key() == QKeySequence(Qt::Key_F1), "Bind layout help to F1");
+        QTimer::singleShot(0, &dialog, [] {
+            auto* help = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            check(help && help->windowTitle() == QStringLiteral("Раскладка лекал")
+                  && help->text().contains(QStringLiteral("раппорт")), "Open the Russian layout help");
+            help->accept();
+        });
+        helpButton->click();
         dialog.reject();
     });
     runDialog<QDialog>(action(window, "GRAFIS ⇄ SOFIT"), [](QDialog& dialog) {
@@ -746,6 +765,21 @@ int main(int argc, char** argv) {
         click("Copy measurement table");
         check(QApplication::clipboard()->text() == QStringLiteral("Size\tMeasurement\tValue (mm)\nL\tChest\t1000"),
               "Copy a reusable measurement grid");
+        QApplication::clipboard()->setText(QStringLiteral(
+            "L\tChest\t1000\nL\tSleeve\t600\n48/176\tChest\t1040\n48/176\tSleeve\t640"));
+        click("Replace table from clipboard");
+        QTimer::singleShot(0, [&dialog] {
+            auto* nested = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(nested && nested != &dialog, "Open the intermediate size dialog");
+            nested->findChild<QLineEdit*>()->setText("48/170");
+            nested->findChild<QDoubleSpinBox*>()->setValue(25);
+            nested->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        });
+        click(QStringLiteral("Добавить промежуточный размер…"));
+        check(measurements->rowCount() == 6 && measurements->item(4, 0)->text() == "48/170"
+              && measurements->item(4, 2)->text().toDouble() == 1010
+              && measurements->item(5, 2)->text().toDouble() == 610,
+              "Interpolate both measurements from the current table");
         tabs->setCurrentIndex(1);
         auto* rules = tabs->widget(1)->findChild<QTableWidget*>();
         click("Add grade rule");
@@ -788,7 +822,10 @@ int main(int argc, char** argv) {
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
     action(window, "&Save").trigger();
-    check(loaded.load(pattern) && loaded.production().sizes.size() == 1 && loaded.production().rules.size() == 1
+    check(loaded.load(pattern) && loaded.production().sizes.size() == 3 && loaded.production().rules.size() == 1
+          && loaded.production().sizes.back().name == "48/170"
+          && loaded.production().sizes.back().measurements.value("Chest") == 1010
+          && loaded.production().sizes.back().measurements.value("Sleeve") == 610
           && loaded.production().placements.size() == 1 && loaded.production().placements.front().size == "L"
           && loaded.production().fabricWidth == 1450 && loaded.production().pieceClearanceMm == 5.5
           && loaded.production().fabricRepeatMm == QPointF(20, 40)

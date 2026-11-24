@@ -12,6 +12,7 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFormLayout>
 #include <QGraphicsItem>
 #include <QGraphicsLineItem>
 #include <QGraphicsPolygonItem>
@@ -20,6 +21,7 @@
 #include <QGraphicsView>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QLineF>
 #include <QMap>
 #include <QPainter>
@@ -28,6 +30,8 @@
 #include <QPen>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSet>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -69,6 +73,16 @@ QDialogButtonBox* dialogButtons(QVBoxLayout* layout, QDialog& dialog) {
     layout->addWidget(buttons);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     return buttons;
+}
+
+void addContextHelp(QDialog& dialog, QDialogButtonBox& buttons, const QString& title, const QString& text) {
+    const auto showHelp = [&dialog, title, text] {
+        QMessageBox::information(&dialog, title, text);
+    };
+    auto* help = buttons.addButton(QStringLiteral("Справка"), QDialogButtonBox::HelpRole);
+    QObject::connect(help, &QPushButton::clicked, &dialog, showHelp);
+    auto* shortcut = new QShortcut(QKeySequence(Qt::Key_F1), &dialog);
+    QObject::connect(shortcut, &QShortcut::activated, &dialog, showHelp);
 }
 
 std::optional<QVector<QRectF>> editFabricFlaws(QWidget* parent, const QVector<QRectF>& flaws) {
@@ -244,6 +258,95 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         sizes->editItem(sizes->item(sizes->rowCount() - 1, 0));
     });
 
+    const auto readMeasurements = [sizes](QString& error) {
+        QVector<opc::PatternSize> entries;
+        QMap<QString, qsizetype> sizeIndices;
+        for (int row = 0; row < sizes->rowCount(); ++row) {
+            const auto size = sizes->item(row, 0)->text().trimmed();
+            const auto name = sizes->item(row, 1)->text().trimmed();
+            const auto value = sizes->item(row, 2)->text().trimmed();
+            if (size.isEmpty()) {
+                error = tr("Enter a size name in measurement row %1.").arg(row + 1);
+                return QVector<opc::PatternSize>{};
+            }
+            if (!sizeIndices.contains(size)) {
+                sizeIndices.insert(size, entries.size());
+                entries.append({size, {}});
+            }
+            if (name.isEmpty() && value.isEmpty())
+                continue;
+            bool ok = false;
+            const double mm = value.toDouble(&ok);
+            auto& measurements = entries[sizeIndices[size]].measurements;
+            if (name.isEmpty() || !ok || !std::isfinite(mm) || mm <= 0 || measurements.contains(name)) {
+                error = tr("Measurement row %1 needs a unique measurement name for its size and a positive value in mm.").arg(row + 1);
+                return QVector<opc::PatternSize>{};
+            }
+            measurements.insert(name, mm);
+        }
+        return entries;
+    };
+    auto* interpolate = new QPushButton(QStringLiteral("Добавить промежуточный размер…"));
+    auto* interpolationButtons = new QHBoxLayout;
+    sizesLayout->addLayout(interpolationButtons);
+    interpolationButtons->addWidget(interpolate);
+    interpolationButtons->addStretch();
+    QObject::connect(interpolate, &QPushButton::clicked, &dialog, [&] {
+        QString error;
+        const auto entries = readMeasurements(error);
+        if (!error.isEmpty() || entries.size() < 2) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(), error.isEmpty()
+                ? QStringLiteral("Добавьте как минимум два опорных размера.") : error);
+            return;
+        }
+
+        QDialog interpolation(&dialog);
+        interpolation.setWindowTitle(interpolate->text());
+        auto* layout = new QVBoxLayout(&interpolation);
+        auto* form = new QFormLayout;
+        layout->addLayout(form);
+        auto* first = new QComboBox;
+        auto* last = new QComboBox;
+        auto* name = new QLineEdit;
+        auto* percentage = new QDoubleSpinBox;
+        percentage->setRange(0.01, 99.99);
+        percentage->setValue(50);
+        percentage->setSuffix(QStringLiteral(" %"));
+        for (const auto& entry : entries) {
+            first->addItem(entry.name);
+            last->addItem(entry.name);
+        }
+        last->setCurrentIndex(1);
+        form->addRow(QStringLiteral("Начальный размер"), first);
+        form->addRow(QStringLiteral("Конечный размер"), last);
+        form->addRow(QStringLiteral("Доля от начального к конечному"), percentage);
+        form->addRow(QStringLiteral("Новый размер"), name);
+
+        auto* buttons = dialogButtons(layout, interpolation);
+        QObject::connect(buttons, &QDialogButtonBox::accepted, &interpolation, [&] {
+            const auto target = name->text().trimmed();
+            if (target.isEmpty() || target.contains(u'\t') || target.contains(u'\r') ||
+                target.contains(u'\n') || first->findText(target, Qt::MatchExactly) >= 0) {
+                QMessageBox::warning(&interpolation, interpolation.windowTitle(),
+                    QStringLiteral("Введите новое уникальное название размера без табуляции и переносов строки."));
+                return;
+            }
+            const auto& from = entries[first->currentIndex()].measurements;
+            const auto& to = entries[last->currentIndex()].measurements;
+            if (first->currentIndex() == last->currentIndex() || from.isEmpty() || from.keys() != to.keys()) {
+                QMessageBox::warning(&interpolation, interpolation.windowTitle(),
+                    QStringLiteral("Выберите два разных размера с одинаковым непустым набором мерок."));
+                return;
+            }
+            const double fraction = percentage->value() / 100;
+            for (auto measurement = from.cbegin(); measurement != from.cend(); ++measurement)
+                addMeasurement(target, measurement.key(),
+                    number(std::lerp(measurement.value(), to.value(measurement.key()), fraction)));
+            interpolation.accept();
+        });
+        interpolation.exec();
+    });
+
     auto* rulesHint = new QLabel(tr("Enter the target size and choose a point on the base piece. Enter X and Y offsets in mm. Offsets are added after formulas are recalculated, using the selected base point as the reference. Positive Y moves down. Coincident base points on the same piece share the offset."));
     rulesHint->setWordWrap(true);
     rulesLayout->addWidget(rulesHint);
@@ -302,38 +405,30 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
     });
 
     auto* buttons = dialogButtons(layout, dialog);
+    addContextHelp(dialog, *buttons, QStringLiteral("Градация лекал"), QStringLiteral(
+        "Добавьте отдельную строку для каждого сочетания размера и роста, например 48/164 и 48/176. "
+        "В таблице мерок задайте значения в миллиметрах. Пропущенные мерки берутся из базовой конструкции.\n\n"
+        "Чтобы получить мерки промежуточного размера, выберите два опорных размера с одинаковым набором мерок. "
+        "Задайте долю от начального к конечному размеру. Для 48/170 между 48/164 и 48/176 укажите 50 %. "
+        "При необходимости задайте смещения точек для нового размера на вкладке правил.\n\n"
+        "Для параметрических лекал включите пересчёт по меркам размера. Правила градации задают дополнительные "
+        "смещения точек. Сравните контуры наложением размеров и проверьте сопрягаемые срезы перед раскладкой."));
     auto result = document.production();
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
         const auto warn = [&](const QString& message) {
             QMessageBox::warning(&dialog, dialog.windowTitle(), message);
         };
         auto updated = document.production();
-        updated.sizes.clear();
         updated.rules.clear();
-        QMap<QString, qsizetype> sizeIndices;
-        for (int row = 0; row < sizes->rowCount(); ++row) {
-            const auto size = sizes->item(row, 0)->text().trimmed();
-            const auto name = sizes->item(row, 1)->text().trimmed();
-            const auto value = sizes->item(row, 2)->text().trimmed();
-            if (size.isEmpty()) {
-                warn(tr("Enter a size name in measurement row %1.").arg(row + 1));
-                return;
-            }
-            if (!sizeIndices.contains(size)) {
-                sizeIndices.insert(size, updated.sizes.size());
-                updated.sizes.append({size, {}});
-            }
-            if (name.isEmpty() && value.isEmpty())
-                continue;
-            bool ok = false;
-            const double mm = value.toDouble(&ok);
-            auto& measurements = updated.sizes[sizeIndices[size]].measurements;
-            if (name.isEmpty() || !ok || !std::isfinite(mm) || mm <= 0 || measurements.contains(name)) {
-                warn(tr("Measurement row %1 needs a unique measurement name for its size and a positive value in mm.").arg(row + 1));
-                return;
-            }
-            measurements.insert(name, mm);
+        QString measurementError;
+        updated.sizes = readMeasurements(measurementError);
+        if (!measurementError.isEmpty()) {
+            warn(measurementError);
+            return;
         }
+        QSet<QString> sizeNames;
+        for (const auto& size : updated.sizes)
+            sizeNames.insert(size.name);
         for (int row = 0; row < rules->rowCount(); ++row) {
             const auto size = rules->item(row, 0)->text().trimmed();
             auto* piece = qobject_cast<QComboBox*>(rules->cellWidget(row, 1));
@@ -341,14 +436,14 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
             bool xOk, yOk;
             const double x = rules->item(row, 3)->text().toDouble(&xOk);
             const double y = rules->item(row, 4)->text().toDouble(&yOk);
-            if (!sizeIndices.contains(size) || point->currentIndex() < 0 || !xOk || !yOk) {
+            if (!sizeNames.contains(size) || point->currentIndex() < 0 || !xOk || !yOk) {
                 warn(tr("Grade rule row %1 needs a defined size, a point and two numeric offsets.").arg(row + 1));
                 return;
             }
             updated.rules.append({size, piece->currentIndex(), point->currentData().toPointF(), {x, y}});
         }
         for (const auto& placement : updated.placements) {
-            if (!placement.size.isEmpty() && !sizeIndices.contains(placement.size)) {
+            if (!placement.size.isEmpty() && !sizeNames.contains(placement.size)) {
                 warn(tr("Size %1 is used in the fabric layout. Remove those placements before removing the size.").arg(placement.size));
                 return;
             }
@@ -517,6 +612,12 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     stats->setWordWrap(true);
     layout->addWidget(stats);
     auto* buttons = dialogButtons(layout, dialog);
+    addContextHelp(dialog, *buttons, QStringLiteral("Раскладка лекал"), QStringLiteral(
+        "Укажите ширину ткани и минимальный зазор в миллиметрах. Добавьте копии деталей по размерам "
+        "и проверьте количество деталей кроя. Для направленной ткани запретите разворот.\n\n"
+        "Для ткани с рисунком задайте раппорт. Для совмещения рисунка на шве укажите точку на именованном срезе. "
+        "После авторасстановки проверьте отчёт раскроя. Печатайте PDF в масштабе 100 %."));
+
     QMap<QString, opc::PatternDocument> graded;
     graded.insert(QString{}, document);
     QVector<PlacementItem*> items;
@@ -524,7 +625,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
 
     const auto cutFor = [&](const opc::FabricPlacement& placement) {
         if (!graded.contains(placement.size))
-            graded.insert(placement.size, opc::gradedPattern(document, placement.size));
+            graded.insert(placement.size, opc::gradedPattern(document, placement.size, nullptr, opc::GradeEdgeNames::Preserve));
         return opc::fabricPiece(graded[placement.size], placement);
     };
     const auto updateUsage = [&] {

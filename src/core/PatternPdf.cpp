@@ -248,7 +248,7 @@ bool exportFabricPdf(const QString& path, const PatternDocument& document,
     QMap<QString, PatternDocument> graded;
     for (const auto& placement : data.placements) {
         if (!graded.contains(placement.size))
-            graded.insert(placement.size, gradedPattern(document, placement.size));
+            graded.insert(placement.size, gradedPattern(document, placement.size, nullptr, GradeEdgeNames::Preserve));
         const auto geometry = fabricPiece(graded.constFind(placement.size).value(), placement);
         const bool onFold = !geometry.fold.isNull();
         const auto outline = onFold ? openFoldContour(geometry.cut, geometry.fold) : geometry.cut;

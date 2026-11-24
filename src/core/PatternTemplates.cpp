@@ -21,20 +21,23 @@ std::optional<PatternDocument> draftPullOnSkirt(SkirtStyle style, const SkirtMea
 
     // One full-width panel. Cut two identical panels and join at the side seams.
     ParametricDraft draft{
-        {{"hip", input.hipMm}, {"length", input.lengthMm}},
-        {{"hip_ease", QString::number(input.hipEaseMm, 'g', 17)},
-         {"hem_flare", QString::number(style == SkirtStyle::ALine ? input.hemFlareMm : 0, 'g', 17)},
-         {"casing", QString::number(input.casingMm, 'g', 17)},
-         {"half_panel", "(hip + hip_ease) / 4"}},
+        {{"hip", input.hipMm}, {"length", input.lengthMm},
+         {"hip_ease", input.hipEaseMm}, {"casing", input.casingMm}},
+        {{"half_panel", "(positive(hip) + positive(hip_ease)) / 4"},
+         {"casing_depth", "positive(casing)"},
+         {"finished_below_casing", "positive(length - casing)"}},
         {{"TopL", "-half_panel", "0"}, {"TopR", "half_panel", "0"},
-         {"FoldL", "TopL.x", "casing"}, {"FoldR", "TopR.x", "casing"},
-         {"HemL", "FoldL.x - hem_flare / 4", "casing + length"},
+         {"FoldL", "TopL.x", "casing_depth"}, {"FoldR", "TopR.x", "casing_depth"},
+         {"HemL", "FoldL.x - flare / 4", "casing_depth + length"},
          {"HemR", "-HemL.x", "HemL.y"}},
         {{"opening", "TopL", "TopR", {}}, {"casing_right", "TopR", "FoldR", {}},
          {"side_right", "FoldR", "HemR", {}}, {"hem", "HemR", "HemL", {}},
          {"side_left", "HemL", "FoldL", {}}, {"casing_left", "FoldL", "TopL", {}},
          {"casing_fold", "FoldL", "FoldR", {}}}
     };
+    if (style == SkirtStyle::ALine)
+        draft.measurements.append({"hem_flare", input.hemFlareMm});
+    draft.parameters.append(DraftParameter{"flare", style == SkirtStyle::ALine ? "positive(hem_flare)" : "0"});
     PatternDocument document;
     if (!document.setParametricDraft(std::move(draft), error))
         return std::nullopt;

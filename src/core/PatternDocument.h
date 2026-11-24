@@ -14,6 +14,8 @@
 class QJsonObject;
 
 namespace opc {
+
+enum class GradeEdgeNames { ForSeamLinks, Preserve };
 enum class Shape { Point, Line, Rectangle, Circle, Curve };
 
 enum class Layer { Main, Construction, Allowance };
@@ -131,7 +133,7 @@ public:
 
 private:
     bool loadPayload(const QJsonObject& root, bool native, QString* error);
-    friend PatternDocument gradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*);
+    friend PatternDocument gradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*, GradeEdgeNames);
     QVector<SeamLink> seamLinks_;
     bool captureContourTopology(ModelingStep& step, QString* error) const;
     QVector<Entity> bindDraftGeometry(QVector<Entity> generated) const;

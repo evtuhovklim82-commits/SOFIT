@@ -9,6 +9,7 @@
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <array>
 #include <numeric>
 #include <limits>
@@ -90,7 +91,7 @@ QVector<QPointF> gradingPoints(const PatternDocument& document, qsizetype piece)
 }
 
 PatternDocument gradedPattern(const PatternDocument& document, const QString& size,
-                              QVector<qsizetype>* sourceIndices) {
+                              QVector<qsizetype>* sourceIndices, GradeEdgeNames edgeNames) {
     if (sourceIndices)
         sourceIndices->clear();
     if (size.isEmpty()) {
@@ -133,7 +134,7 @@ PatternDocument gradedPattern(const PatternDocument& document, const QString& si
             entity.b = computed->b;
             entity.control = computed->control;
         }
-        if (graded.seamLinks().isEmpty())
+        if (edgeNames == GradeEdgeNames::ForSeamLinks && graded.seamLinks().isEmpty())
             entity.draftName.clear();
         const auto append = [&](const Entity& gradedEntity) {
             graded.insert(graded.entities().size(), gradedEntity);
@@ -453,8 +454,7 @@ QPainterPath cutPath(const QPolygonF& cut) {
     return path;
 }
 
-QPainterPath clearancePath(const QPolygonF& cut, double clearanceMm) {
-    const auto path = cutPath(cut);
+QPainterPath clearancePath(const QPainterPath& path, double clearanceMm) {
     if (clearanceMm <= 0)
         return path;
     QPainterPathStroker stroker;
@@ -492,6 +492,8 @@ QVector<PositionedCut> flawPaths(const QVector<QRectF>& flaws) {
 
 struct CutOptions {
     std::array<LayoutPiece, 2> layouts;
+    std::array<QPainterPath, 2> outlines;
+    std::array<QPainterPath, 2> clearancePaths;
     double area;
 };
 }
@@ -529,7 +531,7 @@ FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double
             if (std::ranges::any_of(obstacles, [&](const auto& flaw) { return overlap(outline, flaw.path); }))
                 ++usage.flawConflicts;
         }
-        const auto path = clearancePath(cut, clearanceMm);
+        const auto path = clearancePath(cutPath(cut), clearanceMm);
         for (const auto& other : previous) {
             if (overlap(path, other))
                 ++usage.overlaps;
@@ -565,7 +567,7 @@ CuttingReport cuttingReport(const PatternDocument& document, const ProductionDat
         else
             ++row.single;
         if (!graded.contains(placement.size))
-            graded.insert(placement.size, gradedPattern(document, placement.size));
+            graded.insert(placement.size, gradedPattern(document, placement.size, nullptr, GradeEdgeNames::Preserve));
         const auto layout = fabricPiece(graded.constFind(placement.size).value(), placement);
         const auto& cut = layout.cut;
         polygons.append(cut.translated(placement.position));
@@ -631,7 +633,7 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
                         return size.name == copy.size;
                     }))
                     return {{}, FabricLayoutError::InvalidContour, i};
-                graded.insert(copy.size, gradedPattern(document, copy.size));
+                graded.insert(copy.size, gradedPattern(document, copy.size, nullptr, GradeEdgeNames::Preserve));
             }
             const auto& pattern = graded.constFind(copy.size).value();
             copy.reversed = false;
@@ -648,7 +650,15 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
             auto reversed = turns ? fabricPiece(pattern, copy) : LayoutPiece{};
             if (reversed.cut == normal.cut && reversed.repeatPoint == normal.repeatPoint)
                 reversed.cut.clear();
-            found = cached.insert(key, {{std::move(normal), std::move(reversed)}, area});
+            CutOptions cut{{std::move(normal), std::move(reversed)}, {}, {}, area};
+            for (std::size_t orientation = 0; orientation < cut.layouts.size(); ++orientation) {
+                if (cut.layouts[orientation].cut.isEmpty())
+                    continue;
+                auto& outline = cut.outlines[orientation];
+                outline = cutPath(cut.layouts[orientation].cut);
+                cut.clearancePaths[orientation] = clearancePath(outline, data.pieceClearanceMm);
+            }
+            found = cached.insert(key, std::move(cut));
         }
         options.append(&found.value());
     }
@@ -676,6 +686,7 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
         }
     };
 
+    qsizetype failedCopy = -1;
     QVector<qsizetype> order(data.placements.size());
     std::iota(order.begin(), order.end(), qsizetype{0});
     // Different largest-first orders give the greedy search different opportunities.
@@ -692,6 +703,7 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
         auto copies = data.placements;
         QVector<PositionedCut> placed;
         double length = 0;
+        bool complete = true;
         for (const auto index : order) {
             auto& copy = copies[index];
             QPointF position(0, placed.isEmpty() ? 0 : length + gap);
@@ -704,8 +716,8 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
                 if (cut.isEmpty())
                     continue;
                 const auto bounds = cut.boundingRect();
-                const auto path = clearancePath(cut, data.pieceClearanceMm);
-                const auto outline = cutPath(cut);
+                const auto& path = options[index]->clearancePaths[orientation];
+                const auto& outline = options[index]->outlines[orientation];
                 const double rightEdge = std::max(0.0, data.fabricWidth - bounds.width());
                 const auto tryPosition = [&](double x, double y) {
                     x = copy.fold == FoldEdge::None ? nextRepeat(x, data.fabricRepeatMm.x(), anchor.x())
@@ -762,14 +774,18 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
                     tryPosition(b.right() + gap, 0);
                 }
             }
-            if (chosen.path.isEmpty())
-                return {{}, FabricLayoutError::VerificationFailed, index};
+            if (chosen.path.isEmpty()) {
+                failedCopy = index;
+                complete = false;
+                break;
+            }
             copy.position = position;
             copy.reversed = std::get<3>(bestScore);
             length = std::get<0>(bestScore);
             placed.append(std::move(chosen));
         }
-        consider(copies);
+        if (complete)
+            consider(copies);
     }
 
     // Preserve a valid hand-tuned layout if the search cannot improve it.
@@ -790,7 +806,7 @@ AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const Produ
     if (existingValid)
         consider(data.placements);
     if (best.placements.isEmpty())
-        best.error = FabricLayoutError::VerificationFailed;
+        return {{}, FabricLayoutError::VerificationFailed, failedCopy};
     return best;
 }
 

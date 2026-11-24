@@ -27,6 +27,7 @@ struct BodiceOptions {
     double dartIntakeShare = 50;
     double dartPosition = 50;
     double elbowLevel = 50;
+    double capEase = 4;
 };
 
 struct BodiceSeams {

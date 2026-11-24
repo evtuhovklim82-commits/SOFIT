@@ -92,6 +92,8 @@ private:
             const auto end = pos_;
             if (name == u"quadlen" && take(u'('))
                 return quadraticLength(depth + 1);
+            if (name == u"capcontrol" && take(u'('))
+                return capControl(depth + 1);
             if (name == u"positive" && take(u'(')) {
                 const auto value = expression(depth + 1);
                 if (!take(u')'))
@@ -147,6 +149,36 @@ private:
         if (!length)
             fail(QStringLiteral("Cannot measure the quadratic curve"));
         return *length;
+    }
+
+    double capControl(int depth) {
+        const double width = expression(depth);
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' after sleeve cap width"));
+        const double rise = expression(depth);
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' after sleeve cap rise"));
+        const double target = expression(depth);
+        if (!take(u')'))
+            fail(QStringLiteral("Expected ')'"));
+        if (width <= 0 || rise <= 0 || target <= 0)
+            fail(QStringLiteral("Sleeve cap width, rise and target length must be positive"));
+
+        // Keep the crown tangent horizontal and the cap monotone from crown to underarm.
+        // For unreachable lengths, preserve a valid curve and let fitting diagnostics report the difference.
+        double low = width * 0.20;
+        double high = width * 0.95;
+        for (int i = 0; i < 24; ++i) {
+            const double control = (low + high) / 2;
+            const auto length = seamLength({Shape::Curve, {0, 0}, {width, rise}, {control, 0}});
+            if (!length)
+                fail(QStringLiteral("Cannot measure the sleeve cap"));
+            if (*length < target)
+                low = control;
+            else
+                high = control;
+        }
+        return (low + high) / 2;
     }
 
     static bool letter(QChar c) {
@@ -537,7 +569,7 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
             end = match.capturedEnd();
             const auto name = match.captured(1);
             const auto coordinate = match.captured(2);
-            const bool function = coordinate.isEmpty() && (name == u"quadlen" || name == u"positive")
+            const bool function = coordinate.isEmpty() && (name == u"quadlen" || name == u"positive" || name == u"capcontrol")
                 && QStringView(formula).sliced(end).trimmed().startsWith(u'(');
             if (name.isEmpty() || function)
                 result += match.captured();

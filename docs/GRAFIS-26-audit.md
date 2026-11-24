@@ -48,3 +48,55 @@ Status describes the documented operation in SOFIT. **Implemented** means the st
 | Pixel image import and tracing, stitch modules and programming | Absent | SOFIT provides geometry templates and formulas. It has no raster tracing workspace, stitch module or GRAFIS-style programming interface. Batch validation and marker export are available at the command line. |
 | Import, reduced import, export and native exchange | Partial | Text AutoCAD DXF import preview and geometry exchange, plus PDF output. `DxfImportTest` and `ProjectPersistenceTest` cover fixtures. AAMA/ASTM semantics, RUL, reduced import modes and round-trip through an installed GRAFIS 26 are unverified or unsupported as detailed in the README. Native GRAFIS files including `.MDL` are deferred. |
 | Independent operator and production validation | Unverified | No licensed GRAFIS session, independent Windows 10/11 operator study, fit sample, or plotter/cutter run was used. Compare application and packaging checks against the exact candidate's GitHub Actions runs. |
+
+
+## 4.1 work in progress — comparison against 115c4e1
+
+The remote main and the local baseline were at `115c4e194ca2891616f429fe9234a415a2eb80fe` on 2026-11-24. The [Windows baseline run](https://github.com/evtuhovklim82-commits/SOFIT/actions/runs/45357883145) passed CTest, the 150% GUI run, launch from portable ZIP, and Inno Setup compile, install, launch and uninstall. The [Linux baseline run](https://github.com/evtuhovklim82-commits/SOFIT/actions/runs/45357883132) passed with system Qt and Qt 6.8.3. Those results cover the baseline SHA. The updated source passed eight CTest entries on Linux with Qt 6.12.0, plus a separate offscreen GUI run with QT_SCALE_FACTOR=1.5. CPack generated the Linux tarball and checksum.
+
+The [GRAFIS control bar reference](https://help.grafis.de/en-gb/Content/Grundlegendes/Grafis-Oberflaeche.htm) documents temporary measurement on Ctrl+M. The [interactive construction reference](https://help.grafis.de/en-gb/Content/Interaktive_Konstruktionen-Basiswissen/Interaktive_Oberflaeche.htm) documents F12 for the construction list, plus the Options, Areas and Values docks and drag-point constraints. SOFIT exposes its own stage menus and editable shortcuts. The grading and fabric layout dialogs provide Russian task help via «Справка» and F1. The desktop workflow test checks the layout help content and the configured F1 binding.
+
+| Evidence | Coverage and limits |
+| --- | --- |
+| `checkGarmentProductionScenarios` in `ProfessionalModelingTest.cpp` | The test drafts an A-line pull-on skirt, linked trousers, a dress with facings, a shirt block, and a jacket block with a two-piece sleeve. It evaluates the base and two size/height rows and checks sewing contours, allowances and reported seam lengths. The taller variant goes through automatic arrangement, cut counts, project reopen, tech pack, pattern and marker PDFs, and DXF. It checks PDF structure and DXF entities. It does not drive all five workflows through the desktop or print to a device. The shirt and jacket fixtures use bodice templates and do not represent complete production styles with all their garment-specific details. |
+| Skirt formulas and repeat registration | New skirt drafts expose hip ease and casing depth, plus hem flare for A-line skirts, to size-specific formula evaluation. The skirt scenario arranges and exports using a named hem point in the graded size with a two-axis repeat. Marker preview, checks and both export paths use the same preserved names. The regular grading output retains its existing handling of names. |
+| Sleeve checks | The front armhole and sleeve cap differed from the target ease by 6.01 mm for the shirt fixture at 48/164. Armhole/cap pairs are outside the 2 mm assertion used for the other measured sewing pairs. The fabric layout and exports do not establish that the cap is suitable to sew. The continuation below records the new template cap solver. Production fitting remains open. |
+| Automatic arrangement | A failed greedy ordering no longer prevents the search from considering another ordering or an existing valid layout. The multi-order search remains heuristic. No industrial fabric-use target, optimality or speed at production scale was established. |
+
+General dart redistribution and truing, complex curve continuity, advanced size and height systems, additional construction modules, reusable operation graphs, broader Russian workflow coverage, and independent operator and physical production validation remain open. Native project and exchange formats were retained. Windows and Qt 6.8.3 execution for the changes above requires evidence from the updated revision.
+
+## 4.1 continuation — sleeve and collar verification, 2026-11-24
+
+The restored patch and the changes below are based on `115c4e194ca2891616f429fe9234a415a2eb80fe`. A live Git query returned that SHA for `origin/main`. The results below apply to the changed source tree.
+
+| Construction and size | Front and back cap ease, target / measured | Front and back collar deviations |
+| --- | --- | --- |
+| Shirt base, 48/164 | 4.000 / 4.000 mm per section | 0.000 mm each |
+| Shirt 48/176 | 5.000 / 5.000 mm per section | 0.000 mm each |
+| Two-piece sleeve jacket base, 48/164 | 4.000 / 4.000 mm per section | 0.000 mm each |
+| Two-piece sleeve jacket 48/176 | 5.000 / 5.000 mm per section | 0.000 mm each |
+
+Measurements are rounded to 0.001 mm. The test asserts a 0.01 mm maximum deviation for each of the 24 reported measurements. This covers the shirt 48/164 front section previously reported at 6.01 mm deviation. The taller fixture also changes crown height, sleeve and bodice length, neckline width and front and back neckline depth. The collar equations were already present and were retained.
+
+New sleeve drafts solve each quadratic cap control against the corresponding armhole length and saved target ease, including puff gathering when requested. The solution runs again with size measurements. It keeps the selected cap height, bicep width and a horizontal tangent at the crown. It limits the control position to 20–95% of the half-width. An unreachable target uses the nearest end of that range and remains visible as a deviation in the fitting check. The fitting dialog uses the saved target by default and supports a temporary override. Older projects retain their original geometry and formulas. Manual grading offsets applied after formula evaluation, arbitrary armholes, arbitrary necklines, real fit and a full industrial size grid remain outside this verification.
+
+The Linux Release builds on Qt 6.8.3 and system Qt 6.12.0 each passed all eight CTest entries and a separate offscreen GUI run at 150%. CPack generated the Linux tarball and SHA-256 checksum from the Qt 6.12.0 build. The extracted executable returned `SOFIT 4.0.0` on `--version`; the partial update retains the baseline version identifier. The five professional scenarios cover A-line skirt, trousers, dress with facings, shirt block and jacket block with two-piece sleeve. Closed contours and allowances are checked on the base and both size/height rows. The taller row goes through marker arrangement, cutting quantities, native save and reopen, tech pack, pattern and marker DXF and PDF. The compatibility suite opens the existing legacy fixtures. New `capcontrol` formulas require an evaluator that supports the function.
+
+The broader construction library, advanced dart and curve operations, industrial measurement-system and grading rules, industrial marker optimisation, reusable modeling operations, and the remaining panel, shortcut and Russian-language workflow work are still open. Independent operator workflow validation, physical fitting, plotting and cutting remain open. Windows MSVC 2022 / Qt 6.8.3, portable ZIP and Inno Setup have no result for the changed tree. No candidate was published. The earlier Windows and Linux CI results in this document refer to the baseline SHA.
+
+## 4.1 continuation — intermediate sizes and marker computation, 2026-11-24
+
+The grading editor can add a size by linearly interpolating explicit measurements between two different rows of the size table. The operator enters a unique target name and a percentage from the first size to the second. Both source sizes must have the same nonempty set of measurements. The result is stored as ordinary editable measurement rows and uses the existing parameter replay on acceptance. Grading point offsets are entered separately. The project schema and TSV format are unchanged. The new command and contextual instructions are in Russian. GRAFIS documents replaying the base construction using the measurements of active sizes and recommends checking extreme sizes during construction. Its guide describes separate size files and active-part, successor-part and all-part calculations. SOFIT's interpolation is a local size-table operation. [GRAFIS grading guide](https://help.grafis.de/en-gb/Content/Gradieren/Gradieren.htm)
+
+The automatic marker builds the outline and clearance paths once per distinct cut and orientation, then reuses them across copies and search orders. The candidate search and final checks for overlap, fabric flaws, fold, orientation and repeat are retained. No benchmark at production scale or gain in fabric utilization was established in this pass.
+
+| Check on the accumulated source | Result |
+| --- | --- |
+| Linux Release with Qt 6.8.3 | 8/8 CTest entries passed. Separate offscreen GUI workflow at 150% passed. |
+| Linux Release with Qt 6.12.0 | 8/8 CTest entries passed. Separate offscreen GUI workflow at 150% passed. CPack generated the TGZ and checksum. The executable from the unpacked package returned SOFIT 4.0.0 with its existing version identifier. |
+| Desktop grading | The workflow test imports two measurement sets, interpolates two measures at 25%, then saves and reopens the new size and verifies both values. |
+| Fit geometry and compatibility | Both builds reran the 0.01 mm sleeve and collar assertions for the shirt and two-piece sleeve jacket in base, 48/164 and 48/176, the legacy .sofit fixtures and the DXF import fixtures. |
+| Five garments | Automated coverage includes skirt, trousers, dress with facings, shirt and jacket with two-piece sleeve. The contour and allowance checks cover base and both sizes. At 48/176 the scenarios run marker arrangement, cutting quantities, native save and reopen, tech pack, and pattern and marker DXF and PDF exports. |
+| Windows MSVC 2022 and Qt 6.8.3, portable ZIP and Inno Setup | Pending for the accumulated source. No CI branch was created. The older Windows evidence applies to 115c4e1. |
+
+The remaining 4.1 scope includes a broader set of professional base constructions, dart redistribution and truing, curve continuity, shared measurement systems and industrial grading rules, marker optimization measured on production workloads, reusable modeling operations, and broader Russian interface and contextual help. Physical fitting, plotting and cutting remain unverified. The automated shirt and jacket examples are construction blocks. MDL and 4.2 remain outside this work.
