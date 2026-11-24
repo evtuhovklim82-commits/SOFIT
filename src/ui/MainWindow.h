@@ -47,6 +47,7 @@ private:
     void geometryDialog(qsizetype index);
     void splitSelectedEdge();
     void joinSelectedEdges();
+    void alignSelectedCurve();
     void shapeSilhouette();
     void rotateConstruction();
     void showModelingHistory();
@@ -54,7 +55,8 @@ private:
     void editModelingStep(qsizetype index);
     void refreshModelingHistory();
     void setModelingError(const QString& error);
-    void diagnoseGradedPieces();
+    void diagnoseGradedPieces(const QVector<QAction*>& productionActions = {});
+    void drapePiece();
     void modelPiece(opc::ContourOperation operation, const QString& title);
     bool canModelEdge(const opc::Entity& edge);
     void refreshObjects();
@@ -69,9 +71,10 @@ private:
     void createPiece();
     void assignPiece();
     void managePiece();
+    void managePieceAt(qsizetype piece, QWidget* parent);
     void measureSelection();
     void matchSeams(const QVector<qsizetype>& indices, bool reverseSecond = false);
-    void editEdgeAllowance();
+    void editEdgeAllowance(const QVector<qsizetype>& indices, QWidget* parent);
     void clearEdgeNotches();
     void setSelectedLayer(opc::Layer layer);
     QVector<qsizetype> selectedObjects() const;

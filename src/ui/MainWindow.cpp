@@ -14,6 +14,9 @@
 #include "Modeling.h"
 #include "ContourModeling.h"
 #include <QPixmap>
+#include <QGraphicsView>
+#include <QPainter>
+#include <QPen>
 #include <QCheckBox>
 #include <QSpinBox>
 #include <QTableWidget>
@@ -105,6 +108,8 @@ QString modelingStepName(const opc::ModelingStep& step) {
     case C::TransferDart:
     case C::TransferDartToOutlet: return text("Close and Transfer Dart");
     case C::MoveOpenDart: return text("Move Open Contour Dart");
+    case C::SplitDart: return QStringLiteral("Разделить вытачку");
+    case C::MergeDarts: return QStringLiteral("Объединить вытачки");
     }
     return {};
 }
@@ -379,7 +384,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Product Information"), nullptr));
         }
     });
-    product->addAction(tr("Tech Pack Options…"), this, [this] {
+    auto* techPackOptions = product->addAction(tr("Tech Pack Options…"), this, [this] {
         auto updated = doc_;
         auto& info = updated.productInformation();
         QDialog dialog(this);
@@ -410,7 +415,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         if (info != doc_.productInformation())
             undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Tech Pack Options"), nullptr));
     });
-    product->addAction(tr("Finished Measurements…"), this, [this] {
+    auto* finishedMeasurements = product->addAction(tr("Finished Measurements…"), this, [this] {
         QDialog dialog(this);
         dialog.setWindowTitle(tr("Finished Measurements"));
         dialog.resize(650, 420);
@@ -485,7 +490,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Finished Measurements"), nullptr));
         }
     });
-    product->addAction(tr("Export Product Information PDF…"), this, [this] {
+    auto* exportTechPack = product->addAction(tr("Export Product Information PDF…"), this, [this] {
         auto path = QFileDialog::getSaveFileName(this, tr("Export Product Information PDF"), {}, tr("PDF (*.pdf)"));
         if (path.isEmpty())
             return;
@@ -527,6 +532,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     auto* pieces = menuBar()->addMenu(tr("&Pieces"));
     auto* layout = menuBar()->addMenu(tr("&Layout"));
     auto* split = modeling->addAction(tr("Split Line or Curve…"), this, &MainWindow::splitSelectedEdge);
+    auto* tangent = modeling->addAction(QStringLiteral("Сопрячь кривую по касательной…"),
+                                       this, &MainWindow::alignSelectedCurve);
     auto* join = modeling->addAction(tr("Join Free Endpoints"), this, &MainWindow::joinSelectedEdges);
     join->setToolTip(tr("Select two edges on the same layer and piece. Closes a gap of up to 5 mm."));
     auto* copyCurve = modeling->addAction(tr("Copy Curve as Guide…"), this, [this] {
@@ -564,7 +571,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         const opc::Entity guide{opc::Shape::Curve, start, end, control, -1, opc::Layer::Construction};
         undo_.push(new EntityCommand(doc_, *view_, doc_.entities().size(), guide, true, tr("Copy Curve as Guide")));
     });
-    connect(modeling, &QMenu::aboutToShow, this, [this, split, join, copyCurve] {
+    connect(modeling, &QMenu::aboutToShow, this, [this, split, join, copyCurve, tangent] {
         const auto selected = selectedObjects();
         const bool edges = std::ranges::all_of(selected, [this](qsizetype index) {
             const auto shape = doc_.entities()[index].shape;
@@ -572,6 +579,10 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         });
         split->setEnabled(edges && selected.size() == 1);
         join->setEnabled(edges && selected.size() == 2);
+        tangent->setEnabled(edges && selected.size() == 2 && std::ranges::any_of(selected, [this](qsizetype i) {
+            const auto& edge = doc_.entities()[i];
+            return edge.shape == opc::Shape::Curve && edge.draftName.isEmpty();
+        }));
         copyCurve->setEnabled(selected.size() == 1 && doc_.entities()[selected.front()].shape == opc::Shape::Curve);
     });
 
@@ -591,15 +602,23 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     auto* spreadAction = modeling->addAction(tr("Slash and Spread…"), this, [this] {
         modelPiece(opc::ContourOperation::Spread, tr("Slash and Spread"));
     });
+    modeling->addAction(QStringLiteral("Раздвижка по нескольким направляющим…"), this, &MainWindow::drapePiece);
     modeling->addAction(tr("Close and Transfer Dart…"), this, [this] {
         modelPiece(opc::ContourOperation::TransferDartToOutlet, tr("Close and Transfer Dart"));
     });
     modeling->addAction(tr("Move Open Contour Dart…"), this, [this] {
         modelPiece(opc::ContourOperation::MoveOpenDart, tr("Move Open Contour Dart"));
     });
+    modeling->addAction(QStringLiteral("Разделить вытачку…"), this, [this] {
+        modelPiece(opc::ContourOperation::SplitDart, QStringLiteral("Разделить вытачку"));
+    });
+    modeling->addAction(QStringLiteral("Объединить вытачки…"), this, [this] {
+        modelPiece(opc::ContourOperation::MergeDarts, QStringLiteral("Объединить вытачки"));
+    });
     modeling->addSeparator();
     modeling->addAction(tr("Shape Silhouette…"), this, &MainWindow::shapeSilhouette);
-    modeling->addAction(tr("Construction Tree…"), this, &MainWindow::showModelingHistory);
+    auto* constructionTreeAction = modeling->addAction(tr("Construction Tree…"), this, &MainWindow::showModelingHistory);
+    constructionTreeAction->setShortcut(QKeySequence(Qt::Key_F12));
     modeling->addAction(tr("Add Box Pleat…"), this, [this] {
         modelPiece(opc::ContourOperation::Pleat, tr("Add Box Pleat"));
     });
@@ -686,6 +705,85 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         applyPatternEdit(std::move(updated), tr("Insert Library Construction"));
         view_->fitDrawing();
     });
+    library->addAction(QStringLiteral("Вставить конструкцию с привязкой мерок…"), this, [this] {
+        const auto title = QStringLiteral("Привязка мерок конструкции");
+        QSettings settings;
+        const auto path = QFileDialog::getOpenFileName(this, title,
+            settings.value(QStringLiteral("construction/libraryFolder")).toString(), tr("SOFIT constructions (*.sofit)"));
+        if (path.isEmpty())
+            return;
+        opc::PatternDocument source;
+        QString error;
+        if (!source.load(path, &error) || source.parametricDraft().measurements.isEmpty()) {
+            QMessageBox::warning(this, title, error.isEmpty() ? QStringLiteral("У конструкции нет мерок.") : error);
+            return;
+        }
+        QDialog dialog(this);
+        dialog.setWindowTitle(title);
+        auto* layout = new QVBoxLayout(&dialog);
+        auto* table = new QTableWidget(source.parametricDraft().measurements.size(), 2);
+        layout->addWidget(table);
+        table->setHorizontalHeaderLabels({QStringLiteral("Мерка конструкции"), QStringLiteral("Мерка проекта")});
+        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+        QVector<QComboBox*> fields;
+        for (qsizetype i = 0; i < source.parametricDraft().measurements.size(); ++i) {
+            const auto& measurement = source.parametricDraft().measurements[i];
+            auto* label = new QTableWidgetItem(QStringLiteral("%1 · %2 мм").arg(measurement.name).arg(measurement.mm));
+            label->setFlags(label->flags() & ~Qt::ItemIsEditable);
+            table->setItem(i, 0, label);
+            auto* field = new QComboBox;
+            field->addItem(QStringLiteral("Автоматически"), QString{});
+            for (const auto& target : doc_.parametricDraft().measurements)
+                field->addItem(target.name, target.name);
+            fields.append(field);
+            table->setCellWidget(i, 1, field);
+        }
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        layout->addWidget(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+            QMap<QString, QString> bindings;
+            for (qsizetype i = 0; i < fields.size(); ++i) {
+                const auto target = fields[i]->currentData().toString();
+                if (!target.isEmpty())
+                    bindings.insert(source.parametricDraft().measurements[i].name, target);
+            }
+            auto updated = doc_;
+            if (!updated.insertConstruction(source, &error, bindings)) {
+                QMessageBox::warning(&dialog, title, error);
+                return;
+            }
+            settings.setValue(QStringLiteral("construction/libraryFolder"), QFileInfo(path).absolutePath());
+            applyPatternEdit(std::move(updated), title, true);
+            view_->fitDrawing();
+            dialog.accept();
+        });
+        dialog.resize(580, 420);
+        dialog.exec();
+    });
+    library->addAction(QStringLiteral("Применить операции из проекта…"), this, [this] {
+        const auto title = QStringLiteral("Применение последовательности операций");
+        const auto path = QFileDialog::getOpenFileName(this, title, {}, tr("SOFIT (*.sofit)"));
+        if (path.isEmpty())
+            return;
+        opc::PatternDocument source;
+        auto updated = doc_;
+        QString error;
+        if (!source.load(path, &error) || !updated.applyModelingSequence(source, &error)) {
+            QMessageBox::warning(this, title, error);
+            return;
+        }
+        applyPatternEdit(std::move(updated), title);
+        view_->fitDrawing();
+    });
+    library->addAction(QStringLiteral("Справка по библиотеке конструкций"), this, [this] {
+        QMessageBox::information(this, QStringLiteral("Библиотека конструкций"),
+            QStringLiteral("Для повторного применения сохраните конструкцию с нужными операциями в .sofit. "
+                           "Откройте совместимую конструкцию и выберите «Применить операции из проекта». "
+                           "Имена исходных объектов и связи направляющих должны совпадать. Если в текущем "
+                           "проекте есть операции, они должны совпадать с началом исходной последовательности. "
+                           "Применённая последовательность отменяется и повторяется целиком."));
+    });
     auto* draftAction = construction->addAction(tr("Parametric Draft…"), this, [this] {
         QString calculationError;
         auto updated = editParametricDraft(this, doc_, &calculationError);
@@ -717,7 +815,56 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             applyPatternEdit(std::move(updated), tr("Edit Fabric Layout"));
         }
     });
-    grading->addAction(tr("Diagnose Pieces by Size…"), this, &MainWindow::diagnoseGradedPieces);
+    layout->addAction(QStringLiteral("Многоматериальный настил…"), this,
+                      [this] { exportMaterialLay(this, doc_); });
+    const auto importMarkerModels = QStringLiteral("Добавить модели в раскладку…");
+    layout->addAction(importMarkerModels, this, [this, importMarkerModels] {
+        const auto paths = QFileDialog::getOpenFileNames(this, importMarkerModels, {},
+                                                        QStringLiteral("SOFIT (*.sofit)"));
+        if (paths.isEmpty())
+            return;
+        auto updated = doc_;
+        for (const auto& path : paths) {
+            opc::PatternDocument source;
+            QString error;
+            if (!source.load(path, &error)) {
+                QMessageBox::warning(this, importMarkerModels, error);
+                return;
+            }
+            const auto model = QFileInfo(path).completeBaseName();
+            QStringList labels{QStringLiteral("Базовый вариант")};
+            for (const auto& entry : source.production().sizes)
+                labels.append(QStringLiteral("%1. %2").arg(labels.size()).arg(entry.name));
+            bool accepted = false;
+            const auto label = QInputDialog::getItem(this, importMarkerModels,
+                QStringLiteral("Размер модели «%1»").arg(model), labels, 0, false, &accepted);
+            if (!accepted)
+                return;
+            const auto index = labels.indexOf(label);
+            const auto size = index > 0 ? source.production().sizes[index - 1].name : QString{};
+            const int kits = QInputDialog::getInt(this, importMarkerModels,
+                QStringLiteral("Комплектов модели «%1»").arg(model), 1, 1,
+                int(opc::maxAutomaticCopies), 1, &accepted);
+            if (!accepted)
+                return;
+            if (!opc::appendMarkerModel(updated, source, size, model, kits, error)) {
+                QMessageBox::warning(this, importMarkerModels, error);
+                return;
+            }
+        }
+        auto production = editFabricLayout(this, updated);
+        if (!production)
+            return;
+        updated.production() = std::move(*production);
+        applyPatternEdit(std::move(updated), importMarkerModels, true);
+    });
+    pieces->addAction(QStringLiteral("Part Assistant…"), this, [=, this] {
+        diagnoseGradedPieces({finishedMeasurements, techPackOptions, exportTechPack});
+    });
+    auto* diagnoseAction = grading->addAction(tr("Diagnose Pieces by Size…"), this, [this] {
+        diagnoseGradedPieces();
+    });
+    diagnoseAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_I));
     auto* seams = pieces->addMenu(tr("Seams"));
     seams->addAction(tr("Measure Selected Lines and Curves"), this, &MainWindow::measureSelection);
     seams->addAction(tr("Check Fitting Block by Size…"), this, [this] {
@@ -776,7 +923,9 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     });
 
     seams->addAction(tr("Match Selected Seam Sections…"), this, [this] { matchSeams(selectedObjects()); });
-    seams->addAction(tr("Allowance for Selected Edges…"), this, &MainWindow::editEdgeAllowance);
+    seams->addAction(tr("Allowance for Selected Edges…"), this, [this] {
+        editEdgeAllowance(selectedObjects(), this);
+    });
     seams->addAction(tr("Clear Automatic Notches on Selected Edges"), this, &MainWindow::clearEdgeNotches);
     auto* overlay = grading->addMenu(tr("Size Overlays"));
     connect(overlay, &QMenu::aboutToShow, this, [this, overlay] {
@@ -867,7 +1016,9 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     addTool(tr("Circle"), PatternView::Tool::Circle, tr("Pick the center, then a point on the circle"));
     addTool(tr("Curve"), PatternView::Tool::Curve, tr("Pick both endpoints, then the Bézier control point"));
     addTool(tr("Dart"), PatternView::Tool::Dart, tr("Pick the first leg end, apex, then the second leg end"));
-    addTool(tr("Measure"), PatternView::Tool::Measure, tr("Pick two points to measure the distance"));
+    auto* measureAction = addTool(tr("Measure"), PatternView::Tool::Measure,
+                                  tr("Pick two points to measure the distance"));
+    measureAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
 
     auto* drawing = construction->addMenu(tr("Drawing Tools"));
     drawing->addActions(toolbar->actions());
@@ -891,7 +1042,8 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         {"template", templateAction}, {"draft", draftAction}, {"spread", spreadAction},
         {"sizes", sizesAction}, {"createPiece", createPieceAction}, {"allowance", allowanceAction},
         {"layout", layoutAction}, {"exactInput", exactAction}, {"fit", fitAction},
-        {"editGeometry", editGeometry}
+        {"editGeometry", editGeometry}, {"measure", measureAction},
+        {"constructionTree", constructionTreeAction}, {"diagnosePieces", diagnoseAction}
     });
     connect(view_, &PatternView::selectionMenuRequested, this,
             [this, editGeometry, deleteAction, fitAction](const QPoint& position) {
@@ -1418,18 +1570,17 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
     dialog.exec();
 }
 
-void MainWindow::editEdgeAllowance() {
-    const auto indices = selectedObjects();
+void MainWindow::editEdgeAllowance(const QVector<qsizetype>& indices, QWidget* parent) {
     const auto title = tr("Allowance for Selected Edges");
     if (indices.isEmpty() || !std::ranges::all_of(indices, [this](auto index) {
             const auto& edge = doc_.entities()[index];
             return edge.piece >= 0 && edge.layer == opc::Layer::Main && opc::seamLength(edge).has_value();
         })) {
-        QMessageBox::information(this, title, tr("Select lines or quadratic curves assigned to pieces on the main layer."));
+        QMessageBox::information(parent, title, tr("Select lines or quadratic curves assigned to pieces on the main layer."));
         return;
     }
 
-    QDialog dialog(this);
+    QDialog dialog(parent);
     dialog.setWindowTitle(title);
     auto* form = new QFormLayout(&dialog);
     const auto& first = doc_.entities()[indices.front()];
@@ -1489,9 +1640,9 @@ void MainWindow::clearEdgeNotches() {
         applyPatternEdit(std::move(updated), tr("Clear Automatic Notches"));
 }
 
-void MainWindow::diagnoseGradedPieces() {
+void MainWindow::diagnoseGradedPieces(const QVector<QAction*>& productionActions) {
     QDialog dialog(this);
-    dialog.setWindowTitle(tr("Diagnose Pieces by Size"));
+    dialog.setWindowTitle(productionActions.isEmpty() ? tr("Diagnose Pieces by Size") : QStringLiteral("Part Assistant"));
     QFormLayout form(&dialog);
     QComboBox sizes(&dialog);
     fillExportSizes(sizes, doc_);
@@ -1504,20 +1655,43 @@ void MainWindow::diagnoseGradedPieces() {
     QDialogButtonBox buttons(QDialogButtonBox::Close, &dialog);
     form.addRow(&buttons);
     connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    QMap<QString, QVector<qsizetype>> copyCounts;
-    for (const auto& placement : doc_.production().placements) {
-        if (placement.piece < 0 || placement.piece >= doc_.pieces().size())
-            continue;
-        auto& counts = copyCounts[placement.size];
-        if (counts.isEmpty())
-            counts.resize(doc_.pieces().size());
-        ++counts[placement.piece];
+    auto* editPiece = buttons.addButton(QStringLiteral("Свойства детали…"), QDialogButtonBox::ActionRole);
+    editPiece->setEnabled(false);
+    QPushButton* editEdge = nullptr;
+    QPushButton* addDrill = nullptr;
+    QPushButton* derivePiece = nullptr;
+    QPushButton* addSymbol = nullptr;
+    if (!productionActions.isEmpty()) {
+        derivePiece = buttons.addButton(QStringLiteral("Унаследовать контур…"), QDialogButtonBox::ActionRole);
+        derivePiece->setEnabled(false);
+        addSymbol = buttons.addButton(QStringLiteral("Знак…"), QDialogButtonBox::ActionRole);
+        addSymbol->setEnabled(false);
+        addDrill = buttons.addButton(QStringLiteral("Точка сверления…"), QDialogButtonBox::ActionRole);
+        addDrill->setEnabled(false);
+        editEdge = buttons.addButton(tr("Edge Allowance…"), QDialogButtonBox::ActionRole);
+        editEdge->setEnabled(false);
     }
+    for (auto* action : productionActions) {
+        auto* shortcut = buttons.addButton(action->text(), QDialogButtonBox::ActionRole);
+        connect(shortcut, &QPushButton::clicked, &dialog, [&, action] {
+            dialog.accept();
+            action->trigger();
+        });
+    }
+    QMap<QString, QVector<qsizetype>> copyCounts;
     const auto addSize = [&](QTreeWidgetItem* group, const QString& size) {
-        const auto graded = opc::gradedPattern(doc_, size);
+        QVector<qsizetype> sourceIndices;
+        const auto graded = opc::gradedPattern(doc_, size, editEdge ? &sourceIndices : nullptr);
         if (graded.pieces().isEmpty()) {
             group->setText(1, doc_.pieces().isEmpty() ? tr("No pieces") : tr("Size evaluation failed"));
             return;
+        }
+        if (!productionActions.isEmpty()) {
+            for (const auto& measurement : doc_.productInformation().finishedMeasurements) {
+                const auto length = opc::finishedMeasurementMm(graded, measurement);
+                new QTreeWidgetItem(group, {measurement.label, length
+                    ? tr("%1 mm").arg(*length, 0, 'f', 2) : tr("Measurement points unavailable")});
+            }
         }
         const auto links = graded.inspectSeamLinks();
         for (qsizetype i = 0; i < links.checks.size(); ++i) {
@@ -1531,6 +1705,7 @@ void MainWindow::diagnoseGradedPieces() {
             const auto& piece = graded.pieces()[i];
             const auto geometry = opc::analyzePiece(graded, i);
             auto* row = new QTreeWidgetItem(group, {piece.name, describeContour(geometry.error)});
+            row->setData(0, Qt::UserRole, QVariant::fromValue(i));
             const auto copies = counts == copyCounts.cend() ? 0 : counts->at(i);
             QString count = tr("%1 per kit").arg(piece.cutCount);
             if (counts != copyCounts.cend()) {
@@ -1558,13 +1733,45 @@ void MainWindow::diagnoseGradedPieces() {
             }
             if (!piece.grainAngle)
                 new QTreeWidgetItem(row, {tr("Grainline"), tr("Grain direction is unspecified")});
+            if (!productionActions.isEmpty()) {
+                new QTreeWidgetItem(row, {tr("Default seam allowance"), tr("%1 mm").arg(piece.allowanceMm)});
+                if (piece.grainAngle)
+                    new QTreeWidgetItem(row, {tr("Grainline"), tr("%1°").arg(*piece.grainAngle)});
+            }
             if (!piece.showLabel)
                 new QTreeWidgetItem(row, {tr("Label"), tr("Printed label is disabled")});
             qsizetype expected = piece.notches.size();
             for (qsizetype j = 0; j < graded.entities().size(); ++j) {
                 const auto& edge = graded.entities()[j];
-                if (edge.piece != i || edge.layer != opc::Layer::Main)
+                if (edge.piece != i)
                     continue;
+                if (addDrill && opc::isDrillPoint(edge)) {
+                    const bool inside = geometry.error == opc::ContourError::None
+                        && geometry.contour.containsPoint(edge.a, Qt::OddEvenFill);
+                    auto position = tr("%1, %2 mm").arg(edge.a.x(), 0, 'f', 2).arg(edge.a.y(), 0, 'f', 2);
+                    if (!inside)
+                        position += QStringLiteral(" · вне контура");
+                    new QTreeWidgetItem(row, {QStringLiteral("Точка сверления"), position});
+                }
+                if (edge.layer != opc::Layer::Main)
+                    continue;
+                if (editEdge && j < sourceIndices.size()) {
+                    const auto sourceIndex = sourceIndices[j];
+                    const auto& source = doc_.entities()[sourceIndex];
+                    const auto length = opc::seamLength(edge);
+                    if (length && source.piece == i && opc::seamLength(source)) {
+                        const bool linked = links.allowances.contains(j);
+                        const auto width = links.allowances.value(j, edge.seamAllowanceMm.value_or(piece.allowanceMm));
+                        const auto description = linked ? tr("Length %1 mm · Linked allowance %2 mm")
+                                                        : tr("Length %1 mm · Allowance %2 mm");
+                        auto* edgeRow = new QTreeWidgetItem(row, {
+                            source.draftName.isEmpty() ? tr("Edge %1").arg(sourceIndex + 1) : source.draftName,
+                            description.arg(*length, 0, 'f', 2).arg(width, 0, 'f', 2)
+                        });
+                        if (!linked)
+                            edgeRow->setData(0, Qt::UserRole + 1, QVariant::fromValue(sourceIndex));
+                    }
+                }
                 expected += edge.seamNotches.size();
                 for (const auto fraction : links.notches.value(j)) {
                     if (std::ranges::none_of(edge.seamNotches, [fraction](double existing) {
@@ -1586,6 +1793,15 @@ void MainWindow::diagnoseGradedPieces() {
     };
     const auto refresh = [&] {
         report.clear();
+        copyCounts.clear();
+        for (const auto& placement : doc_.production().placements) {
+            if (placement.piece < 0 || placement.piece >= doc_.pieces().size())
+                continue;
+            auto& counts = copyCounts[placement.size];
+            if (counts.isEmpty())
+                counts.resize(doc_.pieces().size());
+            ++counts[placement.piece];
+        }
         for (int i = 1; i < sizes.count(); ++i) {
             if (sizes.currentIndex() != 0 && sizes.currentIndex() != i)
                 continue;
@@ -1595,6 +1811,178 @@ void MainWindow::diagnoseGradedPieces() {
         }
         report.resizeColumnToContents(0);
     };
+    const auto selectedPiece = [&] {
+        for (auto* item = report.currentItem(); item; item = item->parent()) {
+            const auto index = item->data(0, Qt::UserRole);
+            if (index.isValid())
+                return static_cast<qsizetype>(index.toLongLong());
+        }
+        return qsizetype{-1};
+    };
+    const auto selectedEdge = [&] {
+        const auto* item = report.currentItem();
+        return item ? item->data(0, Qt::UserRole + 1) : QVariant{};
+    };
+    connect(&report, &QTreeWidget::currentItemChanged, &dialog, [&] {
+        editPiece->setEnabled(selectedPiece() >= 0);
+        if (editEdge)
+            editEdge->setEnabled(selectedEdge().isValid());
+        if (addDrill)
+            addDrill->setEnabled(selectedPiece() >= 0);
+    });
+    if (addSymbol) {
+        connect(&report, &QTreeWidget::currentItemChanged, &dialog, [&] {
+            addSymbol->setEnabled(selectedPiece() >= 0);
+        });
+        connect(addSymbol, &QPushButton::clicked, &dialog, [&] {
+            const auto piece = selectedPiece();
+            if (piece < 0)
+                return;
+            QDialog symbols(&dialog);
+            symbols.setWindowTitle(QStringLiteral("Технологический знак"));
+            QFormLayout fields(&symbols);
+            QComboBox type;
+            type.addItem(QStringLiteral("Крест"), int(opc::PieceSymbol::Cross));
+            type.addItem(QStringLiteral("Окружность"), int(opc::PieceSymbol::Circle));
+            type.addItem(QStringLiteral("Петля"), int(opc::PieceSymbol::Buttonhole));
+            type.addItem(QStringLiteral("Раппорт по основе"), int(opc::PieceSymbol::WarpRepeat));
+            type.addItem(QStringLiteral("Раппорт по утку"), int(opc::PieceSymbol::WeftRepeat));
+            fields.addRow(QStringLiteral("Вид знака"), &type);
+            QDoubleSpinBox x, y, length, angle;
+            const auto center = opc::analyzePiece(doc_, piece).bounds.center();
+            for (auto* field : {&x, &y}) {
+                field->setDecimals(3);
+                field->setRange(-1000000, 1000000);
+                field->setSuffix(tr(" mm"));
+            }
+            x.setValue(center.x());
+            y.setValue(center.y());
+            length.setRange(0.1, 1000);
+            length.setValue(10);
+            length.setSuffix(tr(" mm"));
+            angle.setRange(-360, 360);
+            angle.setSuffix(QStringLiteral("°"));
+            fields.addRow(QStringLiteral("Координата X"), &x);
+            fields.addRow(QStringLiteral("Координата Y"), &y);
+            fields.addRow(QStringLiteral("Длина"), &length);
+            fields.addRow(QStringLiteral("Поворот"), &angle);
+            QDialogButtonBox accept(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+            fields.addRow(&accept);
+            connect(&accept, &QDialogButtonBox::rejected, &symbols, &QDialog::reject);
+            connect(&accept, &QDialogButtonBox::accepted, &symbols, [&] {
+                const auto glyph = opc::buildPieceSymbol(opc::PieceSymbol(type.currentData().toInt()),
+                    piece, {x.value(), y.value()}, length.value(), angle.value());
+                for (int i = 1; i < sizes.count(); ++i) {
+                    const auto graded = opc::gradedPattern(doc_, sizes.itemData(i).toString());
+                    const auto geometry = opc::analyzePiece(graded, piece);
+                    if (geometry.error != opc::ContourError::None
+                        || !std::ranges::all_of(glyph, [&geometry](const auto& stroke) {
+                            return opc::symbolFitsContour(opc::entityPath(stroke), geometry.contour);
+                        })) {
+                        QMessageBox::warning(&symbols, symbols.windowTitle(),
+                            QStringLiteral("Знак должен лежать внутри контура в размере «%1».").arg(sizes.itemText(i)));
+                        return;
+                    }
+                }
+                auto updated = doc_;
+                for (const auto& stroke : glyph)
+                    updated.insert(updated.entities().size(), stroke);
+                applyPatternEdit(std::move(updated), symbols.windowTitle(), true);
+                symbols.accept();
+            });
+            if (symbols.exec() == QDialog::Accepted)
+                refresh();
+        });
+    }
+    if (derivePiece) {
+        connect(&report, &QTreeWidget::currentItemChanged, &dialog, [&] {
+            derivePiece->setEnabled(selectedPiece() >= 0);
+        });
+        connect(derivePiece, &QPushButton::clicked, &dialog, [&] {
+            const auto source = selectedPiece();
+            if (source < 0)
+                return;
+            bool accepted = false;
+            const auto name = QInputDialog::getText(&dialog, derivePiece->text(), tr("Piece name"),
+                QLineEdit::Normal, doc_.pieces()[source].name + QStringLiteral(" · Крой"), &accepted);
+            if (!accepted)
+                return;
+            auto updated = doc_;
+            QString error;
+            if (!updated.deriveParametricPiece(source, name, &error)) {
+                QMessageBox::warning(&dialog, derivePiece->text(), error);
+                return;
+            }
+            applyPatternEdit(std::move(updated), derivePiece->text(), true);
+            refresh();
+        });
+    }
+    if (addDrill) {
+        connect(addDrill, &QPushButton::clicked, &dialog, [&] {
+            const auto piece = selectedPiece();
+            if (piece < 0)
+                return;
+            const auto base = opc::analyzePiece(doc_, piece);
+            if (base.error != opc::ContourError::None) {
+                QMessageBox::warning(&dialog, addDrill->text(),
+                                     QStringLiteral("Для сверления нужен замкнутый контур детали."));
+                return;
+            }
+            QDialog drill(&dialog);
+            drill.setWindowTitle(addDrill->text());
+            QFormLayout fields(&drill);
+            QDoubleSpinBox x, y;
+            for (auto* field : {&x, &y}) {
+                field->setDecimals(3);
+                field->setRange(-1000000, 1000000);
+                field->setSuffix(tr(" mm"));
+            }
+            x.setValue(base.bounds.center().x());
+            y.setValue(base.bounds.center().y());
+            fields.addRow(QStringLiteral("Координата X"), &x);
+            fields.addRow(QStringLiteral("Координата Y"), &y);
+            QDialogButtonBox accept(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+            fields.addRow(&accept);
+            connect(&accept, &QDialogButtonBox::rejected, &drill, &QDialog::reject);
+            connect(&accept, &QDialogButtonBox::accepted, &drill, [&] {
+                const QPointF point(x.value(), y.value());
+                for (int i = 1; i < sizes.count(); ++i) {
+                    const auto graded = opc::gradedPattern(doc_, sizes.itemData(i).toString());
+                    const auto contour = opc::analyzePiece(graded, piece);
+                    if (contour.error != opc::ContourError::None
+                        || !contour.contour.containsPoint(point, Qt::OddEvenFill)) {
+                        QMessageBox::warning(&drill, drill.windowTitle(),
+                            QStringLiteral("Точка должна лежать внутри детали для размера «%1».").arg(sizes.itemText(i)));
+                        return;
+                    }
+                }
+                auto updated = doc_;
+                opc::Entity mark{opc::Shape::Point, point, point, {}, piece, opc::Layer::Construction};
+                mark.dxfLayer = opc::drillLayer;
+                updated.insert(updated.entities().size(), mark);
+                applyPatternEdit(std::move(updated), QStringLiteral("Добавить точку сверления"), true);
+                drill.accept();
+            });
+            if (drill.exec() == QDialog::Accepted)
+                refresh();
+        });
+    }
+    if (editEdge) {
+        connect(editEdge, &QPushButton::clicked, &dialog, [&] {
+            const auto index = selectedEdge();
+            if (!index.isValid())
+                return;
+            editEdgeAllowance({static_cast<qsizetype>(index.toLongLong())}, &dialog);
+            refresh();
+        });
+    }
+    connect(editPiece, &QPushButton::clicked, &dialog, [&] {
+        const auto piece = selectedPiece();
+        if (piece < 0)
+            return;
+        managePieceAt(piece, &dialog);
+        refresh();
+    });
     connect(&sizes, &QComboBox::currentIndexChanged, &dialog, refresh);
     refresh();
     dialog.resize(680, 420);
@@ -1603,15 +1991,17 @@ void MainWindow::diagnoseGradedPieces() {
 
 void MainWindow::managePiece() {
     const auto piece = choosePiece(tr("Piece, Contour and Allowance"));
-    if (piece < 0)
-        return;
+    if (piece >= 0)
+        managePieceAt(piece, this);
+}
 
+void MainWindow::managePieceAt(qsizetype piece, QWidget* parent) {
     const auto& original = doc_.pieces()[piece];
     const auto& geometry = pieces_[piece];
     using opc::ContourError;
     const auto contour = describeContour(geometry.error);
 
-    QDialog dialog(this);
+    QDialog dialog(parent);
     dialog.setWindowTitle(tr("Piece, Contour and Allowance"));
     auto* form = new QFormLayout(&dialog);
     auto* name = new QLineEdit(original.name, &dialog);
@@ -1902,6 +2292,52 @@ void MainWindow::joinSelectedEdges() {
     undo_.endMacro();
 }
 
+void MainWindow::alignSelectedCurve() {
+    const auto selection = selectedObjects();
+    if (selection.size() != 2)
+        return;
+    const auto title = QStringLiteral("Сопрячь кривую по касательной");
+    QStringList choices;
+    QVector<qsizetype> indices;
+    for (const auto index : selection) {
+        const auto& edge = doc_.entities()[index];
+        if (edge.shape == opc::Shape::Curve && edge.draftName.isEmpty()) {
+            choices.append(tr("Object %1").arg(index + 1));
+            indices.append(index);
+        }
+    }
+    if (indices.isEmpty())
+        return;
+    auto editable = indices.first();
+    if (indices.size() == 2) {
+        bool accepted = false;
+        const auto name = QInputDialog::getItem(this, title, QStringLiteral("Изменяемая кривая"),
+                                              choices, 0, false, &accepted);
+        if (!accepted)
+            return;
+        editable = indices[choices.indexOf(name)];
+    }
+    const auto other = selection[0] == editable ? selection[1] : selection[0];
+    const auto& edge = doc_.entities()[editable];
+    const auto curve = opc::tangentCurve(doc_.entities()[other], edge);
+    if (!curve) {
+        QMessageBox::information(this, title, QStringLiteral("Нужен один общий конец и ненулевые касательные."));
+        return;
+    }
+    auto updated = opc::editGeometry(doc_, editable, curve->a, curve->b, curve->control, false);
+    if (updated && edge.piece >= 0 && edge.layer == opc::Layer::Main) {
+        const auto geometry = opc::analyzePiece(*updated, edge.piece);
+        if ((geometry.error != opc::ContourError::None && geometry.error != opc::ContourError::Open)
+            || geometry.allowanceFailed)
+            updated.reset();
+    }
+    if (!updated) {
+        QMessageBox::warning(this, title, QStringLiteral("Сопряжение нарушает контур, припуск или правила градации."));
+        return;
+    }
+    applyPatternEdit(std::move(*updated), title, true);
+}
+
 void MainWindow::shapeSilhouette() {
     const auto title = tr("Shape Silhouette");
     const auto piece = choosePiece(title);
@@ -2142,15 +2578,20 @@ void MainWindow::editModelingStep(qsizetype index) {
     QDoubleSpinBox* bottom = nullptr;
     QDoubleSpinBox* length = nullptr;
     QDoubleSpinBox* spread = nullptr;
+    QLineEdit* spreadFormula = nullptr;
     QDoubleSpinBox* angle = nullptr;
     if (!settings.rotationPivot.isEmpty()) {
         auto* pivot = new QLabel(settings.rotationPivot, &dialog);
         pivot->setTextFormat(Qt::PlainText);
         form.addRow(tr("Pivot point"), pivot);
         angle = number(tr("Angle (positive clockwise)"), settings.rotationDegrees, -360, 360, tr("°"));
+    } else if (settings.contour == opc::ContourOperation::SplitDart) {
+        spread = number(QStringLiteral("Доля углового раствора первого вывода"),
+                        settings.spreadMm, 0.000001, 99.999999, tr(" %"));
     } else if (settings.contour) {
-        spread = number(tr("Added width"), settings.spreadMm, 0.000001,
-                        std::max(100000., settings.spreadMm), tr(" mm"));
+        spreadFormula = new QLineEdit(settings.spreadFormula.isEmpty()
+            ? QString::number(settings.spreadMm, 'g', 17) : settings.spreadFormula, &dialog);
+        form.addRow(tr("Added width (mm or formula)"), spreadFormula);
     } else {
         axis = number(tr("Axis from left edge"), settings.axisFraction * 100, 0, 100, tr(" %"));
         top = number(tr("Top width"), settings.topScale * 100, 20, 500, tr(" %"));
@@ -2168,6 +2609,15 @@ void MainWindow::editModelingStep(qsizetype index) {
         auto revised = settings;
         if (angle) {
             revised.rotationDegrees = read(angle, settings.rotationDegrees, 1);
+        } else if (spreadFormula) {
+            const auto expression = spreadFormula->text().trimmed();
+            if (expression.isEmpty()) {
+                QMessageBox::warning(&dialog, dialog.windowTitle(), tr("Enter a width or formula."));
+                return;
+            }
+            bool constant;
+            revised.spreadMm = expression.toDouble(&constant);
+            revised.spreadFormula = constant ? QString{} : expression;
         } else if (spread) {
             revised.spreadMm = read(spread, settings.spreadMm, 1);
         } else {
@@ -2258,7 +2708,8 @@ void MainWindow::refreshModelingHistory() {
     for (qsizetype i = 0; i < history.size(); ++i) {
         const auto& step = history[i];
         auto* item = new QTreeWidgetItem(root, {tr("%1. %2").arg(i + 1).arg(modelingStepName(step))});
-        if (!step.contour || opc::usesSpreadWidth(*step.contour)) {
+        if (!step.contour || opc::usesSpreadWidth(*step.contour)
+            || *step.contour == opc::ContourOperation::SplitDart) {
             item->setData(0, Qt::UserRole + 1, QVariant::fromValue(i));
             item->setToolTip(0, tr("Double-click to edit step parameters."));
         }
@@ -2269,6 +2720,10 @@ void MainWindow::refreshModelingHistory() {
                 .arg(step.topScale * 100).arg(step.bottomScale * 100).arg(step.lengthScale * 100));
         else if (step.secondPiece >= 0)
             item->setText(1, doc_.pieces()[step.secondPiece].name);
+        else if (step.contour == opc::ContourOperation::SplitDart)
+            item->setText(1, QStringLiteral("Первый вывод %L1 %").arg(step.spreadMm));
+        else if (!step.spreadFormula.isEmpty())
+            item->setText(1, step.spreadFormula);
         else if (step.spreadMm > 0)
             item->setText(1, tr("%L1 mm").arg(step.spreadMm));
         auto* inputs = new QTreeWidgetItem(item, {tr("Source objects"), QString::number(step.objects.size())});
@@ -2324,16 +2779,134 @@ void MainWindow::refreshModelingHistory() {
     removeModelingStep_->setEnabled(!history.isEmpty());
 }
 
+void MainWindow::drapePiece() {
+    const auto title = QStringLiteral("Раздвижка по нескольким направляющим");
+    QStringList selected;
+    for (const auto index : selectedObjects()) {
+        const auto& guide = doc_.entities()[index];
+        if (guide.layer != opc::Layer::Construction || guide.draftName.isEmpty()
+            || (guide.shape != opc::Shape::Line && guide.shape != opc::Shape::Curve)) {
+            selected.clear();
+            break;
+        }
+        selected.append(guide.draftName);
+    }
+    if (selected.size() < 2) {
+        QMessageBox::information(this, title, QStringLiteral("Выберите две или более именных направляющих на слое построения."));
+        return;
+    }
+    const auto piece = choosePiece(title);
+    if (piece < 0)
+        return;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    QFormLayout form(&dialog);
+    QLabel hint(QStringLiteral("Задайте порядок, раствор и разметку каждого разреза. "
+                               "Направляющие должны идти от края до края без пересечений."));
+    hint.setWordWrap(true);
+    form.addRow(&hint);
+    QVector<QComboBox*> guides;
+    QVector<QLineEdit*> widths;
+    QVector<QComboBox*> markings;
+    using enum opc::ContourOperation;
+    for (qsizetype i = 0; i < selected.size(); ++i) {
+        auto* guide = new QComboBox;
+        guide->addItems(selected);
+        guide->setCurrentIndex(i);
+        auto* width = new QLineEdit(QStringLiteral("20"));
+        width->setPlaceholderText(QStringLiteral("Например: hip / 40"));
+        form.addRow(QStringLiteral("Направляющая %1").arg(i + 1), guide);
+        form.addRow(QStringLiteral("Раствор (мм или формула)"), width);
+        guides.append(guide);
+        widths.append(width);
+        auto* marking = new QComboBox;
+        marking->addItem(QStringLiteral("Без разметки"), int(Spread));
+        marking->addItem(QStringLiteral("Встречная складка"), int(Pleat));
+        marking->addItem(QStringLiteral("Сборка"), int(Gather));
+        form.addRow(QStringLiteral("Разметка"), marking);
+        markings.append(marking);
+    }
+    QGraphicsScene previewScene;
+    QGraphicsView drawing(&previewScene);
+    drawing.setMinimumSize(320, 180);
+    drawing.setRenderHint(QPainter::Antialiasing);
+    form.addRow(&drawing);
+    QLabel result;
+    result.setWordWrap(true);
+    form.addRow(&result);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    auto* preview = buttons.addButton(QStringLiteral("Проверить контур"), QDialogButtonBox::ActionRole);
+    form.addRow(&buttons);
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    std::optional<opc::PatternDocument> updated;
+    const auto evaluate = [&] {
+        QVector<QString> names;
+        QVector<QString> expressions;
+        QVector<opc::ContourOperation> operations;
+        for (qsizetype i = 0; i < guides.size(); ++i) {
+            names.append(guides[i]->currentText());
+            expressions.append(widths[i]->text());
+            operations.append(opc::ContourOperation(markings[i]->currentData().toInt()));
+        }
+        previewScene.clear();
+        auto candidate = doc_;
+        QString error;
+        if (!candidate.appendDrapeFormulas(piece, names, expressions, operations, &error)) {
+            updated.reset();
+            result.setText(error);
+            return;
+        }
+        const auto geometry = opc::analyzePiece(candidate, piece);
+        previewScene.addPolygon(geometry.contour, QPen(Qt::darkBlue, 0));
+        for (const auto& entity : candidate.entities()) {
+            if (entity.piece == piece && entity.layer == opc::Layer::Construction) {
+                QPainterPath path(entity.a);
+                if (entity.shape == opc::Shape::Curve)
+                    path.quadTo(entity.control, entity.b);
+                else if (entity.shape == opc::Shape::Line)
+                    path.lineTo(entity.b);
+                previewScene.addPath(path, QPen(Qt::darkGreen, 0, Qt::DashLine));
+            }
+        }
+        previewScene.setSceneRect(previewScene.itemsBoundingRect().adjusted(-5, -5, 5, 5));
+        drawing.fitInView(previewScene.sceneRect(), Qt::KeepAspectRatio);
+        const auto bounds = geometry.bounds;
+        result.setText(QStringLiteral("Габариты контура %1 × %2 мм").arg(bounds.width(), 0, 'f', 2)
+                       .arg(bounds.height(), 0, 'f', 2));
+        updated = std::move(candidate);
+    };
+    connect(preview, &QPushButton::clicked, &dialog, evaluate);
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        evaluate();
+        if (updated)
+            dialog.accept();
+    });
+    if (dialog.exec() == QDialog::Accepted)
+        applyPatternEdit(std::move(*updated), title, true);
+}
+
 void MainWindow::modelPiece(opc::ContourOperation operation, const QString& title) {
     using opc::ContourOperation;
     auto guides = selectedObjects();
+    const bool redistribute = opc::redistributesDarts(operation);
+    const bool split = operation == ContourOperation::SplitDart;
     const bool openDart = operation == ContourOperation::MoveOpenDart;
     const bool dart = openDart || operation == ContourOperation::TransferDartToOutlet;
-    if (guides.size() != (dart ? 3 : 1)) {
+    if (redistribute && guides.size() != (split ? 4 : 5)) {
+        QMessageBox::information(this, title, split
+            ? QStringLiteral("Выберите две ножки и два вывода на слое построения. Все линии должны исходить из общей вершины.")
+            : QStringLiteral("Выберите четыре ножки и один вывод на слое построения. Все линии должны исходить из общей вершины."));
+        return;
+    }
+    const bool spread = opc::usesSpreadWidth(operation);
+    if (!redistribute && (spread ? guides.isEmpty() : guides.size() != (dart ? 3 : 1))) {
         QMessageBox::information(this, title, openDart
             ? tr("Select two main-contour dart legs and one construction outlet.")
             : dart ? tr("Select two dart legs and an outlet on the Construction layer.")
-            : opc::dividesPiece(operation) ? tr("Select one construction line or quadratic curve with both ends on the piece contour.")
+            : (opc::dividesPiece(operation) || opc::usesSpreadWidth(operation))
+                   ? tr("Select one construction line or quadratic curve with both ends on the piece contour.")
                    : tr("Select one construction line with both ends on the piece contour."));
         return;
     }
@@ -2344,36 +2917,90 @@ void MainWindow::modelPiece(opc::ContourOperation operation, const QString& titl
         std::stable_partition(guides.begin(), guides.end(), [this](qsizetype index) {
             return doc_.entities()[index].layer == opc::Layer::Main;
         });
-    } else if (dart) {
+    } else if (dart || redistribute) {
         QStringList lines;
         for (const auto index : guides) {
             const auto& line = doc_.entities()[index];
             lines.append(tr("Object %1   (%2, %3) to (%4, %5)").arg(index + 1)
                          .arg(line.a.x()).arg(line.a.y()).arg(line.b.x()).arg(line.b.y()));
         }
-        bool accepted = false;
-        const auto outlet = QInputDialog::getItem(this, title, tr("Choose the new outlet among the selected lines"),
-                                                  lines, 2, false, &accepted);
-        if (!accepted)
-            return;
-        guides.move(lines.indexOf(outlet), 2);
+        const QStringList roles = split
+            ? QStringList{QStringLiteral("Первый вывод"), QStringLiteral("Второй вывод")}
+            : redistribute ? QStringList{QStringLiteral("Вывод объединённой вытачки"),
+                                          QStringLiteral("Первая ножка первой вытачки"),
+                                          QStringLiteral("Вторая ножка первой вытачки")}
+                           : QStringList{tr("Choose the new outlet among the selected lines")};
+        QVector<qsizetype> chosen;
+        for (const auto& role : roles) {
+            bool accepted = false;
+            const auto item = QInputDialog::getItem(this, title, role, lines, lines.size() - 1, false, &accepted);
+            if (!accepted)
+                return;
+            const auto index = lines.indexOf(item);
+            chosen.append(guides.takeAt(index));
+            lines.removeAt(index);
+        }
+        if (redistribute && !split)
+            guides = QVector<qsizetype>{chosen[1], chosen[2], guides[0], guides[1], chosen[0]};
+        else
+            guides += chosen;
     }
-    double width = 0;
-    if (opc::usesSpreadWidth(operation)) {
-        bool accepted = false;
-        width = QInputDialog::getDouble(this, title, tr("Total added width perpendicular to the cut (mm)"),
-                                        20, 0.01, 100000, 2, &accepted);
-        if (!accepted)
-            return;
+    if (spread && guides.size() > 1) {
+        QStringList remaining;
+        for (auto index : guides) {
+            const auto& entity = doc_.entities()[index];
+            remaining.append(entity.draftName.isEmpty() ? tr("Object %1").arg(index + 1) : entity.draftName);
+        }
+        auto indices = guides;
+        guides.clear();
+        while (indices.size() > 1) {
+            bool accepted = false;
+            const auto name = QInputDialog::getItem(this, title, tr("Guide segment %1").arg(guides.size() + 1),
+                                                   remaining, 0, false, &accepted);
+            if (!accepted)
+                return;
+            const auto index = remaining.indexOf(name);
+            guides.append(indices.takeAt(index));
+            remaining.removeAt(index);
+        }
+        guides.append(indices.front());
     }
     const auto named = [](const opc::Entity& entity) { return !entity.draftName.isEmpty(); };
     const bool formula = std::ranges::any_of(doc_.entities(), [piece, named](const auto& entity) {
         return entity.piece == piece && named(entity);
     }) || std::ranges::any_of(guides, [&](qsizetype index) { return named(doc_.entities()[index]); });
+    double width = 0;
+    QString widthFormula;
+    if (split) {
+        bool accepted = false;
+        width = QInputDialog::getDouble(this, title, QStringLiteral("Доля углового раствора первого вывода (%)"),
+                                        50, 0.01, 99.99, 2, &accepted);
+        if (!accepted)
+            return;
+    }
+    if (spread) {
+        bool accepted = false;
+        if (formula) {
+            const auto expression = QInputDialog::getText(this, title,
+                tr("Total added width perpendicular to the cut (mm or formula)"), QLineEdit::Normal,
+                QStringLiteral("20"), &accepted).trimmed();
+            if (!accepted || expression.isEmpty())
+                return;
+            bool constant;
+            width = expression.toDouble(&constant);
+            if (!constant)
+                widthFormula = expression;
+        } else {
+            width = QInputDialog::getDouble(this, title, tr("Total added width perpendicular to the cut (mm)"),
+                                            20, 0.01, 100000, 2, &accepted);
+            if (!accepted)
+                return;
+        }
+    }
     if (formula) {
         auto updated = doc_;
         QString error;
-        if (!updated.appendContour(piece, operation, guides, width, &error)) {
+        if (!updated.appendContour(piece, operation, guides, width, &error, widthFormula)) {
             setModelingError(error);
             QMessageBox::warning(this, title, error);
             return;

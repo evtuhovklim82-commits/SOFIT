@@ -249,7 +249,7 @@ bool exportFabricPdf(const QString& path, const PatternDocument& document,
     for (const auto& placement : data.placements) {
         if (!graded.contains(placement.size))
             graded.insert(placement.size, gradedPattern(document, placement.size, nullptr, GradeEdgeNames::Preserve));
-        const auto geometry = fabricPiece(graded.constFind(placement.size).value(), placement);
+        const auto geometry = fabricPiece(graded.constFind(placement.size).value(), placement, true, data.fabricShrinkagePercent);
         const bool onFold = !geometry.fold.isNull();
         const auto outline = onFold ? openFoldContour(geometry.cut, geometry.fold) : geometry.cut;
         if (outline.size() < 3) {
@@ -261,6 +261,24 @@ bool exportFabricPdf(const QString& path, const PatternDocument& document,
         if (!onFold)
             cut.closeSubpath();
         append(std::move(cut), Layer::Main);
+        if (!geometry.notches.isEmpty())
+            append(geometry.notches.translated(placement.position), Layer::Allowance);
+        for (const auto& symbol : geometry.symbols) {
+            if (!symbolFitsContour(symbol, geometry.cut)) {
+                error = QStringLiteral("A production symbol is outside its cutting contour.");
+                return false;
+            }
+            append(symbol.translated(placement.position), Layer::Main);
+        }
+        for (const auto& point : geometry.drillPoints) {
+            if (!geometry.cut.containsPoint(point, Qt::OddEvenFill)) {
+                error = QStringLiteral("A drill point is outside its cutting contour.");
+                return false;
+            }
+            QPainterPath drill;
+            drill.addEllipse(point + placement.position, 0.5, 0.5);
+            append(std::move(drill), Layer::Main);
+        }
         if (onFold) {
             QPainterPath fold(geometry.fold.p1() + placement.position);
             fold.lineTo(geometry.fold.p2() + placement.position);

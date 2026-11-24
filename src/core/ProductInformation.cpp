@@ -131,20 +131,33 @@ bool exportProductInformationPdf(const QString& path, const PatternDocument& doc
     }
 
     if (info.includeCuttingQuantities && !document.pieces().isEmpty()) {
-        const auto rows = cuttingKitRows(document, cuttingReport(document, document.production()));
-        cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
-        cursor.insertText(tr("Parts and marker quantities"), heading);
+        const auto& production = document.production();
+        const auto cutting = cuttingReport(document, production);
+        const auto rows = cuttingKitRows(document, cutting);
+        section(tr("Parts and marker quantities"));
+        if (!production.placements.isEmpty()) {
+            if (cutting.canExport(production.fabricWidth)) {
+                field(tr("Marker length"), tr("%L1 mm").arg(cutting.usage.length, 0, 'f', 2));
+                field(tr("Fabric width"), tr("%L1 mm").arg(production.fabricWidth, 0, 'f', 2));
+                if (const auto utilization = cutting.usage.utilization(production.fabricWidth))
+                    field(tr("Fabric utilization"), tr("%L1%").arg(*utilization * 100, 0, 'f', 2));
+            } else {
+                field(tr("Marker status"), tr("The saved marker did not pass cutting checks."));
+            }
+        }
         cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
         QTextTableFormat format;
         format.setHeaderRowCount(1);
         format.setCellPadding(3);
-        auto* table = cursor.insertTable(rows.size() + 1, 7, format);
-        const QStringList labels{tr("Part"), tr("Size"), tr("Single"), tr("Left"), tr("Right"), tr("On fold"), tr("Total")};
+        auto* table = cursor.insertTable(rows.size() + 1, 8, format);
+        const QStringList labels{tr("Part"), tr("Size"), tr("Per kit"), tr("Single"), tr("Left"), tr("Right"),
+                                 tr("On fold"), tr("In marker")};
         for (int column = 0; column < labels.size(); ++column)
             table->cellAt(0, column).firstCursorPosition().insertText(labels[column]);
         for (int i = 0; i < rows.size(); ++i) {
             const auto& row = rows[i];
-            const QStringList cells{document.pieces()[row.piece].name, row.size.isEmpty() ? tr("Base") : row.size,
+            const auto& piece = document.pieces()[row.piece];
+            const QStringList cells{piece.name, row.size.isEmpty() ? tr("Base") : row.size, QString::number(piece.cutCount),
                 QString::number(row.single), QString::number(row.left), QString::number(row.right),
                 QString::number(row.onFold), QString::number(row.copies())};
             for (int column = 0; column < cells.size(); ++column)

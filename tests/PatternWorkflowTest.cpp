@@ -463,6 +463,9 @@ void testStageNavigationAndPreferences() {
         helpButton->click();
         dialog.reject();
     });
+    check(action(window, "Construction Tree…").shortcut() == QKeySequence(Qt::Key_F12)
+          && action(window, "Measure").shortcut() == QKeySequence(Qt::CTRL | Qt::Key_M),
+          "Bind the documented construction and measurement shortcuts by default");
     runDialog<QDialog>(action(window, "GRAFIS ⇄ SOFIT"), [](QDialog& dialog) {
         auto* guide = dialog.findChild<QTextBrowser*>("grafisWorkflowGuide");
         check(guide && guide->toHtml().contains("help.grafis.de"), "Guide links to GRAFIS publisher documentation");
@@ -571,6 +574,138 @@ void testProjectRecovery() {
     QDir(snapshots).rmdir(".");
 }
 
+void testMarkerModelImport() {
+    QTemporaryDir projects;
+    check(projects.isValid(), "Create a marker project directory");
+    const auto sourcePath = projects.filePath("source-model.sofit");
+    const auto markerPath = projects.filePath("combined-marker.sofit");
+    opc::PatternDocument source;
+    source.pieces().append({"Panel"});
+    source.insert(0, {opc::Shape::Rectangle, {}, {50, 40}, {}, 0});
+    check(source.save(sourcePath), "Save a source model for marker import");
+    MainWindow markerWindow;
+    markerWindow.show();
+    const auto command = QStringLiteral("Добавить модели в раскладку…");
+    runDialog<QFileDialog>(action(markerWindow, command), [&](QFileDialog& file) {
+        file.selectFile(sourcePath);
+        QTimer::singleShot(0, [] {
+            auto* size = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            check(size && size->comboBoxItems().size() == 1, "Choose the source base size");
+            QTimer::singleShot(0, [] {
+                auto* quantity = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                check(quantity && quantity->inputMode() == QInputDialog::IntInput, "Set the number of kits");
+                quantity->setIntValue(2);
+                QTimer::singleShot(0, [] {
+                    auto* layout = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                    check(layout && layout->findChild<QGraphicsView*>(), "Open the combined marker");
+                    for (auto* button : layout->findChildren<QPushButton*>()) {
+                        if (button->text() == "Auto arrange")
+                            button->click();
+                    }
+                    layout->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                });
+                quantity->accept();
+            });
+            size->accept();
+        });
+        static_cast<QDialog&>(file).accept();
+    });
+    chooseFile(action(markerWindow, "&Save"), markerPath);
+    opc::PatternDocument marker;
+    check(marker.load(markerPath) && marker.pieces().size() == 1
+          && marker.pieces().front().name.startsWith("source-model")
+          && marker.production().placements.size() == 2
+          && opc::cuttingReport(marker, marker.production()).canExport(marker.production().fabricWidth),
+          "Save two arranged kits through the desktop workflow");
+}
+
+void testMaterialLay() {
+    QTemporaryDir directory;
+    opc::PatternDocument project;
+    project.pieces() = {{"Shell"}, {"Lining"}};
+    project.insert(0, {opc::Shape::Rectangle, {}, {70, 40}, {}, 0});
+    project.insert(1, {opc::Shape::Rectangle, {}, {60, 30}, {}, 1});
+    project.production().placements = {{0, {}, {}}, {1, {}, {0, 50}},
+        {0, {}, {0, 90}, false, opc::CutHand::Left}, {0, {}, {0, 140}, false, opc::CutHand::Right}};
+    const auto input = directory.filePath("order.sofit");
+    check(project.save(input), "Save a two-material order");
+    MainWindow window;
+    window.show();
+    chooseFile(action(window, "&Open"), input);
+
+    int step = 0;
+    QTimer drive;
+    QObject::connect(&drive, &QTimer::timeout, [&] {
+        auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!modal)
+            return;
+        const auto current = step++;
+        if (current == 0) {
+            auto* table = modal->findChild<QTableWidget*>();
+            check(table && table->rowCount() == 3, "Assign the two pieces and one paired set");
+            qobject_cast<QLineEdit*>(table->cellWidget(0, 2))->setText("Shell");
+            qobject_cast<QLineEdit*>(table->cellWidget(1, 2))->setText("Lining");
+            qobject_cast<QLineEdit*>(table->cellWidget(2, 2))->setText("Shell");
+            qobject_cast<QSpinBox*>(table->cellWidget(2, 3))->setValue(2);
+        } else if (current == 1 || current == 2 || current == 4 || current == 5 || current == 7 || current == 8) {
+            auto* field = qobject_cast<QInputDialog*>(modal);
+            check(field, "Configure each material width and layer count");
+            if (current == 1 || current == 4 || current == 7)
+                field->setDoubleValue(current == 1 ? 100 : current == 4 ? 120 : 200);
+            else
+                field->setIntValue(current == 2 ? 3 : 2);
+        } else if (current == 3 || current == 6 || current == 9) {
+            check(modal->findChild<QGraphicsView*>(), "Open each material/lay marker");
+            if (current == 3) {
+                auto* warp = modal->findChild<QDoubleSpinBox*>("markerWarpShrinkage");
+                auto* weft = modal->findChild<QDoubleSpinBox*>("markerWeftShrinkage");
+                check(warp && weft, "Find the two fabric shrinkage inputs");
+                warp->setValue(25);
+                weft->setValue(20);
+            }
+        } else if (current == 10) {
+            auto* picker = qobject_cast<QFileDialog*>(modal);
+            check(picker, "Ask where to save the material lay");
+            picker->selectFile(directory.path());
+        } else {
+            auto* message = qobject_cast<QMessageBox*>(modal);
+            check(current == 11 && message && message->icon() == QMessageBox::Information,
+                  "Confirm the exported material lay");
+            drive.stop();
+        }
+        modal->accept();
+    });
+    drive.start(0);
+    action(window, QStringLiteral("Многоматериальный настил…")).trigger();
+    check(step == 12 && !window.isWindowModified(), "Export the batch without editing the source project");
+    const QDir root(directory.path());
+    const auto folders = root.entryList({"SOFIT-lay-*"}, QDir::Dirs);
+    check(folders.size() == 1, "Create one complete material lay folder");
+    const QDir output(root.filePath(folders.front()));
+    QFile usage(output.filePath("usage.tsv"));
+    check(usage.open(QIODevice::ReadOnly), "Read the material consumption report");
+    const auto report = usage.readAll();
+    check(report.contains("Lining\tmaterial-1.sofit\t100.00\t1\t40.00\t3\t0.1200\t20.00\t25.00")
+          && report.contains("Shell\tmaterial-2.sofit\t120.00\t1\t40.00\t2\t0.0800"),
+          "Report the length times the layer count independently for each material");
+    for (int i = 1; i <= 3; ++i) {
+        const auto stem = QStringLiteral("material-%1").arg(i);
+        opc::PatternDocument marker;
+        check(marker.load(output.filePath(stem + ".sofit"))
+              && marker.production().placements.size() == (i == 3 ? 2 : 1)
+              && marker.production().placements.front().piece == (i == 1 ? 1 : 0)
+              && opc::cuttingReport(marker, marker.production()).canExport(marker.production().fabricWidth)
+              && output.exists(stem + ".dxf"),
+              "Reopen each material marker and find its DXF");
+        if (i == 3) {
+            check(marker.production().placements[0].hand == opc::CutHand::Left
+                  && marker.production().placements[1].hand == opc::CutHand::Right,
+                  "Keep the matched pair together in the second shell lay");
+        }
+        readPdf(output.filePath(stem + ".pdf"));
+    }
+}
+
 int main(int argc, char** argv) {
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
     QApplication app(argc, argv);
@@ -594,6 +729,8 @@ int main(int argc, char** argv) {
     testGeometryEditing();
     testModelingWorkflow();
     testContourModelingWorkflow();
+    testMarkerModelImport();
+    testMaterialLay();
     MainWindow window;
     window.show();
 
@@ -766,27 +903,182 @@ int main(int argc, char** argv) {
         check(QApplication::clipboard()->text() == QStringLiteral("Size\tMeasurement\tValue (mm)\nL\tChest\t1000"),
               "Copy a reusable measurement grid");
         QApplication::clipboard()->setText(QStringLiteral(
-            "L\tChest\t1000\nL\tSleeve\t600\n48/176\tChest\t1040\n48/176\tSleeve\t640"));
+            "L\tChest\t1000\nL\tSleeve\t600\n48/176\tChest\t1040\n48/176\tSleeve\t640\n"
+            "52/164\tChest\t1080\n52/164\tSleeve\t604\n52/176\tChest\t1120\n52/176\tSleeve\t644"));
         click("Replace table from clipboard");
+        tabs->setCurrentIndex(1);
+        auto* rules = tabs->widget(1)->findChild<QTableWidget*>();
+        const auto addRule = [&](int row, const QString& size, const QString& x, const QString& y) {
+            click("Add grade rule");
+            rules->item(row, 0)->setText(size);
+            auto* points = qobject_cast<QComboBox*>(rules->cellWidget(row, 2));
+            points->setCurrentIndex(points->findData(QPointF(100, 40)));
+            rules->item(row, 3)->setText(x);
+            rules->item(row, 4)->setText(y);
+        };
+        addRule(0, "L", "25", "0");
+        addRule(1, "48/176", "45", "12");
+        addRule(2, "52/164", "65", "4");
+        addRule(3, "52/176", "85", "16");
+        tabs->setCurrentIndex(0);
         QTimer::singleShot(0, [&dialog] {
             auto* nested = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             check(nested && nested != &dialog, "Open the intermediate size dialog");
             nested->findChild<QLineEdit*>()->setText("48/170");
             nested->findChild<QDoubleSpinBox*>()->setValue(25);
+            nested->findChild<QCheckBox*>()->setChecked(true);
             nested->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
         });
         click(QStringLiteral("Добавить промежуточный размер…"));
-        check(measurements->rowCount() == 6 && measurements->item(4, 0)->text() == "48/170"
-              && measurements->item(4, 2)->text().toDouble() == 1010
-              && measurements->item(5, 2)->text().toDouble() == 610,
+        check(measurements->rowCount() == 10 && measurements->item(8, 0)->text() == "48/170"
+              && measurements->item(8, 2)->text().toDouble() == 1010
+              && measurements->item(9, 2)->text().toDouble() == 610,
               "Interpolate both measurements from the current table");
-        tabs->setCurrentIndex(1);
-        auto* rules = tabs->widget(1)->findChild<QTableWidget*>();
-        click("Add grade rule");
-        rules->item(0, 0)->setText("L");
-        auto* points = qobject_cast<QComboBox*>(rules->cellWidget(0, 2));
-        points->setCurrentIndex(points->findData(QPointF(100, 40)));
-        rules->item(0, 3)->setText("25");
+        check(rules->rowCount() == 5 && rules->item(4, 0)->text() == "48/170"
+              && rules->item(4, 3)->text().toDouble() == 30
+              && rules->item(4, 4)->text().toDouble() == 3,
+              "Interpolate the matched grade offsets");
+        QTimer::singleShot(0, [&dialog] {
+            auto* nested = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(nested && nested != &dialog, "Open the size and height grid dialog");
+            auto corners = nested->findChildren<QComboBox*>();
+            check(corners.size() == 4, "Use four reference corners");
+            corners[0]->setCurrentText("L");
+            corners[1]->setCurrentText("52/164");
+            corners[2]->setCurrentText("48/176");
+            corners[3]->setCurrentText("52/176");
+            auto shares = nested->findChildren<QDoubleSpinBox*>();
+            shares[0]->setValue(25);
+            shares[1]->setValue(75);
+            nested->findChild<QLineEdit*>()->setText("49/173");
+            nested->findChild<QCheckBox*>()->setChecked(true);
+            nested->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        });
+        click(QStringLiteral("Добавить по размеру и росту…"));
+        check(measurements->rowCount() == 12 && rules->rowCount() == 6,
+              "Add the new measurements and point offsets from four corners");
+
+        QTimer::singleShot(0, [] {
+            auto* group = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(group && group->findChild<QPlainTextEdit*>(), "Open the batch size and height dialog");
+            auto corners = group->findChildren<QComboBox*>();
+            corners[0]->setCurrentText("L");
+            corners[1]->setCurrentText("52/164");
+            corners[2]->setCurrentText("48/176");
+            corners[3]->setCurrentText("52/176");
+            auto* targets = group->findChild<QPlainTextEdit*>();
+            for (auto* button : group->findChildren<QPushButton*>()) {
+                if (button->text() == QStringLiteral("Заполнить размерно-ростовой ряд"))
+                    button->click();
+            }
+            const auto generated = targets->toPlainText().split(u'\n');
+            check(generated.size() == 21 && generated.contains(QStringLiteral("48/172\t50\t50"))
+                  && !generated.contains(QStringLiteral("44/164\t0\t0")),
+                  "Generate an evenly stepped production range without duplicating the four references");
+            group->findChild<QPlainTextEdit*>()->setPlainText(QStringLiteral("50/170\t50\t50\n51/174\t75\t75"));
+            group->findChild<QCheckBox*>()->setChecked(true);
+            group->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        });
+        click(QStringLiteral("Группа размеров и ростов…"));
+        check(measurements->rowCount() == 16 && rules->rowCount() == 8
+              && measurements->item(12, 2)->text().toDouble() == 1060
+              && measurements->item(15, 2)->text().toDouble() == 633,
+              "Interpolate two new size groups and their point offsets in one operation");
+
+        QApplication::clipboard()->setText(QStringLiteral("L\tWaist\t780\n"));
+        click(QStringLiteral("Добавить мерки из буфера"));
+        check(measurements->rowCount() == 17 && measurements->item(16, 1)->text() == "Waist"
+              && rules->rowCount() == 8, "Append measurements and retain existing sizes and grade rules");
+        QApplication::clipboard()->setText(QStringLiteral("L\tHip\t1100\nL\tChest\t999\n"));
+        QTimer::singleShot(0, [] {
+            auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            check(warning, "Warn about conflicting measurement imports");
+            warning->button(QMessageBox::Ok)->click();
+        });
+        click(QStringLiteral("Добавить мерки из буфера"));
+        check(measurements->rowCount() == 17 && measurements->item(0, 2)->text() == "1000",
+              "Reject the whole clipboard import when a measurement conflicts");
+
+        QTemporaryDir exchange;
+        check(exchange.isValid(), "Create a directory for the reusable size table");
+        const auto chooseFile = [](const QString& path) {
+            QTimer::singleShot(0, [path] {
+                auto* fileDialog = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+                check(fileDialog, "Open the TSV file dialog");
+                fileDialog->selectFile(path);
+                static_cast<QDialog*>(fileDialog)->accept();
+            });
+        };
+        const auto outputPath = exchange.filePath("export.tsv");
+        chooseFile(outputPath);
+        click(QStringLiteral("Сохранить мерки в TSV…"));
+        QFile outputFile(outputPath);
+        check(outputFile.open(QIODevice::ReadOnly) && outputFile.readAll().contains("L\tWaist\t780"),
+              "Write the size table to a reusable TSV file");
+        const auto inputPath = exchange.filePath("import.tsv");
+        QFile inputFile(inputPath);
+        const auto rows = QStringLiteral("Size\tMeasurement\tValue (mm)\r\nL\tОбхват бёдер\t980\r\n").toUtf8();
+        check(inputFile.open(QIODevice::WriteOnly) && inputFile.write(rows) == rows.size(),
+              "Write a UTF-8 table with a Russian measurement name");
+        inputFile.close();
+        const auto libraryKey = QStringLiteral("grading/measurementLibraryDirectory");
+        QSettings().setValue(libraryKey, exchange.path());
+        QTimer::singleShot(0, [&] {
+            auto* catalog = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(catalog && catalog->windowTitle() == QStringLiteral("Библиотека мерок…"),
+                  "Open the reusable measurement library");
+            auto* load = [&]() -> QPushButton* {
+                for (auto* button : catalog->findChildren<QPushButton*>()) {
+                    if (button->text() == QStringLiteral("Добавить систему в проект…"))
+                        return button;
+                }
+                return nullptr;
+            }();
+            check(load && load->isEnabled(), "Restore the selected library folder");
+            chooseFile(inputPath);
+            load->click();
+            catalog->reject();
+        });
+        click(QStringLiteral("Библиотека мерок…"));
+        QSettings().remove(libraryKey);
+        check(measurements->rowCount() == 18 && measurements->item(17, 1)->text() == QStringLiteral("Обхват бёдер")
+              && rules->rowCount() == 8, "Read a TSV file and preserve existing grade rules");
+
+        QTimer::singleShot(0, [] {
+            auto* group = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(group && group->findChild<QPlainTextEdit*>(), "Open the batch size and height dialog");
+            auto corners = group->findChildren<QComboBox*>();
+            check(corners.size() == 4, "Select all four corners for the batch");
+            corners[0]->setCurrentText("L");
+            corners[1]->setCurrentText("52/164");
+            corners[2]->setCurrentText("48/176");
+            corners[3]->setCurrentText("52/176");
+            group->findChild<QPlainTextEdit*>()->setPlainText(QStringLiteral("53/170\t50\t50\n54/174\t75\t75"));
+            group->findChild<QCheckBox*>()->setChecked(true);
+            // The first row now has two additional measurements and is no longer a compatible corner.
+            QTimer::singleShot(0, [] {
+                auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+                check(warning, "Reject differing reference measurement sets");
+                warning->button(QMessageBox::Ok)->click();
+            });
+            group->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            group->reject();
+        });
+        click(QStringLiteral("Группа размеров и ростов…"));
+        check(measurements->rowCount() == 18 && rules->rowCount() == 8, "Reject the entire incompatible batch");
+
+        QTimer::singleShot(0, [] {
+            auto* reference = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(reference && reference->windowTitle().contains("31396-2009"), "Open the size standard");
+            const auto fields = reference->findChildren<QComboBox*>();
+            check(fields.size() == 2, "Find stature and bust selectors");
+            fields[0]->setCurrentText("164");
+            fields[1]->setCurrentText("92");
+            reference->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        });
+        click(QStringLiteral("Типовая фигура ГОСТ…"));
+        check(measurements->rowCount() == 21 && rules->rowCount() == 8, "Append three standard measurements");
+
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
     auto* overlayMenu = action(window, "Size Overlays").menu();
@@ -822,10 +1114,21 @@ int main(int argc, char** argv) {
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
     action(window, "&Save").trigger();
-    check(loaded.load(pattern) && loaded.production().sizes.size() == 3 && loaded.production().rules.size() == 1
-          && loaded.production().sizes.back().name == "48/170"
-          && loaded.production().sizes.back().measurements.value("Chest") == 1010
-          && loaded.production().sizes.back().measurements.value("Sleeve") == 610
+    check(loaded.load(pattern) && loaded.production().sizes.size() == 9 && loaded.production().rules.size() == 8
+          && loaded.production().rules[4].offset == QPointF(30, 3)
+          && loaded.production().rules[5].size == "49/173"
+          && loaded.production().rules[5].offset == QPointF(50, 10)
+          && loaded.production().rules.back().offset == QPointF(70, 12)
+          && loaded.production().sizes.front().measurements.value("Waist") == 780
+          && loaded.production().sizes.front().measurements.value(QStringLiteral("Обхват бёдер")) == 980
+          && loaded.production().sizes[5].name == "49/173"
+          && loaded.production().sizes[7].name == "51/174"
+          && loaded.production().sizes.back().name == QStringLiteral("ГОСТ 31396-2009 164-92-90")
+          && loaded.production().sizes.back().measurements.value("height") == 1640
+          && loaded.production().sizes.back().measurements.value("bust") == 920
+          && loaded.production().sizes.back().measurements.value("hip") == 900
+          && loaded.production().sizes[5].measurements.value("Chest") == 1050
+          && loaded.production().sizes[5].measurements.value("Sleeve") == 631
           && loaded.production().placements.size() == 1 && loaded.production().placements.front().size == "L"
           && loaded.production().fabricWidth == 1450 && loaded.production().pieceClearanceMm == 5.5
           && loaded.production().fabricRepeatMm == QPointF(20, 40)
@@ -1052,6 +1355,18 @@ int main(int argc, char** argv) {
     action(draftWindow, "Redo Edit Modeling Step").trigger();
     verifyRotation(-90, {0, -130});
 
+    const auto sequenceProject = temp.filePath("modeling-sequence.sofit");
+    check(loaded.save(sequenceProject), "Save a modeling sequence as a reusable project");
+    action(draftWindow, "Undo Edit Modeling Step").trigger();
+    action(draftWindow, "Undo Rotate Construction").trigger();
+    verifyRotation(0, {130, 0});
+    chooseFile(action(draftWindow, QStringLiteral("Применить операции из проекта…")), sequenceProject);
+    verifyRotation(-90, {0, -130});
+    action(draftWindow, QStringLiteral("Undo Применение последовательности операций")).trigger();
+    verifyRotation(0, {130, 0});
+    action(draftWindow, QStringLiteral("Redo Применение последовательности операций")).trigger();
+    verifyRotation(-90, {0, -130});
+
     const auto seamFile = temp.filePath("seam-workflow.sofit");
     opc::PatternDocument seamFixture;
     seamFixture.pieces().append({QStringLiteral("Front"), 10});
@@ -1222,11 +1537,73 @@ int main(int argc, char** argv) {
     verifyLength(1.05);
     action(bodiceWindow, "Redo Edit Modeling Step").trigger();
     verifyLength(1.2);
+    runDialog<QDialog>(action(bodiceWindow, QStringLiteral("Part Assistant…")), [](QDialog& dialog) {
+        auto* report = dialog.findChild<QTreeWidget*>();
+        check(report && report->topLevelItemCount() == 1, "Open the Part Assistant with base-piece diagnostics");
+        int productionActions = 0;
+        QPushButton* edgeAllowance = nullptr;
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Edge Allowance…")
+                edgeAllowance = button;
+            if (button->text() == "Finished Measurements…" || button->text() == "Tech Pack Options…"
+                || button->text() == "Export Product Information PDF…")
+                ++productionActions;
+        }
+        check(productionActions == 3, "Give access to measurement and tech-pack commands from Part Assistant");
+        auto* piece = report->topLevelItem(0)->child(0);
+        for (int i = 0; i < piece->childCount(); ++i) {
+            auto* row = piece->child(i);
+            if (row->text(1).startsWith("Length") && row->text(1).contains(" · Allowance ")) {
+                report->setCurrentItem(row);
+                break;
+            }
+        }
+        check(edgeAllowance && edgeAllowance->isEnabled(), "Select a seam edge in Part Assistant");
+        QTimer::singleShot(0, [] {
+            auto* editor = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(editor && editor->windowTitle() == "Allowance for Selected Edges",
+                  "Edit the selected seam edge allowance from Part Assistant");
+            editor->reject();
+        });
+        edgeAllowance->click();
+        QPushButton* drill = nullptr;
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == QStringLiteral("Точка сверления…"))
+                drill = button;
+        }
+        report->setCurrentItem(report->topLevelItem(0)->child(0));
+        check(drill && drill->isEnabled(), "Offer drilling for a selected piece");
+        QTimer::singleShot(0, [] {
+            auto* editor = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(editor && editor->findChildren<QDoubleSpinBox*>().size() == 2,
+                  "Open coordinate entry for the drill mark");
+            editor->reject();
+        });
+        drill->click();
+        dialog.reject();
+    });
     runDialog<QDialog>(action(bodiceWindow, "Diagnose Pieces by Size…"), [](QDialog& dialog) {
-        const auto* report = dialog.findChild<QTreeWidget*>();
+        auto* report = dialog.findChild<QTreeWidget*>();
         check(report && report->topLevelItemCount() == 1 && report->topLevelItem(0)->childCount() == 3
               && report->topLevelItem(0)->child(0)->text(1) == "One closed contour",
               "Diagnose the modeled pieces");
+        report->setCurrentItem(report->topLevelItem(0)->child(0)->child(0));
+        auto* editPiece = dialog.findChild<QDialogButtonBox*>()->buttons().last();
+        for (auto* button : dialog.findChild<QDialogButtonBox*>()->buttons()) {
+            if (button->text() == QStringLiteral("Свойства детали…"))
+                editPiece = button;
+        }
+        check(editPiece->text() == QStringLiteral("Свойства детали…") && editPiece->isEnabled(),
+              "Edit the base piece directly from a selected diagnostic row");
+        QTimer::singleShot(0, [] {
+            auto* editor = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(editor && editor->windowTitle() == "Piece, Contour and Allowance", "Open the piece editor");
+            editor->findChild<QSpinBox*>()->setValue(3);
+            editor->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        });
+        editPiece->click();
+        check(report->topLevelItem(0)->child(0)->child(0)->text(1) == "3 per kit",
+              "Refresh the report after editing the cut quantity");
         dialog.reject();
     });
     const auto bodicePdf = temp.filePath("bodice.pdf");
@@ -1252,6 +1629,56 @@ int main(int argc, char** argv) {
         yoke.replace(i, entity);
     }
     yoke.production().sizes.append({"L", {{"width", 140}}});
+    {
+        auto drape = yoke;
+        auto draft = yokeDraft;
+        draft.points.append({"G", "0", "60"});
+        draft.points.append({"H", "width", "60"});
+        draft.edges.append({"secondGuide", "G", "H", {}});
+        check(drape.setParametricDraft(draft), "Create a second formula slash");
+        QVector<qsizetype> guideIndices;
+        for (qsizetype i = 0; i < drape.entities().size(); ++i) {
+            auto guide = drape.entities()[i];
+            if (guide.draftName != "guide" && guide.draftName != "secondGuide")
+                continue;
+            guide.layer = opc::Layer::Construction;
+            drape.replace(i, guide);
+            guideIndices.append(i);
+        }
+        check(guideIndices.size() == 2, "Find both formula slash guides");
+        const auto path = temp.filePath("drape.sofit");
+        check(drape.save(path), "Save the two-guide fixture");
+        MainWindow editor;
+        editor.show();
+        chooseFile(action(editor, "&Open"), path);
+        auto* guideTree = editor.findChild<QTreeWidget*>();
+        for (auto index : guideIndices)
+            guideTree->topLevelItem(index)->setSelected(true);
+        const auto command = QStringLiteral("Раздвижка по нескольким направляющим");
+        runDialog<QDialog>(action(editor, command + QStringLiteral("…")), [](QDialog& dialog) {
+            auto* accept = dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
+            const auto combos = dialog.findChildren<QComboBox*>();
+            combos[0]->setCurrentText("guide");
+            combos[2]->setCurrentText("secondGuide");
+            accept->click();
+            if (dialog.result() != QDialog::Accepted) {
+                combos[0]->setCurrentText("secondGuide");
+                combos[2]->setCurrentText("guide");
+                accept->click();
+            }
+            check(dialog.result() == QDialog::Accepted, "Apply both slashes in a valid order");
+        });
+        const auto verifyHistory = [&](qsizetype count) {
+            action(editor, "&Save").trigger();
+            check(drape.load(path) && drape.modelingHistory().size() == count,
+                  "Apply, undo and redo the entire drape sequence in one step");
+        };
+        verifyHistory(2);
+        action(editor, QStringLiteral("Undo ") + command).trigger();
+        verifyHistory(0);
+        action(editor, QStringLiteral("Redo ") + command).trigger();
+        verifyHistory(2);
+    }
     const auto yokePath = temp.filePath("yoke.sofit");
     check(yoke.save(yokePath), "Save the formula yoke fixture");
     MainWindow yokeWindow;

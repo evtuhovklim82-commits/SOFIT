@@ -9,6 +9,7 @@
 #include <QRectF>
 #include <QSaveFile>
 #include <QTextStream>
+#include <algorithm>
 #include <cmath>
 #include <QStringList>
 
@@ -230,14 +231,19 @@ bool exportFabricDxf(const QString& path, const PatternDocument& document,
     QTextStream stream(&file);
     stream.setRealNumberPrecision(16);
     DxfWriter dxf(stream);
-    writeHeader(dxf, {"0", "CUT", "FOLD", "GRAINLINE", "FABRIC"});
+    QStringList layers{"0", "CUT", "FOLD", "GRAINLINE", "FABRIC", "NOTCH", drillLayer};
+    if (std::ranges::any_of(document.entities(), [](const auto& entity) {
+            return entity.layer == Layer::Construction && entity.dxfLayer == pieceSymbolLayer;
+        }))
+        layers.append(pieceSymbolLayer);
+    writeHeader(dxf, layers);
     dxf.section("ENTITIES");
     dxf.polyline("FABRIC", QPolygonF(QRectF(0, 0, data.fabricWidth, usage.length)), true);
     QMap<QString, PatternDocument> graded;
     for (const auto& placement : data.placements) {
         if (!graded.contains(placement.size))
             graded.insert(placement.size, gradedPattern(document, placement.size, nullptr, GradeEdgeNames::Preserve));
-        const auto geometry = fabricPiece(graded.constFind(placement.size).value(), placement);
+        const auto geometry = fabricPiece(graded.constFind(placement.size).value(), placement, true, data.fabricShrinkagePercent);
         const bool onFold = !geometry.fold.isNull();
         auto outline = onFold ? openFoldContour(geometry.cut, geometry.fold) : geometry.cut;
         if (outline.size() < 3) {
@@ -247,6 +253,26 @@ bool exportFabricDxf(const QString& path, const PatternDocument& document,
         if (!onFold && outline.front() == outline.back())
             outline.removeLast();
         dxf.polyline("CUT", outline.translated(placement.position), !onFold);
+        dxf.lines("NOTCH", geometry.notches.translated(placement.position));
+        for (const auto& symbol : geometry.symbols) {
+            if (!symbolFitsContour(symbol, geometry.cut)) {
+                error = QStringLiteral("A production symbol is outside its cutting contour.");
+                return false;
+            }
+            // Flatten compensated circles (ellipses) to within 0.01 mm.
+            const auto zoom = QTransform::fromScale(100, 100);
+            const auto unzoom = QTransform::fromScale(0.01, 0.01);
+            for (const auto& stroke : symbol.toSubpathPolygons(zoom))
+                dxf.polyline(pieceSymbolLayer, unzoom.map(stroke).translated(placement.position), false);
+        }
+        for (const auto& point : geometry.drillPoints) {
+            if (!geometry.cut.containsPoint(point, Qt::OddEvenFill)) {
+                error = QStringLiteral("A drill point is outside its cutting contour.");
+                return false;
+            }
+            dxf.entity("POINT", drillLayer, "AcDbPoint");
+            dxf.point(10, point + placement.position);
+        }
         if (onFold)
             dxf.line("FOLD", geometry.fold.p1() + placement.position, geometry.fold.p2() + placement.position);
         if (document.pieces()[placement.piece].grainAngle)

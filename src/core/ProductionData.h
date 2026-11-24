@@ -47,6 +47,7 @@ struct ProductionData {
     double pieceClearanceMm = 0;
     QPointF fabricRepeatMm;
     QVector<QRectF> fabricFlaws;
+    QPointF fabricShrinkagePercent; // Across width (weft), along length (warp).
 
     void removePiece(qsizetype piece);
 };

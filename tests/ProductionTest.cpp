@@ -1,11 +1,13 @@
 #include "Production.h"
 #include "PatternDxf.h"
+#include "PatternPdf.h"
 
-#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 
@@ -19,7 +21,7 @@ void check(bool condition, const char* message) {
 }
 
 int main(int argc, char** argv) {
-    QCoreApplication app(argc, argv);
+    QGuiApplication app(argc, argv);
     using namespace opc;
 
     PatternDocument base;
@@ -113,6 +115,31 @@ int main(int argc, char** argv) {
     const auto tooWide = arrangeFabric(base, batch);
     check(tooWide.error == FabricLayoutError::TooWide && tooWide.failedCopy == 0
           && tooWide.placements.isEmpty(), "Fail atomically when an allowance exceeds the fabric width");
+
+    PatternDocument markerComparison;
+    auto& markerData = markerComparison.production();
+    markerData.fabricWidth = 1450;
+    markerData.pieceClearanceMm = 5;
+    markerData.directionalFabric = true;
+    markerData.fabricFlaws = {{100, 0, 50, 100}};
+    const QVector<QPointF> dimensions{{351, 242}, {472, 1023}, {595, 567}, {805, 1012},
+        {682, 541}, {824, 399}, {340, 636}, {489, 691}, {684, 761}, {270, 694}, {805, 345}, {572, 996}};
+    for (qsizetype i = 0; i < dimensions.size(); ++i) {
+        markerComparison.pieces().append({QString::number(i), 0, 1, {}, true, 90});
+        markerComparison.insert(i, {Shape::Rectangle, {}, dimensions[i], {}, i});
+        markerData.placements.append({i, {}, {}});
+    }
+    const auto improved = arrangeFabric(markerComparison, markerData);
+    check(improved.error == FabricLayoutError::None && improved.baselineLengthMm && improved.optimizedLengthMm
+          && *improved.baselineLengthMm - *improved.optimizedLengthMm > 60,
+          "Improve on the previous three searches with the same directional fabric, clearance and flaw");
+    markerData.placements = improved.placements;
+    const auto improvedReport = cuttingReport(markerComparison, markerData);
+    check(improvedReport.canExport(markerData.fabricWidth)
+          && qAbs(improvedReport.usage.length - *improved.optimizedLengthMm) < 1e-6,
+          "Verify the optimized cutting length and constraints independently");
+    std::cout << "12-copy marker: " << *improved.baselineLengthMm << " -> "
+              << *improved.optimizedLengthMm << " mm\n";
 
     PatternDocument triangle;
     triangle.pieces().append(Piece{"Triangle", 0});
@@ -306,6 +333,116 @@ int main(int argc, char** argv) {
           && triangle.save(marker) && reopenedMarker.load(marker)
           && reopenedMarker.production().fabricFlaws == flawed.fabricFlaws,
           "Verify and round-trip a marker with excluded fabric zones");
+
+    PatternDocument defectWindow;
+    defectWindow.pieces().append({"Test panel"});
+    defectWindow.insert(0, {Shape::Rectangle, {}, {40, 40}, {}, 0});
+    ProductionData windowMarker;
+    windowMarker.fabricWidth = 100;
+    windowMarker.fabricFlaws = {{0, 0, 15, 100}, {80, 0, 20, 100}, {15, 0, 65, 20}, {30, 60, 50, 40}};
+    windowMarker.placements = {{0, {}, {}}};
+    const auto windowLayout = arrangeFabric(defectWindow, windowMarker);
+    check(windowLayout.error == FabricLayoutError::None && windowLayout.baselineLengthMm
+          && windowLayout.optimizedLengthMm && *windowLayout.baselineLengthMm > *windowLayout.optimizedLengthMm
+          && windowLayout.placements.front().position == QPointF(30, 20),
+          "Use the pocket above a defect when edge candidates miss it");
+    windowMarker.placements = windowLayout.placements;
+    check(cuttingReport(defectWindow, windowMarker).canExport(windowMarker.fabricWidth),
+          "Validate the shorter marker against every defect");
+
+    auto firstModel = defectWindow;
+    auto secondModel = defectWindow;
+    firstModel.pieces().front().notches.append(25);
+    secondModel.replace(0, {Shape::Rectangle, {}, {50, 30}, {}, 0});
+    firstModel.production().sizes.append(PatternSize{"L", {}});
+    secondModel.production().sizes.append(PatternSize{"L", {}});
+    firstModel.production().rules.append({"L", 0, {40, 40}, {0, 10}});
+    PatternDocument mixed;
+    mixed.production().fabricWidth = 120;
+    QString modelError;
+    check(appendMarkerModel(mixed, firstModel, "L", "A", 2, modelError)
+          && appendMarkerModel(mixed, secondModel, "L", "B", 1, modelError), qPrintable(modelError));
+    check(mixed.pieces().size() == 2 && mixed.production().placements.size() == 3
+          && mixed.pieces()[0].name.startsWith("A") && mixed.pieces()[0].cutCount == 2
+          && mixed.pieces()[1].name.startsWith("B") && mixed.pieces()[1].cutCount == 1
+          && fabricPiece(mixed, mixed.production().placements.front()).cut.boundingRect().height() == 50,
+          "Keep independent geometry for equal size names and count each imported kit");
+    check(!appendMarkerModel(mixed, firstModel, "L", "A", 200, modelError)
+          && mixed.pieces().size() == 2 && mixed.production().placements.size() == 3,
+          "Reject an oversized import without changing the marker");
+    const auto firstCopy = mixed.production().placements.front();
+    auto reflectedCopy = firstCopy;
+    reflectedCopy.hand = CutHand::Right;
+    const auto normal = fabricPiece(mixed, firstCopy, true);
+    const auto reflected = fabricPiece(mixed, reflectedCopy, true);
+    check(normal.notches.elementCount() == 2 && reflected.notches.elementCount() == 2
+          && std::abs(normal.notches.elementAt(0).x + reflected.notches.elementAt(0).x
+                      - normal.cut.boundingRect().width()) < 1e-6,
+          "Reflect a production notch together with the cutting outline");
+    auto& mixedOrder = mixed.production();
+    mixedOrder.fabricFlaws = {{0, 0, 120, 28}, {42, 35, 20, 50}};
+    mixedOrder.pieceClearanceMm = 4;
+    mixedOrder.fabricRepeatMm = {10, 10};
+    const auto combined = arrangeFabric(mixed, mixedOrder);
+    check(combined.error == FabricLayoutError::None, "Arrange pieces from two models");
+    mixedOrder.placements = combined.placements;
+    const auto inspectedMixed = cuttingReport(mixed, mixedOrder);
+    const auto kits = cuttingKitRows(mixed, inspectedMixed);
+    check(inspectedMixed.canExport(120) && kits.size() == 2
+          && kits[0].copies() == 2 && kits[1].copies() == 1,
+          "Preserve individual kit quantities while respecting defects, clearance and repeat");
+    auto onDefect = mixedOrder;
+    onDefect.placements.front().position = {0, 0};
+    check(cuttingReport(mixed, onDefect).usage.flawConflicts > 0,
+          "Reject a mixed marker when a kit placement is moved onto a defect");
+    check(mixed.save(marker) && reopenedMarker.load(marker) && reopenedMarker.pieces() == mixed.pieces()
+          && reopenedMarker.production().fabricFlaws == mixedOrder.fabricFlaws
+          && cuttingReport(reopenedMarker, reopenedMarker.production()).canExport(120),
+          "Save and reopen a mixed-model marker");
+    const auto mixedDxf = temp.filePath("mixed.dxf");
+    check(exportFabricDxf(mixedDxf, mixed, mixed.production(), dxfError)
+          && exportFabricPdf(temp.filePath("mixed.pdf"), mixed, mixed.production(), {}, dxfError), qPrintable(dxfError));
+    QFile markedMarker(mixedDxf);
+    check(markedMarker.open(QIODevice::ReadOnly | QIODevice::Text)
+          && markedMarker.readAll().contains("LINE\n100\nAcDbEntity\n8\nNOTCH\n"),
+          "Write production notches as DXF lines on their own layer");
+
+    PatternDocument compensated;
+    compensated.pieces().append({"Compensated panel"});
+    compensated.pieces()[0].grainAngle = 0;
+    compensated.insert(0, {Shape::Rectangle, {}, {80, 90}, {}, 0});
+    auto& shrinkage = compensated.production();
+    shrinkage.fabricWidth = 105;
+    shrinkage.fabricShrinkagePercent = {10, 20};
+    shrinkage.placements = {{0, {}, {}}};
+    const auto physical = fabricPiece(compensated, shrinkage.placements.front(), false, shrinkage.fabricShrinkagePercent);
+    check(qAbs(physical.cut.boundingRect().width() - 100) < 1e-7
+          && qAbs(physical.cut.boundingRect().height() - 100) < 1e-7,
+          "Apply independent inverse shrinkage after rotating to fabric axes");
+    check(arrangeFabric(compensated, shrinkage).error == FabricLayoutError::None
+          && qAbs(cuttingReport(compensated, shrinkage).usage.length - 100) < 1e-7,
+          "Use compensated geometry for packing and consumption");
+    const auto compensatedFile = temp.filePath("compensated.sofit");
+    check(compensated.save(compensatedFile) && reopenedMarker.load(compensatedFile)
+          && reopenedMarker.production().fabricShrinkagePercent == QPointF(10, 20),
+          "Persist shrinkage with the marker");
+    const auto shrinkDxf = temp.filePath("compensated.dxf");
+    check(exportFabricDxf(shrinkDxf, compensated, shrinkage, dxfError)
+          && exportFabricPdf(temp.filePath("compensated.pdf"), compensated, shrinkage, {}, dxfError),
+          qPrintable(dxfError));
+    QFile compensatedDxf(shrinkDxf);
+    check(compensatedDxf.open(QIODevice::ReadOnly) && compensatedDxf.readAll().contains("20\n-100\n"),
+          "Export the compensated physical length to DXF");
+    auto tooNarrow = shrinkage;
+    tooNarrow.fabricWidth = 95;
+    check(arrangeFabric(compensated, tooNarrow).error == FabricLayoutError::TooWide
+          && !cuttingReport(compensated, tooNarrow).canExport(tooNarrow.fabricWidth),
+          "Reject a fabric that only fit before compensation");
+    auto invalidShrinkage = shrinkage;
+    invalidShrinkage.fabricShrinkagePercent.setY(100);
+    check(!loadProduction(saveProduction(invalidShrinkage), 1, reopenedMarker.production())
+          && arrangeFabric(compensated, invalidShrinkage).error == FabricLayoutError::InvalidShrinkage,
+          "Reject a singular shrinkage factor");
 
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());

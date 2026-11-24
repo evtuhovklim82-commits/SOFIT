@@ -4,6 +4,13 @@
 #include <QPainterPath>
 
 namespace opc {
+enum class PieceSymbol { Cross, Circle, Buttonhole, WarpRepeat, WeftRepeat };
+inline const QString pieceSymbolLayer = QStringLiteral("SOFIT_SYMBOL");
+
+QVector<Entity> buildPieceSymbol(PieceSymbol type, qsizetype piece, QPointF center,
+                                 double lengthMm, double angleDegrees);
+bool symbolFitsContour(const QPainterPath& symbol, const QPolygonF& contour);
+
 struct PieceMarkings {
     QPainterPath notches;
     QPainterPath grainline;

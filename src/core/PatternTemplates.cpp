@@ -135,6 +135,47 @@ std::optional<PatternDocument> draftBibApron(const ApronMeasurements& input, QSt
     return document;
 }
 
+std::optional<PatternDocument> draftShirtCuff(const ShirtCuffMeasurements& input, QString* error) {
+    ParametricDraft draft{
+        {{"cuff_wrist", input.wristMm}, {"cuff_ease", input.easeMm},
+         {"cuff_overlap", input.overlapMm}, {"cuff_depth", input.depthMm}},
+        {{"cuff_opening", "positive(cuff_wrist) + positive(cuff_ease)"},
+         {"cuff_lap", "positive(cuff_overlap)"},
+         {"cuff_width", "cuff_opening + cuff_lap"},
+         {"cuff_half_lap", "cuff_lap / 2"},
+         {"cuff_fold_y", "positive(cuff_depth)"}},
+        {{"CuffTL", "0", "0"}, {"CuffTR", "cuff_width", "0"},
+         {"CuffBR", "cuff_width", "2 * cuff_fold_y"}, {"CuffBL", "0", "CuffBR.y"},
+         {"CuffFL", "0", "cuff_fold_y"}, {"CuffFR", "cuff_width", "CuffFL.y"},
+         {"CuffLapTop", "cuff_opening", "0"}, {"CuffLapBottom", "cuff_opening", "cuff_fold_y"},
+         {"CuffButton", "cuff_half_lap", "cuff_fold_y / 2"},
+         {"CuffButtonhole", "cuff_opening + cuff_half_lap", "CuffButton.y"}},
+        {{"cuff_top", "CuffTL", "CuffTR", {}}, {"cuff_right", "CuffTR", "CuffBR", {}},
+         {"cuff_bottom", "CuffBR", "CuffBL", {}}, {"cuff_left", "CuffBL", "CuffTL", {}},
+         {"cuff_fold", "CuffFL", "CuffFR", {}},
+         {"cuff_overlap_guide", "CuffLapTop", "CuffLapBottom", {}}}
+    };
+    PatternDocument document;
+    if (!document.setParametricDraft(std::move(draft), error))
+        return std::nullopt;
+    document.pieces().append({QStringLiteral("Манжета рубашки"), 10, 2, {}, true, 0});
+    for (qsizetype i = 0; i < document.entities().size(); ++i) {
+        auto entity = document.entities()[i];
+        entity.piece = 0;
+        if (entity.shape == Shape::Point || entity.draftName == QStringLiteral("cuff_fold")
+            || entity.draftName == QStringLiteral("cuff_overlap_guide"))
+            entity.layer = Layer::Construction;
+        document.replace(i, entity);
+    }
+    const auto geometry = analyzePiece(document, 0);
+    if (geometry.error != ContourError::None || geometry.allowanceFailed || geometry.allowance.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("По этим меркам не удалось построить контур манжеты.");
+        return std::nullopt;
+    }
+    return document;
+}
+
 std::optional<PatternDocument> draftPatchPocket(const PatchPocketMeasurements& input, QString* error) {
     ParametricDraft draft{
         {{"pocket_width", input.widthMm}, {"pocket_height", input.heightMm},

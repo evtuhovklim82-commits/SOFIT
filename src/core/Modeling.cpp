@@ -106,6 +106,45 @@ std::optional<EdgePair> joinEdges(const PatternDocument& document, qsizetype fir
     return joined;
 }
 
+std::optional<Entity> tangentCurve(const Entity& reference, const Entity& curve) {
+    if (!validEdge(reference) || !validEdge(curve) || curve.shape != Shape::Curve
+        || !curve.draftName.isEmpty() || reference.layer != curve.layer || reference.piece != curve.piece)
+        return {};
+    std::optional<QPointF> shared;
+    QPointF inward;
+    for (const auto point : {curve.a, curve.b}) {
+        for (const auto refEnd : {reference.a, reference.b}) {
+            if (distance(point, refEnd) > endpointTolerance)
+                continue;
+            if (shared)
+                return {};
+            shared = point;
+            inward = (reference.shape == Shape::Curve ? reference.control
+                : refEnd == reference.a ? reference.b : reference.a) - refEnd;
+        }
+    }
+    if (!shared)
+        return {};
+    const double magnitude = distance(inward, {});
+    const double handle = distance(curve.control, *shared);
+    if (magnitude <= endpointTolerance || handle <= endpointTolerance)
+        return {};
+    auto adjusted = curve;
+    adjusted.control = *shared - inward * (handle / magnitude);
+    const auto far = *shared == curve.a ? curve.b : curve.a;
+    if (distance(far, adjusted.control) <= endpointTolerance)
+        return {};
+    const auto chord = far - *shared;
+    const auto control = adjusted.control - *shared;
+    const double cross = control.x() * chord.y() - control.y() * chord.x();
+    if (std::abs(cross) <= endpointTolerance * distance(chord, {})) {
+        const double along = QPointF::dotProduct(chord, control);
+        if (along <= 0 || along > QPointF::dotProduct(chord, chord))
+            return {};
+    }
+    return validEdge(adjusted) ? std::optional(adjusted) : std::nullopt;
+}
+
 std::optional<PatternDocument> editGeometry(const PatternDocument& document, qsizetype index,
                                             QPointF a, QPointF b, QPointF control, bool moveConnected) {
     const auto& entities = document.entities();

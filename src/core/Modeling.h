@@ -12,6 +12,9 @@ std::optional<EdgePair> splitEdge(const Entity& edge, double t);
 std::optional<EdgePair> joinEdges(const PatternDocument& document, qsizetype first,
                                   qsizetype second, double maxGapMm);
 
+// Align the editable quadratic's handle at its shared endpoint with a reference edge.
+std::optional<Entity> tangentCurve(const Entity& reference, const Entity& curve);
+
 // Update a manual point or edge and optionally carry coincident endpoints in its piece and layer.
 std::optional<PatternDocument> editGeometry(const PatternDocument& document, qsizetype index,
                                             QPointF a, QPointF b, QPointF control, bool moveConnected);

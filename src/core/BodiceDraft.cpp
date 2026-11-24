@@ -9,6 +9,104 @@
 
 namespace opc {
 
+static bool addSkirtDraft(ParametricDraft& draft, const DressSkirtMeasurements& skirt,
+                          double waist, double waistEase, const QString& verticalOrigin) {
+    const auto positive = [](double v) { return std::isfinite(v) && v > 0 && v <= 3000; };
+    const auto ease = [](double v) { return std::isfinite(v) && v >= 0 && v <= 500; };
+    if (!positive(waist) || !ease(waistEase))
+        return false;
+    const double hip = (skirt.hip + skirt.hipEase) / 4;
+    const double suppression = hip - (waist + waistEase) / 4;
+    const std::array skirtLengths{skirt.hip, skirt.hipDepth, skirt.length, skirt.dartLength};
+    if (!std::ranges::all_of(skirtLengths, positive) || !ease(skirt.hipEase)
+        || !std::isfinite(skirt.hemFlare) || skirt.hemFlare < 0 || skirt.hemFlare > 1500
+        || suppression < 6 || suppression > hip * 0.35
+        || skirt.dartLength >= skirt.hipDepth || skirt.hipDepth + 20 >= skirt.length)
+        return false;
+
+    draft.measurements.append({
+        {"hip", skirt.hip}, {"hip_ease", skirt.hipEase}, {"hip_depth", skirt.hipDepth},
+        {"skirt_length", skirt.length}, {"hem_flare", skirt.hemFlare},
+        {"skirt_dart_length", skirt.dartLength}
+    });
+    draft.parameters.append({
+        {"skirt_hip", "(hip + hip_ease) / 4"},
+        {"skirt_suppression", "skirt_hip - (waist + waist_ease) / 4"},
+        {"skirt_waist", "skirt_hip - skirt_suppression / 2"},
+        {"skirt_dart_half", "skirt_suppression / 4"},
+        {"skirt_hem", "skirt_hip + hem_flare / 4"}
+    });
+    for (const bool front : {true, false}) {
+        const QString p = front ? "DF" : "DB";
+        const QString prefix = front ? "skirt_front_" : "skirt_back_";
+        const QString offset = front ? "0" : "skirt_hem + 40";
+        const auto point = [&](const QString& name, const QString& x, const QString& y) {
+            draft.points.append({p + name, offset + " + (" + x + ")",
+                                 verticalOrigin + " + (" + y + ")"});
+        };
+        point("CenterWaist", "0", "0");
+        point("SideWaist", "skirt_waist", "0");
+        point("SideHip", "skirt_hip", "hip_depth");
+        point("HipControl", "skirt_hip", "hip_depth / 2");
+        point("SideHem", "skirt_hem", "skirt_length");
+        point("CenterHem", "0", "skirt_length");
+        point("DartLeft", "skirt_waist / 2 - skirt_dart_half", "0");
+        point("DartRight", "skirt_waist / 2 + skirt_dart_half", "0");
+        point("DartTip", "skirt_waist / 2", "skirt_dart_length");
+        const auto edge = [&](const QString& name, const QString& a, const QString& b,
+                              const QString& control = {}) {
+            draft.edges.append({prefix + name, p + a, p + b, control.isEmpty() ? control : p + control});
+        };
+        edge("waist", "CenterWaist", "SideWaist");
+        edge("side_hip", "SideWaist", "SideHip", "HipControl");
+        edge("side_hem", "SideHip", "SideHem");
+        edge("hem", "SideHem", "CenterHem");
+        edge("center", "CenterHem", "CenterWaist");
+        edge("dart_left", "DartLeft", "DartTip");
+        edge("dart_right", "DartTip", "DartRight");
+    }
+    return true;
+}
+
+std::optional<PatternDocument> draftFittedSkirt(double waist, double waistEase,
+                                                const DressSkirtMeasurements& skirt, QString* error) {
+    PatternDocument document;
+    ParametricDraft draft;
+    draft.measurements = {{"waist", waist}, {"waist_ease", waistEase}};
+    if (!addSkirtDraft(draft, skirt, waist, waistEase, QStringLiteral("0"))) {
+        if (error)
+            *error = QStringLiteral("Проверьте мерки талии и бёдер, длину юбки и вытачек.");
+        return std::nullopt;
+    }
+    document.pieces().append({
+        {QStringLiteral("Юбка, перед со сгибом"), 0, 1, {}, true, 90},
+        {QStringLiteral("Юбка, спинка со сгибом"), 0, 1, {}, true, 90}
+    });
+    if (!document.setParametricDraft(std::move(draft), error))
+        return std::nullopt;
+    for (qsizetype i = 0; i < document.entities().size(); ++i) {
+        auto edge = document.entities()[i];
+        if (edge.shape == Shape::Point)
+            continue;
+        edge.piece = edge.draftName.startsWith("skirt_front_") ? 0 : 1;
+        if (edge.draftName.contains("_dart_"))
+            edge.layer = Layer::Construction;
+        document.replace(i, edge);
+    }
+    for (qsizetype i = 0; i < document.pieces().size(); ++i) {
+        if (analyzePiece(document, i).error != ContourError::None) {
+            if (error)
+                *error = QStringLiteral("Не удалось построить замкнутый контур юбки.");
+            return std::nullopt;
+        }
+    }
+    if (!document.addSeamLink({{"skirt_front_side_hip", "skirt_front_side_hem"},
+                               {"skirt_back_side_hip", "skirt_back_side_hem"},
+                               false, false, 0, 0.1, 2}, error))
+        return std::nullopt;
+    return document;
+}
+
 static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements& m,
                                                        const DressSkirtMeasurements* skirt,
                                                        const BodiceOptions& options,
@@ -196,56 +294,8 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             document.pieces().append({"Puff sleeve band (cut in pairs)", 0, 4, {}, true, 0});
         }
     } else {
-        const double hip = (skirt->hip + skirt->hipEase) / 4;
-        const double suppression = hip - (m.waist + m.waistEase) / 4;
-        const std::array skirtLengths{skirt->hip, skirt->hipDepth, skirt->length, skirt->dartLength};
-        if (!std::ranges::all_of(skirtLengths, positive) || !ease(skirt->hipEase)
-            || !std::isfinite(skirt->hemFlare) || skirt->hemFlare < 0 || skirt->hemFlare > 1500
-            || suppression < 6 || suppression > hip * 0.35
-            || skirt->dartLength >= skirt->hipDepth || skirt->hipDepth + 20 >= skirt->length)
+        if (!addSkirtDraft(draft, *skirt, m.waist, m.waistEase, QStringLiteral("bodice_length + 40")))
             return fail(QStringLiteral("Check the skirt waist suppression, dart, hip depth and length."));
-
-        draft.measurements.append({
-            {"hip", skirt->hip}, {"hip_ease", skirt->hipEase}, {"hip_depth", skirt->hipDepth},
-            {"skirt_length", skirt->length}, {"hem_flare", skirt->hemFlare},
-            {"skirt_dart_length", skirt->dartLength}
-        });
-        draft.parameters.append({
-            {"skirt_hip", "(hip + hip_ease) / 4"},
-            {"skirt_suppression", "skirt_hip - (waist + waist_ease) / 4"},
-            {"skirt_waist", "skirt_hip - skirt_suppression / 2"},
-            {"skirt_dart_half", "skirt_suppression / 4"},
-            {"skirt_hem", "skirt_hip + hem_flare / 4"}
-        });
-        for (const bool front : {true, false}) {
-            const QString p = front ? "DF" : "DB";
-            const QString prefix = front ? "skirt_front_" : "skirt_back_";
-            const QString offset = front ? "0" : "skirt_hem + 40";
-            const auto point = [&](const QString& name, const QString& x, const QString& y) {
-                draft.points.append({p + name, offset + " + (" + x + ")",
-                                     "bodice_length + 40 + (" + y + ")"});
-            };
-            point("CenterWaist", "0", "0");
-            point("SideWaist", "skirt_waist", "0");
-            point("SideHip", "skirt_hip", "hip_depth");
-            point("HipControl", "skirt_hip", "hip_depth / 2");
-            point("SideHem", "skirt_hem", "skirt_length");
-            point("CenterHem", "0", "skirt_length");
-            point("DartLeft", "skirt_waist / 2 - skirt_dart_half", "0");
-            point("DartRight", "skirt_waist / 2 + skirt_dart_half", "0");
-            point("DartTip", "skirt_waist / 2", "skirt_dart_length");
-            const auto edge = [&](const QString& name, const QString& a, const QString& b,
-                                  const QString& control = {}) {
-                draft.edges.append({prefix + name, p + a, p + b, control.isEmpty() ? control : p + control});
-            };
-            edge("waist", "CenterWaist", "SideWaist");
-            edge("side_hip", "SideWaist", "SideHip", "HipControl");
-            edge("side_hem", "SideHip", "SideHem");
-            edge("hem", "SideHem", "CenterHem");
-            edge("center", "CenterHem", "CenterWaist");
-            edge("dart_left", "DartLeft", "DartTip");
-            edge("dart_right", "DartTip", "DartRight");
-        }
         document.pieces().append({
             {"Dress skirt front half (center fold)", 0, 1, {}, true, 90},
             {"Dress skirt back half (center fold)", 0, 1, {}, true, 90}

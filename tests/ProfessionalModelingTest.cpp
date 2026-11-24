@@ -1,11 +1,15 @@
 #include "BodiceDraft.h"
 #include "ContourModeling.h"
 #include "FittingBlocks.h"
+#include "Modeling.h"
+#include "PieceMarkings.h"
 #include "PatternDxf.h"
 #include "PatternPdf.h"
 #include "PatternTemplates.h"
 #include "Production.h"
 
+#include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -88,6 +92,17 @@ void roundTripAndExport(const PatternDocument& document, const QString& size = {
 }
 
 void checkModeling() {
+    const Entity ref{Shape::Line, {0, 0}, {10, 0}};
+    const Entity secondCurve{Shape::Curve, {10, 0}, {40, 15}, {13, 4}};
+    const auto tangent = tangentCurve(ref, secondCurve);
+    check(tangent && tangent->control == QPointF(15, 0) && tangent->a == secondCurve.a
+          && tangent->b == secondCurve.b, "Align the quadratic tangent and keep the five mm handle");
+    auto reversed = secondCurve;
+    std::swap(reversed.a, reversed.b);
+    const auto reverseTangent = tangentCurve(ref, reversed);
+    check(reverseTangent && reverseTangent->control == QPointF(15, 0),
+          "Use the same tangent when the selected quadratic runs in reverse");
+
     PatternDocument panel;
     panel.pieces().append({"Panel", 4});
     panel.insert(0, {Shape::Rectangle, {0, 0}, {100, 80}, {}, 0});
@@ -141,6 +156,83 @@ void checkModeling() {
     panel.production().rules.clear();
     const auto transferred = modelContour(panel, 0, ContourOperation::TransferDartToOutlet, {left, right, outlet});
     check(transferred.edit.has_value(), transferred.error);
+    auto curvedDart = curved;
+    auto hem = curvedDart.entities()[2];
+    hem.seamAllowanceMm.reset();
+    hem.seamNotches.clear();
+    curvedDart.replace(2, hem);
+    const auto curvedLeft = addGuide(curvedDart, {40, 0}, apex);
+    const auto curvedRight = addGuide(curvedDart, apex, {60, 0});
+    const auto curvedOutlet = addGuide(curvedDart, apex, {50, 90});
+    const auto curvedTransfer = modelContour(curvedDart, 0, ContourOperation::TransferDartToOutlet,
+                                             {curvedLeft, curvedRight, curvedOutlet});
+    check(curvedTransfer.edit.has_value(), curvedTransfer.error);
+    const auto& curvedOutput = curvedTransfer.edit->document;
+    double hemLength = 0;
+    int curvedEdges = 0;
+    for (const auto& edge : curvedOutput.entities()) {
+        if (edge.shape == Shape::Curve) {
+            hemLength += seamLength(edge).value_or(0);
+            ++curvedEdges;
+        }
+    }
+    check(curvedEdges == 2 && std::abs(hemLength - seamLength(hem).value_or(0)) < 0.003,
+          "Transfer a dart to the middle of a quadratic edge and preserve both exact subcurves");
+    roundTripAndExport(curvedOutput);
+
+    auto splitSource = curvedDart;
+    splitSource.pieces()[0].allowanceMm = 0;
+    const auto secondOutlet = addGuide(splitSource, apex, {100, 40});
+    const auto splitDart = modelContour(splitSource, 0, ContourOperation::SplitDart,
+                                        {curvedLeft, curvedRight, curvedOutlet, secondOutlet}, 35);
+    check(splitDart.edit.has_value(), "Split dart: " + splitDart.error);
+    check(!modelContour(splitSource, 0, ContourOperation::SplitDart,
+                        {curvedLeft, curvedRight, curvedOutlet, secondOutlet}, 100).edit,
+          "Reject full intake through one outlet in the splitting operation");
+    const auto& splitDocument = splitDart.edit->document;
+    const auto& splitEdges = splitDocument.entities();
+    double splitIntake = 0;
+    int dartTips = 0;
+    for (qsizetype i = 0; i + 1 < splitEdges.size(); ++i) {
+        const auto& a = splitEdges[i];
+        const auto& b = splitEdges[i + 1];
+        if (a.shape != Shape::Line || b.shape != Shape::Line
+            || QLineF(a.b, apex).length() > 13)
+            continue;
+        check(near(QLineF(a.a, a.b).length(), QLineF(b.a, b.b).length()),
+              "Each shortened split dart has equal legs");
+        const auto v = a.a - apex, w = b.b - apex;
+        const auto intake = std::abs(std::atan2(v.x() * w.y() - v.y() * w.x(), QPointF::dotProduct(v, w)));
+        const double share = intake / (2 * std::atan(10.0 / 35));
+        check(near(share, 0.35) || near(share, 0.65), "Open each outlet by its own intake share");
+        splitIntake += intake;
+        ++dartTips;
+    }
+    check(dartTips == 2 && near(splitIntake, 2 * std::atan(10.0 / 35)),
+          "Splitting preserves total angular intake");
+    roundTripAndExport(splitDocument);
+
+    auto mergeSource = panel;
+    const auto bottomLeft = addGuide(mergeSource, apex, {45, 80});
+    const auto bottomRight = addGuide(mergeSource, apex, {55, 80});
+    const auto merged = modelContour(mergeSource, 0, ContourOperation::MergeDarts,
+                                     {left, right, bottomLeft, bottomRight, outlet});
+    check(merged.edit.has_value(), "Merge darts: " + merged.error);
+    QVector<QPointF> legs;
+    for (const auto& edge : merged.edit->document.entities()) {
+        if (edge.a == apex)
+            legs.append(edge.b - apex);
+        if (edge.b == apex)
+            legs.append(edge.a - apex);
+    }
+    check(legs.size() == 2 && near(QLineF({}, legs[0]).length(), QLineF({}, legs[1]).length()),
+          "Merged dart has two equal legs");
+    const auto v = legs[0], w = legs[1];
+    check(near(std::abs(std::atan2(v.x() * w.y() - v.y() * w.x(), QPointF::dotProduct(v, w))),
+               2 * std::atan(10.0 / 35) + 2 * std::atan(5.0 / 45)),
+          "Merging preserves total angular intake");
+    roundTripAndExport(merged.edit->document);
+
     auto open = transferred.edit->document;
     QVector<qsizetype> guides;
     for (qsizetype i = 0; i < open.entities().size(); ++i) {
@@ -335,6 +427,24 @@ void checkRotationHistory() {
           "Removing rotation restores formula geometry");
 
     check(pattern.appendContour(0, ContourOperation::Cut, {guide}, 0, &error), error);
+    QTemporaryDir sequenceDirectory;
+    const auto sequenceFile = sequenceDirectory.filePath("sequence.sofit");
+    check(pattern.save(sequenceFile, &error), error);
+    PatternDocument savedSequence;
+    check(savedSequence.load(sequenceFile, &error), error);
+    auto replayed = edited;
+    check(replayed.applyModelingSequence(savedSequence, &error), error);
+    check(replayed.modelingHistory() == pattern.modelingHistory()
+          && replayed.pieces() == pattern.pieces()
+          && namedEdge(replayed, "@2:seam-A") >= 0,
+          "Replay a saved rotation and the contour cut that depends on its output");
+    auto incompatible = edited;
+    auto invalidGuide = incompatible.entities()[guide];
+    invalidGuide.layer = Layer::Main;
+    incompatible.replace(guide, invalidGuide);
+    check(!incompatible.applyModelingSequence(savedSequence, &error)
+          && incompatible.modelingHistory().isEmpty() && incompatible.pieces().size() == 1,
+          "An incompatible operation leaves the destination unchanged");
     const auto original = pattern.modelingHistory();
     const auto stableName = QStringLiteral("@2:seam-A");
     const auto seam = pattern.entities()[namedEdge(pattern, stableName)];
@@ -534,6 +644,27 @@ void checkContourHistory() {
           "Transfer the dart around the formula apex in both sizes");
     roundTripAndExport(dart, "L");
 
+    auto splitDraft = draft;
+    splitDraft.points.append({"O2", "width/2", "height"});
+    splitDraft.edges.append({"outlet2", "P", "O2", {}});
+    auto splitHistory = formulaPanel(splitDraft, {"cut", "legA", "legB", "outlet", "outlet2"});
+    splitHistory.production().sizes = dart.production().sizes;
+    check(splitHistory.appendContour(0, ContourOperation::SplitDart,
+        {namedEdge(splitHistory, "legA"), namedEdge(splitHistory, "legB"),
+         namedEdge(splitHistory, "outlet"), namedEdge(splitHistory, "outlet2")}, 35, &error), error);
+    check(splitHistory.validateParametricSizes(splitHistory.production(), &error), error);
+    const auto originalDarts = analyzePiece(gradedPattern(splitHistory, "L"), 0).contour;
+    auto splitSettings = splitHistory.modelingHistory().front();
+    splitSettings.spreadMm = 60;
+    check(splitHistory.editModelingStep(0, splitSettings, &error), error);
+    check(splitHistory.modelingHistory().front().spreadMm == 60
+          && analyzePiece(gradedPattern(splitHistory, "L"), 0).contour != originalDarts,
+          "Changing a saved dart share replays the outlet geometry for the graded size");
+    splitSettings.spreadMm = 100;
+    check(!splitHistory.editModelingStep(0, splitSettings, &error)
+          && splitHistory.modelingHistory().front().spreadMm == 60, "Keep the previous share on failed replay");
+    roundTripAndExport(splitHistory, "L");
+
     draft.edges.removeFirst();
     draft.edges += {{"topLeft", "A", "M1", {}}, {"topRight", "M2", "B", {}}};
     auto openDart = formulaPanel(draft, {"cut", "outlet"});
@@ -545,6 +676,173 @@ void checkContourHistory() {
           && analyzePiece(gradedPattern(openDart, "L"), 0).contour.contains(QPointF(130, 40)),
           "Close the formula V and open a new outlet in both sizes");
     roundTripAndExport(openDart, "L");
+}
+
+void checkCurvedSpread() {
+    const ParametricDraft draft{
+        {{"width", 100}, {"height", 80}},
+        {},
+        {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "height"}, {"D", "0", "height"},
+         {"Control", "width / 2", "-20"}, {"E", "width / 2", "-10"}, {"F", "width / 2", "height"}},
+        {{"top", "A", "B", "Control"}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}},
+         {"left", "D", "A", {}}, {"guide", "E", "F", {}}}
+    };
+    for (const auto operation : {ContourOperation::Spread, ContourOperation::Pleat, ContourOperation::Gather}) {
+        auto pattern = formulaPanel(draft, {"guide"});
+        const auto topIndex = namedEdge(pattern, "top");
+        auto top = pattern.entities()[topIndex];
+        top.piece = 0;
+        pattern.replace(topIndex, top);
+        pattern.pieces()[0].allowanceMm = 2;
+        pattern.production().sizes.append({"L", {{"width", 120}, {"height", 100}}});
+        QString error;
+        check(pattern.appendContour(0, operation, {namedEdge(pattern, "guide")}, 20, &error), error);
+        check(pattern.validateParametricSizes(pattern.production(), &error), error);
+        const auto graded = gradedPattern(pattern, "L");
+        const auto geometry = analyzePiece(graded, 0);
+        check(geometry.error == ContourError::None && !geometry.allowanceFailed
+              && near(geometry.bounds.width(), 140), "Spread the curved seam by 20 mm in the graded size");
+        check(std::ranges::count(graded.entities(), Shape::Curve, &Entity::shape) == 2,
+              "Keep both exact quadratic halves");
+        const auto marks = std::ranges::count_if(graded.entities(), [](const Entity& entity) {
+            return entity.shape == Shape::Line && entity.layer == Layer::Construction;
+        });
+        check(marks == (operation == ContourOperation::Pleat ? 3 : operation == ContourOperation::Gather ? 2 : 0),
+              "Keep the correct number of pleat or gathering marks");
+        roundTripAndExport(pattern, "L");
+    }
+}
+
+void checkTransportedPleatsAndDerivedContour() {
+    const ParametricDraft draft{
+        {{"width", 100}, {"height", 80}}, {},
+        {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "height"}, {"D", "0", "height"},
+         {"E", "width / 4", "height"}, {"F", "width / 4", "0"},
+         {"G", "3 * width / 4", "0"}, {"H", "3 * width / 4", "height"},
+         {"Control", "3 * width / 4 + 5", "height / 2"}},
+        {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}},
+         {"left", "D", "A", {}}, {"first", "E", "F", {}}, {"second", "G", "H", "Control"}}
+    };
+    auto source = formulaPanel(draft, {"first", "second"});
+    source.production().sizes.append({"L", {{"width", 120}, {"height", 90}}});
+    auto derived = source;
+    QString error;
+    check(derived.deriveParametricPiece(0, "Cut panel", &error), error);
+    check(derived.moveDraftPoint("B", {0, -5}, &error), error);
+    for (const auto& name : {QString{}, QString("L")}) {
+        const auto graded = gradedPattern(derived, name);
+        check(analyzePiece(graded, 0).contour == analyzePiece(graded, 1).contour,
+              "Source and derived contours share formula updates across sizes");
+    }
+    roundTripAndExport(derived, "L");
+
+    // An assigned second guide has to survive the first cut without becoming a
+    // hidden duplicate; the older fold marks also have to survive the next cut.
+    auto assigned = source.entities()[namedEdge(source, "second")];
+    assigned.piece = 0;
+    source.replace(namedEdge(source, "second"), assigned);
+    auto pattern = source;
+    check(pattern.appendDrapeFormulas(0, {"first", "second"}, {"12", "width * 0.15"},
+        {ContourOperation::Pleat, ContourOperation::Pleat}, &error), error);
+    for (const auto& [size, width] : {std::pair{QString{}, 127.}, {QString("L"), 150.}}) {
+        const auto graded = gradedPattern(pattern, size);
+        const auto contour = analyzePiece(graded, 0);
+        check(contour.error == ContourError::None && near(contour.bounds.width(), width),
+              "Apply both formula widths after transporting the curved guide");
+        const auto marks = std::ranges::count_if(graded.entities(), [](const Entity& entity) {
+            return entity.piece == 0 && entity.layer == Layer::Construction;
+        });
+        check(marks == 6, "Retain both sets of pleat marks");
+        const auto mark = std::ranges::find_if(graded.entities(), [](const Entity& entity) {
+            return entity.piece == 0 && entity.layer == Layer::Construction && entity.shape == Shape::Curve;
+        });
+        check(mark != graded.entities().end() && near(mark->control.x() - mark->a.x(), 5),
+              "Translate the quadratic control with the guide");
+    }
+    QTemporaryDir directory;
+    PatternDocument reopened;
+    const auto file = directory.filePath("transported-pleats.sofit");
+    check(pattern.save(file, &error) && reopened.load(file, &error)
+          && reopened.modelingHistory() == pattern.modelingHistory(), error);
+    check(source.applyModelingSequence(reopened, &error), error);
+    check(near(analyzePiece(source, 0).bounds.width(), 127), "Replay the transported series from the library");
+    roundTripAndExport(reopened, "L");
+
+    PatternDocument destination;
+    ParametricDraft inputs;
+    inputs.measurements = {{"panel_width", 140}};
+    check(destination.setParametricDraft(inputs, &error), error);
+    check(!destination.insertConstruction(reopened, &error, {{"width", "unknown"}})
+          && destination.pieces().isEmpty(), "Reject an unknown library measurement atomically");
+    check(destination.insertConstruction(reopened, &error, {{"width", "panel_width"}}), error);
+    check(near(analyzePiece(destination, 0).bounds.width(), 173),
+          "Rebind an input used by both the contour and a replayed pleat formula");
+}
+
+void checkDrapeSequence() {
+    const ParametricDraft draft{
+        {{"width", 100}, {"height", 80}}, {},
+        {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "height"}, {"D", "0", "height"},
+         {"E", "width / 4", "-6"}, {"F", "width / 4", "height"},
+         {"G", "3 * width / 4", "-6"}, {"H", "3 * width / 4", "height"},
+         {"Control", "width / 2", "-16"}, {"Join", "3 * width / 4", "height / 2"},
+         {"Bend", "3 * width / 4 + 9", "height / 4"}},
+        {{"top", "A", "B", "Control"}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}},
+         {"left", "D", "A", {}}, {"first", "E", "F", {}},
+         {"second", "G", "Join", "Bend"}, {"third", "H", "Join", {}}}
+    };
+    auto pattern = formulaPanel(draft, {"first", "second", "third"});
+    const auto topIndex = namedEdge(pattern, "top");
+    auto top = pattern.entities()[topIndex];
+    top.piece = 0;
+    pattern.replace(topIndex, top);
+    pattern.production().sizes.append({"L", {{"width", 120}, {"height", 100}}});
+    const auto sourceCount = pattern.entities().size();
+    QString error;
+    check(!pattern.appendDrape(0, {"first", "first"}, {12, 18}, ContourOperation::Pleat, &error)
+          && pattern.entities().size() == sourceCount && pattern.modelingHistory().isEmpty(),
+          "Reject a consumed guide atomically after the first slash");
+    check(pattern.appendContour(0, ContourOperation::Spread, {namedEdge(pattern, "first")}, 12, &error), error);
+    const QVector<qsizetype> chain{namedEdge(pattern, "second"), namedEdge(pattern, "third")};
+    check(!pattern.appendContour(0, ContourOperation::Pleat, chain, 0, &error, "110 - width")
+          && error.contains("L") && pattern.modelingHistory().size() == 1,
+          "Reject a width formula that becomes negative in another size");
+    check(pattern.appendContour(0, ContourOperation::Pleat, chain, 0, &error, "width * 0.15"), error);
+    check(near(analyzePiece(pattern, 0).bounds.width(), 127), "Evaluate the base measurement for the pleat");
+    const auto graded = gradedPattern(pattern, "L");
+    const auto geometry = analyzePiece(graded, 0);
+    check(pattern.modelingHistory().size() == 2 && geometry.error == ContourError::None
+          && near(geometry.bounds.width(), 150), "Replay both slash widths for a graded piece");
+    check(std::ranges::count_if(graded.entities(), [](const Entity& entity) {
+        return entity.shape == Shape::Curve && entity.piece == 0 && entity.layer == Layer::Construction;
+    }) == 3, "Keep the final quadratic pleat marks in the graded piece");
+    check(std::ranges::count_if(graded.entities(), [](const Entity& entity) {
+        return entity.shape == Shape::Line && entity.piece == 0 && entity.layer == Layer::Construction;
+    }) == 3, "Keep each straight segment of the compound pleat marks");
+    check(std::ranges::count_if(graded.entities(), [](const Entity& entity) {
+        return entity.shape == Shape::Curve && entity.layer == Layer::Main;
+    }) == 3,
+          "Keep the three exact quadratic segments after two slashes");
+    const auto fold = std::ranges::find_if(graded.entities(), [](const Entity& entity) {
+        return entity.shape == Shape::Curve && entity.layer == Layer::Construction;
+    });
+    check(fold != graded.entities().end() && near(fold->control.x() - fold->a.x(), 9),
+          "Keep the exact quadratic control offset in the pleat");
+    check(!pattern.moveDraftPoint("Bend", {500, 0}, &error),
+          "Reject a curved guide that crosses the piece boundary");
+    Entity drill{Shape::Point, {50, 40}, {50, 40}, {}, 0, Layer::Construction};
+    drill.dxfLayer = drillLayer;
+    pattern.insert(pattern.entities().size(), drill);
+    check(!fabricPiece(gradedPattern(pattern, "L"), {0, "L", {}}, true).drillPoints.isEmpty(),
+          "Keep the drill when replaying curved modeling history");
+    roundTripAndExport(pattern, "L");
+    QTemporaryDir saved;
+    const auto path = saved.filePath("formula-drape.sofit");
+    PatternDocument reopened;
+    check(pattern.save(path, &error) && reopened.load(path, &error)
+          && reopened.modelingHistory() == pattern.modelingHistory()
+          && near(analyzePiece(gradedPattern(reopened, "L"), 0).bounds.width(), 150),
+          "Keep the formula and its graded result on reopen: " + error);
 }
 
 void checkCurvedReliefAndHandles() {
@@ -785,6 +1083,17 @@ void checkTemplates() {
     check(!exportFabricPdf(markerPdf, *twoPiece, marker, {}, error) && error.contains("repeat"),
           "Prevent PDF export of an unregistered placement");
 
+    auto skirt = draftFittedSkirt(740, 40, {1000, 60, 195, 620, 160, 100}, &error);
+    check(skirt.has_value(), error);
+    skirt->production().sizes.append({"48/176", {{"waist", 780}, {"hip", 1060}, {"skirt_length", 650}}});
+    check(skirt->validateParametricSizes(skirt->production(), &error), error);
+    const auto sideSeams = skirt->inspectSeamLinks();
+    const auto gradedSkirt = gradedPattern(*skirt, "48/176");
+    check(skirt->pieces().size() == 2 && sideSeams.checks.size() == 1 && sideSeams.checks.first().withinTolerance
+          && near(analyzePiece(gradedSkirt, 0).bounds.height(), 650),
+          "Draft independent fitted skirt panels with linked side seams and a graded length");
+    roundTripAndExport(*skirt, "48/176");
+
     const auto dress = draftDress(m, {1000, 60, 195, 620, 160, 100}, BodiceOptions{NeckFinish::Facing});
     check(dress && dress->pieces().size() == 6 && checkFittingBlock(*dress).missingSeams.isEmpty(),
           "Add facings to the sleeveless dress without losing the skirt seam checks");
@@ -842,6 +1151,11 @@ void checkGarmentProduction(const QString& name, std::optional<PatternDocument> 
     }
     const auto arranged = arrangeFabric(*draft, data);
     check(arranged.error == FabricLayoutError::None, name + ": nest the taller size");
+    check(arranged.baselineLengthMm && arranged.optimizedLengthMm
+          && *arranged.optimizedLengthMm <= *arranged.baselineLengthMm,
+          name + ": retain or improve the verified layout length");
+    std::cout << qPrintable(name) << " / marker / " << data.placements.size() << " copies: "
+              << *arranged.baselineLengthMm << " -> " << *arranged.optimizedLengthMm << " mm\n";
     data.placements = arranged.placements;
     const auto report = cuttingReport(*draft, data);
     const auto rows = cuttingKitRows(*draft, report);
@@ -858,7 +1172,18 @@ void checkGarmentProduction(const QString& name, std::optional<PatternDocument> 
     const auto pack = outputs.filePath("tech-pack.pdf");
     const auto pdf = outputs.filePath("marker.pdf");
     const auto dxf = outputs.filePath("marker.dxf");
-    check(exportProductInformationPdf(pack, *draft, error), name + ": export tech pack: " + error);
+    draft->production() = data;
+    const auto acceptanceDirectory = qEnvironmentVariable("SOFIT_ACCEPTANCE_PROJECTS");
+    if (!acceptanceDirectory.isEmpty()) {
+        const QDir directory(acceptanceDirectory);
+        const auto outputName = name.toLower().replace(u' ', u'-') + QStringLiteral(".sofit");
+        const auto projectPath = directory.filePath(outputName);
+        PatternDocument reopened;
+        check(draft->save(projectPath, &error) && reopened.load(projectPath, &error)
+              && cuttingReport(reopened, reopened.production()).canExport(reopened.production().fabricWidth),
+              name + ": save and reopen acceptance project: " + error);
+    }
+    check(exportProductInformationPdf(pack, *draft, error), name + ": export tech pack with verified marker: " + error);
     check(exportFabricPdf(pdf, *draft, data, {}, error), name + ": export marker PDF: " + error);
     check(exportFabricDxf(dxf, *draft, data, error), name + ": export marker DXF: " + error);
     for (const auto& file : {pack, pdf}) {
@@ -867,6 +1192,43 @@ void checkGarmentProduction(const QString& name, std::optional<PatternDocument> 
               && bytes.trimmed().endsWith("%%EOF"), name + ": verify PDF output");
     }
     check(readFile(dxf).contains("ENTITIES"), name + ": verify DXF output");
+
+    if (name == "Trousers" || name == "Jacket construction" || name == "A-line skirt") {
+        auto batch = data;
+        batch.fabricWidth = name == "Jacket construction" ? 1450 : 1500;
+        batch.pieceClearanceMm = 5;
+        batch.fabricFlaws = {{100, 100, 75, 120}, {batch.fabricWidth - 170, 500, 60, 80}};
+        batch.placements.clear();
+        for (const auto& size : {QString{}, larger.name, taller.name}) {
+            for (auto copy : data.placements) {
+                copy.size = size;
+                copy.position = {};
+                batch.placements.append(copy);
+            }
+        }
+        QElapsedTimer timer;
+        timer.start();
+        const auto candidate = arrangeFabric(*draft, batch);
+        const auto elapsed = timer.elapsed();
+        check(candidate.error == FabricLayoutError::None && candidate.baselineLengthMm
+              && candidate.optimizedLengthMm && *candidate.optimizedLengthMm <= *candidate.baselineLengthMm,
+              name + ": retain or improve the three-size batch");
+        batch.placements = candidate.placements;
+        const auto batchReport = cuttingReport(*draft, batch);
+        check(batchReport.canExport(batch.fabricWidth)
+              && near(batchReport.usage.length, *candidate.optimizedLengthMm)
+              && batchReport.rows.size() == 3 * draft->pieces().size()
+              && std::ranges::all_of(batchReport.rows, [&](const auto& row) {
+                  return row.copies() == draft->pieces()[row.piece].cutCount;
+              }), name + ": independently verify mixed-size placement constraints and cut quantities");
+        check(exportFabricDxf(dxf, *draft, batch, error) && readFile(dxf).contains("ENTITIES"),
+              name + ": export mixed-size marker DXF: " + error);
+        check(exportFabricPdf(pdf, *draft, batch, {}, error) && readFile(pdf).trimmed().endsWith("%%EOF"),
+              name + ": export mixed-size marker PDF: " + error);
+        std::cout << qPrintable(name) << " / mixed-size marker / " << batch.placements.size() << " copies: "
+                  << *candidate.baselineLengthMm << " -> " << *candidate.optimizedLengthMm
+                  << " mm, " << elapsed << " ms\n";
+    }
 }
 
 void checkGarmentProductionScenarios() {
@@ -945,6 +1307,71 @@ void checkApronKit() {
           && readFile(dxf).contains("ENTITIES"), "Read back both apron marker exports");
 }
 
+void checkShirtCuff() {
+    QString error;
+    check(!draftShirtCuff({170, 20, 0, 55}, &error), "Reject a cuff without closure overlap");
+    auto cuff = draftShirtCuff({170, 20, 25, 55}, &error);
+    check(cuff.has_value(), error);
+    check(cuff->pieces().front().cutCount == 2, "A shirt requires two cuffs");
+    cuff->production().sizes.append({"L", {{"cuff_wrist", 190}, {"cuff_depth", 60}}});
+    check(cuff->validateParametricSizes(cuff->production(), &error), error);
+    const auto graded = gradedPattern(*cuff, "L", nullptr, GradeEdgeNames::Preserve);
+    const auto fold = std::ranges::find(graded.entities(), QStringLiteral("cuff_fold"), &Entity::draftName);
+    check(fold != graded.entities().end() && fold->layer == Layer::Construction
+          && fold->a == QPointF(0, 60) && fold->b == QPointF(235, 60), "Replay the cuff fold and overlap");
+    const auto cut = fabricPiece(graded, {0, "L", {}}).cut.boundingRect();
+    check(near(cut.width() * cut.height(), 255 * 140), "Recalculate the cuff and retain the allowance");
+    roundTripAndExport(*cuff, "L");
+}
+
+void checkDrillMarks() {
+    PatternDocument panel;
+    panel.pieces().append({"Drill panel"});
+    panel.insert(0, {Shape::Rectangle, {0, 0}, {100, 80}, {}, 0});
+    Entity mark{Shape::Point, {20, 30}, {20, 30}, {}, 0, Layer::Construction};
+    mark.dxfLayer = drillLayer;
+    panel.insert(1, mark);
+
+    QTemporaryDir temporary;
+    check(temporary.isValid(), "Create drill test output directory");
+    const auto project = temporary.filePath("drill.sofit");
+    check(panel.save(project), "Save the drill point");
+    check(panel.load(project) && panel.entities()[1].dxfLayer == drillLayer,
+          "Reopen the piece with its drill point");
+    FabricPlacement copy{0, {}, {10, 15}};
+    copy.reversed = true;
+    copy.hand = CutHand::Right;
+    panel.production().placements = {copy};
+    check(fabricPiece(panel, copy, true).drillPoints == QVector<QPointF>{{20, 50}},
+          "Rotate and mirror the drill with its cutting contour");
+
+    QString error;
+    const auto dxf = temporary.filePath("drill.dxf");
+    check(exportFabricDxf(dxf, panel, panel.production(), error), error);
+    QFile output(dxf);
+    check(output.open(QIODevice::ReadOnly) && output.readAll().contains(
+              "0\nPOINT\n100\nAcDbEntity\n8\nSOFIT_DRILL\n100\nAcDbPoint\n10\n30\n20\n-65"),
+          "Export the drill to its own DXF layer at the placed coordinate");
+    const auto pdf = temporary.filePath("drill.pdf");
+    check(exportFabricPdf(pdf, panel, panel.production(), {}, error), error);
+    for (const auto type : {PieceSymbol::Cross, PieceSymbol::Circle, PieceSymbol::Buttonhole,
+                            PieceSymbol::WarpRepeat, PieceSymbol::WeftRepeat}) {
+        for (const auto& stroke : buildPieceSymbol(type, 0, {50, 40}, 8, 25))
+            panel.insert(panel.entities().size(), stroke);
+    }
+    check(panel.save(project) && panel.load(project), "Reopen the production symbols");
+    const auto symbolsDxf = temporary.filePath("symbols.dxf");
+    check(exportFabricDxf(symbolsDxf, panel, panel.production(), error)
+          && readFile(symbolsDxf).contains("8\nSOFIT_SYMBOL\n100\nAcDbPolyline")
+          && exportFabricPdf(pdf, panel, panel.production(), {}, error),
+          "Export the oriented production symbols in the marker: " + error);
+    mark.a = mark.b = {120, 30};
+    panel.replace(1, mark);
+    check(!exportFabricDxf(dxf, panel, panel.production(), error) && error.contains("drill point")
+          && !exportFabricPdf(pdf, panel, panel.production(), {}, error) && error.contains("drill point"),
+          "Reject an out-of-contour drill when exporting either marker format");
+}
+
 void checkPatchPocket() {
     QString error;
     check(!draftPatchPocket({150, 170, 75, 25}, &error) && !error.isEmpty(),
@@ -971,6 +1398,10 @@ int main(int argc, char** argv) {
     checkModeling();
     checkContourHistory();
     checkCurvedReliefAndHandles();
+    checkCurvedSpread();
+    checkDrapeSequence();
+    checkTransportedPleatsAndDerivedContour();
+    checkDrillMarks();
     checkCurvedSourceAndLibraryInsertion();
     checkRotationHistory();
     checkSeamLinks();
@@ -979,4 +1410,5 @@ int main(int argc, char** argv) {
     checkGarmentProductionScenarios();
     checkApronKit();
     checkPatchPocket();
+    checkShirtCuff();
 }

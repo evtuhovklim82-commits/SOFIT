@@ -86,6 +86,7 @@ if(BUILD_TESTING)
     add_executable(sofit_production_tests tests/ProductionTest.cpp)
     target_link_libraries(sofit_production_tests PRIVATE sofit_core)
     add_test(NAME sofit_production COMMAND sofit_production_tests)
+    set_tests_properties(sofit_production PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
     add_executable(sofit_parametric_tests tests/ParametricDraftTest.cpp)
     target_link_libraries(sofit_parametric_tests PRIVATE sofit_core)

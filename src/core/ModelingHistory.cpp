@@ -1,4 +1,6 @@
 #include "ContourModeling.h"
+#include "Production.h"
+#include "PieceMarkings.h"
 
 #include <QHash>
 #include <QLineF>
@@ -7,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <utility>
 
 namespace opc {
 namespace {
@@ -15,6 +18,8 @@ constexpr std::array operationKeys{
     std::pair{ContourOperation::Spread, "spread"},
     std::pair{ContourOperation::TransferDartToOutlet, "transfer-dart"},
     std::pair{ContourOperation::MoveOpenDart, "move-open-dart"},
+    std::pair{ContourOperation::SplitDart, "split-dart"},
+    std::pair{ContourOperation::MergeDarts, "merge-darts"},
     std::pair{ContourOperation::Pleat, "pleat"},
     std::pair{ContourOperation::Gather, "gather"},
     std::pair{ContourOperation::Relief, "relief"},
@@ -28,7 +33,8 @@ bool placed(const ProductionData& production, qsizetype piece) {
 QVector<QString> pieceObjects(const QVector<Entity>& entities, qsizetype piece) {
     QVector<QString> names;
     for (const auto& entity : entities) {
-        if (entity.piece == piece)
+        if (entity.piece == piece && !isDrillPoint(entity)
+            && !(entity.layer == Layer::Construction && entity.dxfLayer == pieceSymbolLayer))
             names.append(entity.draftName);
     }
     std::ranges::sort(names);
@@ -125,7 +131,8 @@ bool PatternDocument::appendSilhouette(qsizetype piece, double axisFraction, dou
 }
 
 bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
-                                    const QVector<qsizetype>& guides, double spreadMm, QString* error) {
+                                    const QVector<qsizetype>& guides, double spreadMm, QString* error, const QString& spreadFormula,
+                                    const std::optional<QVector<QString>>& followingGuides) {
     const auto fail = [error](const QString& message) {
         if (error)
             *error = message;
@@ -144,6 +151,10 @@ bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
     step.objects = pieceObjects(entities_, piece);
     step.contour = operation;
     step.spreadMm = spreadMm;
+    step.spreadFormula = spreadFormula.trimmed();
+    step.followingGuides = followingGuides;
+    if (!step.spreadFormula.isEmpty() && !usesSpreadWidth(operation))
+        return fail(QStringLiteral("A width formula requires a spread, pleat or gather."));
     for (auto index : guides) {
         if (index < 0 || index >= entities_.size() || entities_[index].draftName.isEmpty())
             return fail(QStringLiteral("Choose named formula objects for the modeling guides."));
@@ -165,10 +176,68 @@ bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
     candidate.history_.last().topology = step.topology;
     for (const auto& entity : entities_) {
         if (!entity.draftName.isEmpty() && !entity.draftName.startsWith(u'@')
-            && (entity.piece == piece || step.guides.contains(entity.draftName)))
+            && (step.objects.contains(entity.draftName) || step.guides.contains(entity.draftName))
+            && (!followingGuides || !followingGuides->contains(entity.draftName)))
             candidate.hiddenSources_.append({entity.draftName, entity.piece, entity.layer});
     }
     if (!candidate.setParametricDraft(draft_, error))
+        return false;
+    *this = std::move(candidate);
+    return true;
+}
+
+bool PatternDocument::appendDrape(qsizetype piece, const QVector<QString>& guides,
+                                  const QVector<double>& widths, ContourOperation finish, QString* error) {
+    QVector<QString> formulas;
+    for (const auto width : widths)
+        formulas.append(QString::number(width, 'g', 17));
+    return appendDrapeFormulas(piece, guides, formulas, finish, error);
+}
+
+bool PatternDocument::appendDrapeFormulas(qsizetype piece, const QVector<QString>& guides,
+                                          const QVector<QString>& widths, ContourOperation finish, QString* error) {
+    QVector<ContourOperation> operations(guides.size(), ContourOperation::Spread);
+    if (!operations.isEmpty())
+        operations.last() = finish;
+    return appendDrapeFormulas(piece, guides, widths, operations, error);
+}
+
+bool PatternDocument::appendDrapeFormulas(qsizetype piece, const QVector<QString>& guides,
+                                          const QVector<QString>& widths,
+                                          const QVector<ContourOperation>& operations, QString* error) {
+    if (guides.size() < 2 || guides.size() != widths.size() || guides.size() != operations.size()
+        || !std::ranges::all_of(operations, usesSpreadWidth)) {
+        if (error)
+            *error = QStringLiteral("Choose at least two named slash guides and give each a width.");
+        return false;
+    }
+    auto candidate = *this;
+    for (qsizetype i = 0; i < guides.size(); ++i) {
+        const auto& objects = candidate.entities();
+        const auto guide = std::ranges::find(objects, guides[i], &Entity::draftName);
+        if (guides[i].isEmpty() || guide == objects.end()) {
+            if (error)
+                *error = QStringLiteral("Slash %1: the guide is missing or already consumed.").arg(i + 1);
+            return false;
+        }
+        const auto following = guides.sliced(i + 1);
+        QString stepError;
+        const auto width = widths[i].trimmed();
+        if (width.isEmpty()) {
+            if (error)
+                *error = QStringLiteral("Slash %1: enter a width or formula.").arg(i + 1);
+            return false;
+        }
+        bool constant;
+        const auto number = width.toDouble(&constant);
+        if (!candidate.appendContour(piece, operations[i], {guide - objects.begin()},
+                                     constant ? number : 0, &stepError, constant ? QString{} : width, following)) {
+            if (error)
+                *error = QStringLiteral("Slash %1 (%2): %3").arg(i + 1).arg(guides[i], stepError);
+            return false;
+        }
+    }
+    if (!candidate.validateParametricSizes(candidate.production(), error))
         return false;
     *this = std::move(candidate);
     return true;
@@ -203,6 +272,68 @@ bool PatternDocument::appendRotation(const QVector<qsizetype>& selection, qsizet
     return true;
 }
 
+bool PatternDocument::applyModelingSequence(const PatternDocument& source, QString* error) {
+    const auto fail = [error](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (history_.size() >= source.history_.size())
+        return fail(QStringLiteral("В исходном проекте нет дополнительных операций."));
+    if (!std::equal(history_.cbegin(), history_.cend(), source.history_.cbegin()))
+        return fail(QStringLiteral("История текущего проекта должна совпадать с началом исходной истории."));
+    if (!production_.placements.isEmpty())
+        return fail(QStringLiteral("Перед применением операций очистите раскладку."));
+
+    auto candidate = *this;
+    const auto findObject = [&candidate](const QString& name) -> qsizetype {
+        const auto found = std::ranges::find(std::as_const(candidate.entities_), name, &Entity::draftName);
+        return found == candidate.entities_.cend() ? -1 : found - candidate.entities_.cbegin();
+    };
+    for (qsizetype i = history_.size(); i < source.history_.size(); ++i) {
+        const auto& step = source.history_[i];
+        QString detail;
+        const auto stepError = [&](const QString& message) {
+            return fail(QStringLiteral("Операция %1: %2").arg(i + 1).arg(message));
+        };
+        if (!step.rotationPivot.isEmpty()) {
+            QVector<qsizetype> selection;
+            for (const auto& name : step.objects)
+                selection.append(findObject(name));
+            if (!candidate.appendRotation(selection, findObject(step.rotationPivot), step.rotationDegrees, &detail))
+                return stepError(detail);
+            continue;
+        }
+
+        const auto anchor = step.objects.isEmpty() ? -1 : findObject(step.objects.front());
+        if (anchor < 0)
+            return stepError(QStringLiteral("Не найдена исходная геометрия."));
+        const auto piece = candidate.entities_[anchor].piece;
+        auto names = step.objects;
+        std::ranges::sort(names);
+        if (piece < 0 || names != pieceObjects(candidate.entities_, piece))
+            return stepError(QStringLiteral("Состав именованных объектов детали изменился."));
+        if (!step.contour) {
+            if (!candidate.appendSilhouette(piece, step.axisFraction, step.topScale, step.bottomScale,
+                                            &detail, step.lengthScale))
+                return stepError(detail);
+            continue;
+        }
+
+        QVector<qsizetype> guides;
+        for (const auto& name : step.guides)
+            guides.append(findObject(name));
+        if (!candidate.appendContour(piece, *step.contour, guides, step.spreadMm, &detail, step.spreadFormula, step.followingGuides))
+            return stepError(detail);
+        if (candidate.history_.back().topology != step.topology)
+            return stepError(QStringLiteral("Связи между контуром и направляющими изменились."));
+    }
+    *this = std::move(candidate);
+    if (error)
+        error->clear();
+    return true;
+}
+
 bool PatternDocument::editModelingStep(qsizetype index, const ModelingStep& settings, QString* error) {
     const auto fail = [error](const QString& message) {
         if (error)
@@ -220,8 +351,11 @@ bool PatternDocument::editModelingStep(qsizetype index, const ModelingStep& sett
         step.topScale = settings.topScale;
         step.bottomScale = settings.bottomScale;
         step.lengthScale = settings.lengthScale;
-    } else if (usesSpreadWidth(*step.contour)) {
+    } else if (usesSpreadWidth(*step.contour) || *step.contour == ContourOperation::SplitDart) {
         step.spreadMm = settings.spreadMm;
+        step.spreadFormula = settings.spreadFormula.trimmed();
+        if (!step.spreadFormula.isEmpty() && !usesSpreadWidth(*step.contour))
+            return fail(QStringLiteral("A width formula requires a spread, pleat or gather."));
     } else {
         return fail(QStringLiteral("This step has no numeric settings."));
     }
@@ -284,7 +418,7 @@ bool PatternDocument::removeLastModelingStep(QString* error) {
 }
 
 bool PatternDocument::replayModeling(QVector<Entity>& entities, const ProductionData& production,
-                                    QString* error, ModelingStep* capture) const {
+                                    const ParametricDraft& draft, QString* error, ModelingStep* capture) const {
     QHash<QString, Entity> outputMetadata;
     if (hasContourHistory()) {
         for (const auto& entity : entities_) {
@@ -372,8 +506,31 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
             entity.draftName.clear();
             working.insert(working.entities().size(), entity);
         };
-        for (const auto& name : step.objects)
-            append(objects.value(name));
+        QVector<qsizetype> toTransport;
+        for (const auto& name : step.objects) {
+            const auto index = objects.value(name);
+            const auto& entity = entities[index];
+            if (step.followingGuides && entity.layer == Layer::Construction
+                && (step.followingGuides->contains(name) || name.startsWith(u'@'))
+                && !step.guides.contains(name)) {
+                toTransport.append(index);
+                continue;
+            }
+            append(index);
+        }
+        if (step.followingGuides) {
+            QSet<QString> seen;
+            for (const auto& name : *step.followingGuides) {
+                const auto index = objects.value(name, -1);
+                if (index < 0 || seen.contains(name) || step.guides.contains(name)
+                    || entities[index].layer != Layer::Construction
+                    || (entities[index].piece != piece && entities[index].piece != -1))
+                    return fail(QStringLiteral("Invalid or repeated following guide '%1'.").arg(name));
+                seen.insert(name);
+                if (entities[index].piece == -1)
+                    toTransport.append(index);
+            }
+        }
         if (!step.contour) {
             if (!(step.axisFraction >= 0 && step.axisFraction <= 1))
                 return fail(QStringLiteral("Invalid axis."));
@@ -406,7 +563,7 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
         }
         for (qsizetype j = 0; j < working.entities().size(); ++j) {
             const auto& entity = working.entities()[j];
-            if (entity.shape != Shape::Line && !(dividesPiece(*step.contour)
+            if (entity.shape != Shape::Line && !(supportsCurvedBoundary(*step.contour)
                 && entity.shape == Shape::Curve))
                 return fail(QStringLiteral("Contour history requires compatible source edges and guides."));
         }
@@ -421,9 +578,31 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
 
         working.pieces()[0].notches.clear();
         working.pieces()[0].allowanceMm = 0;
-        const auto result = modelContour(working, 0, *step.contour, guideIndices, step.spreadMm);
+        auto width = step.spreadMm;
+        if (!step.spreadFormula.isEmpty()) {
+            QString detail;
+            const auto evaluated = evaluateModelingWidth(draft, step.spreadFormula, &detail);
+            if (!evaluated)
+                return fail(detail);
+            width = *evaluated;
+        }
+        const auto result = modelContour(working, 0, *step.contour, guideIndices, width);
         if (!result.edit)
             return fail(result.error);
+        if (!toTransport.isEmpty()) {
+            if (!result.edit->spreadMotion)
+                return fail(QStringLiteral("Only a spread can transport guides."));
+            for (const auto index : toTransport) {
+                auto& entity = entities[index];
+                const auto offset = result.edit->spreadMotion->offsetFor(entity);
+                if (!offset)
+                    return fail(QStringLiteral("Guide or fold mark '%1' touches or crosses this cut.").arg(entity.draftName));
+                entity.a += *offset;
+                entity.b += *offset;
+                if (entity.shape == Shape::Curve)
+                    entity.control += *offset;
+            }
+        }
         auto topology = boundaryTopology(working, guideIndices);
         if (capture && i == history_.size() - 1) {
             capture->topology = topology;

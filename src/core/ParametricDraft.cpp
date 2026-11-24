@@ -261,6 +261,13 @@ public:
         return entities;
     }
 
+    double expression(const QString& source) {
+        const std::function<double(const QString&, int)> reference = [this](const QString& name, int depth) {
+            return resolve(name, depth);
+        };
+        return Formula(source, reference).evaluate(0);
+    }
+
 private:
     static void registerName(QSet<QString>& names, const QString& name) {
         if (!validName(name))
@@ -304,8 +311,8 @@ private:
 };
 
 std::optional<QVector<Entity>> evaluateSize(const ParametricDraft& base, const PatternSize& size,
-                                            QString* error) {
-    auto draft = base;
+                                            QString* error, ParametricDraft& draft) {
+    draft = base;
     bool changed = false;
     for (auto& measurement : draft.measurements) {
         const auto value = size.measurements.constFind(measurement.name);
@@ -328,11 +335,23 @@ std::optional<QVector<Entity>> evaluateSize(const ParametricDraft& base, const P
 
 }
 
+std::optional<double> PatternDocument::evaluateModelingWidth(const ParametricDraft& draft,
+                                                             const QString& formula, QString* error) {
+    try {
+        return DraftEvaluation(draft).expression(formula);
+    } catch (const EvaluationError& failure) {
+        if (error)
+            *error = failure.message;
+        return std::nullopt;
+    }
+}
+
 bool PatternDocument::validateDraftSizes(const ParametricDraft& draft, const QVector<Entity>& base,
                                          const ProductionData& production, QString* error) const {
     if (production.useDraftMeasurements) {
         for (const auto& size : production.sizes) {
-            auto generated = evaluateSize(draft, size, error);
+            ParametricDraft sizedDraft;
+            auto generated = evaluateSize(draft, size, error, sizedDraft);
             if (!generated)
                 return false;
             if (history_.isEmpty() || generated->isEmpty())
@@ -341,7 +360,7 @@ bool PatternDocument::validateDraftSizes(const ParametricDraft& draft, const QVe
             candidate.entities_ = base;
             auto sized = candidate.bindDraftGeometry(std::move(*generated));
             QString detail;
-            if (!replayModeling(sized, production, &detail)) {
+            if (!replayModeling(sized, production, sizedDraft, &detail)) {
                 if (error)
                     *error = QStringLiteral("Size '%1': %2").arg(size.name, detail);
                 return false;
@@ -369,11 +388,12 @@ bool PatternDocument::validateParametricSizes(const ProductionData& production, 
 std::optional<QVector<Entity>> PatternDocument::evaluateSizeDraft(const PatternSize& size) const {
     if (!production_.useDraftMeasurements)
         return QVector<Entity>{};
-    auto generated = evaluateSize(draft_, size, nullptr);
+    ParametricDraft sizedDraft;
+    auto generated = evaluateSize(draft_, size, nullptr, sizedDraft);
     if (history_.isEmpty() || !generated || generated->isEmpty())
         return generated;
     auto sized = bindDraftGeometry(std::move(*generated));
-    if (!replayModeling(sized, production_, nullptr))
+    if (!replayModeling(sized, production_, sizedDraft, nullptr))
         return std::nullopt;
     sized.removeIf([](const Entity& entity) { return entity.draftName.isEmpty(); });
     return sized;
@@ -423,7 +443,7 @@ QVector<Entity> PatternDocument::bindDraftGeometry(QVector<Entity> generated) co
 
 bool PatternDocument::captureContourTopology(ModelingStep& step, QString* error) const {
     auto source = bindDraftGeometry(DraftEvaluation(draft_).geometry(draft_));
-    return replayModeling(source, production_, error, &step);
+    return replayModeling(source, production_, draft_, error, &step);
 }
 
 bool PatternDocument::moveDraftPoint(const QString& name, QPointF offset, QString* error) {
@@ -508,7 +528,65 @@ bool PatternDocument::moveDraftPoint(const QString& name, QPointF offset, QStrin
     return true;
 }
 
-bool PatternDocument::insertConstruction(const PatternDocument& source, QString* error) {
+bool PatternDocument::deriveParametricPiece(qsizetype source, const QString& name, QString* error) {
+    const auto fail = [error](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (source < 0 || source >= pieces_.size() || name.trimmed().isEmpty())
+        return fail(QStringLiteral("Choose a source piece and enter a name."));
+    if (std::ranges::any_of(production_.rules, [source](const auto& rule) { return rule.piece == source; }))
+        return fail(QStringLiteral("This operation requires measurement-based grading."));
+
+    auto candidate = *this;
+    auto draft = draft_;
+    auto metadata = pieces_[source];
+    metadata.name = name.trimmed();
+    const auto derived = candidate.pieces_.size();
+    candidate.pieces_.append(std::move(metadata));
+    QSet<QString> names;
+    for (const auto& point : draft_.points)
+        names.insert(point.name);
+    QHash<QString, DraftEdge> edges;
+    for (const auto& edge : draft_.edges) {
+        names.insert(edge.name);
+        edges.insert(edge.name, edge);
+    }
+    qsizetype number = 0;
+    for (auto entity : entities_) {
+        if (entity.piece != source || entity.layer != Layer::Main)
+            continue;
+        const auto edge = edges.constFind(entity.draftName);
+        if (edge == edges.cend())
+            return fail(QStringLiteral("The source contour must consist of original formula edges."));
+        auto shared = edge.value();
+        do {
+            shared.name = QStringLiteral("derived_edge_%1").arg(++number);
+        } while (names.contains(shared.name));
+        draft.edges.append(shared);
+        entity.draftName = shared.name;
+        entity.piece = derived;
+        candidate.insert(candidate.entities_.size(), entity);
+    }
+    if (!candidate.setParametricDraft(std::move(draft), error))
+        return false;
+    const auto checkContour = [derived](const PatternDocument& project) {
+        const auto geometry = analyzePiece(project, derived);
+        return geometry.error == ContourError::None && !geometry.allowanceFailed;
+    };
+    if (!checkContour(candidate))
+        return fail(QStringLiteral("Close the source contour and check its allowances first."));
+    for (const auto& size : production_.sizes) {
+        if (!checkContour(gradedPattern(candidate, size.name)))
+            return fail(QStringLiteral("The derived contour is invalid in size '%1'.").arg(size.name));
+    }
+    *this = std::move(candidate);
+    return true;
+}
+
+bool PatternDocument::insertConstruction(const PatternDocument& source, QString* error,
+                                         const QMap<QString, QString>& measurementBindings) {
     if (source.draft_.points.isEmpty()) {
         if (error)
             *error = QStringLiteral("The selected project has no parametric draft.");
@@ -543,9 +621,26 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
         used.insert(unique);
         return unique;
     };
+    const auto invalidBinding = [&] {
+        if (error)
+            *error = QStringLiteral("Bind each source measurement to a distinct destination measurement.");
+        return false;
+    };
+    for (auto it = measurementBindings.cbegin(); it != measurementBindings.cend(); ++it) {
+        if (!sharedMeasurements.contains(it.value())
+            || std::ranges::find(source.draft_.measurements, it.key(), &Measurement::name) == source.draft_.measurements.end())
+            return invalidBinding();
+    }
+
+    QSet<QString> usedBindings;
     for (const auto& measurement : source.draft_.measurements) {
-        const bool shared = sharedMeasurements.contains(measurement.name);
-        const auto name = shared ? measurement.name : reserveName(measurement.name, scalars);
+        const auto binding = measurementBindings.value(measurement.name, measurement.name);
+        const bool shared = sharedMeasurements.contains(binding);
+        const auto name = shared ? binding : reserveName(measurement.name, scalars);
+        if (shared && usedBindings.contains(name))
+            return invalidBinding();
+        if (shared)
+            usedBindings.insert(name);
         scalarNames.insert(measurement.name, name);
         if (!shared)
             draft.measurements.append({name, measurement.mm});
@@ -616,6 +711,9 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
     for (auto step : source.history_) {
         mapObjects(step.objects);
         mapObjects(step.guides);
+        if (step.followingGuides)
+            mapObjects(*step.followingGuides);
+        step.spreadFormula = rewriteFormula(step.spreadFormula);
         step.rotationPivot = mapObject(step.rotationPivot);
         step.secondPiece = mapPiece(step.secondPiece);
         candidate.history_.append(std::move(step));
@@ -637,7 +735,7 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
         if (!source.production_.useDraftMeasurements)
             continue;
         for (auto it = size.measurements.cbegin(); it != size.measurements.cend(); ++it) {
-            if (scalarNames.contains(it.key()) && (!existing || !sharedMeasurements.contains(it.key())))
+            if (scalarNames.contains(it.key()) && (!existing || !sharedMeasurements.contains(scalarNames.value(it.key()))))
                 target->measurements.insert(scalarNames.value(it.key()), it.value());
         }
     }
@@ -673,7 +771,7 @@ bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) 
 
     auto base = bindDraftGeometry(std::move(generated));
     if (!validateDraftSizes(draft, base, production_, error)
-        || !replayModeling(base, production_, error))
+        || !replayModeling(base, production_, draft, error))
         return false;
 
     if (!seamLinks_.isEmpty()) {

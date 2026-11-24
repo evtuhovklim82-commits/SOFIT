@@ -3,12 +3,64 @@
 #include <QFont>
 #include <QFontMetricsF>
 #include <QLineF>
+#include <QPainterPathStroker>
 #include <algorithm>
 #include <cmath>
 #include <numbers>
 #include <limits>
 
 namespace opc {
+QVector<Entity> buildPieceSymbol(PieceSymbol type, qsizetype piece, QPointF center,
+                                 double lengthMm, double angleDegrees) {
+    if (piece < 0 || !std::isfinite(center.x()) || !std::isfinite(center.y())
+        || !std::isfinite(lengthMm) || lengthMm <= 0 || !std::isfinite(angleDegrees))
+        return {};
+    QTransform transform;
+    transform.translate(center.x(), center.y());
+    transform.rotate(angleDegrees);
+    const double h = lengthMm / 2;
+    QVector<Entity> result;
+    const auto add = [&](Shape shape, QPointF a, QPointF b) {
+        Entity entity{shape, transform.map(a), transform.map(b), {}, piece, Layer::Construction};
+        entity.dxfLayer = pieceSymbolLayer;
+        result.append(entity);
+    };
+    switch (type) {
+    case PieceSymbol::Cross:
+        add(Shape::Line, {-h, 0}, {h, 0});
+        add(Shape::Line, {0, -h}, {0, h});
+        break;
+    case PieceSymbol::Circle:
+        add(Shape::Circle, {}, {h, 0});
+        break;
+    case PieceSymbol::Buttonhole:
+        add(Shape::Line, {-h, 0}, {h, 0});
+        add(Shape::Line, {-h, -h / 4}, {-h, h / 4});
+        add(Shape::Line, {h, -h / 4}, {h, h / 4});
+        break;
+    case PieceSymbol::WarpRepeat:
+        add(Shape::Line, {0, -h}, {0, h});
+        add(Shape::Line, {-h / 2, -h / 2}, {0, -h});
+        add(Shape::Line, {0, -h}, {h / 2, -h / 2});
+        break;
+    case PieceSymbol::WeftRepeat:
+        add(Shape::Line, {-h, 0}, {h, 0});
+        add(Shape::Line, {h / 2, -h / 2}, {h, 0});
+        add(Shape::Line, {h, 0}, {h / 2, h / 2});
+        break;
+    }
+    return result;
+}
+
+bool symbolFitsContour(const QPainterPath& symbol, const QPolygonF& contour) {
+    QPainterPath boundary;
+    boundary.addPolygon(contour);
+    boundary.closeSubpath();
+    QPainterPathStroker stroke;
+    stroke.setWidth(0.001);
+    return boundary.contains(stroke.createStroke(symbol));
+}
+
 QPainterPath PieceMarkings::labelPath() const {
     QPainterPath path;
     if (label.isEmpty())

@@ -3,6 +3,7 @@
 #include "PieceGeometry.h"
 #include <QJsonObject>
 #include <QLineF>
+#include <QPainterPath>
 #include <QPolygonF>
 #include <optional>
 
@@ -12,17 +13,30 @@ QVector<QPointF> gradingPoints(const PatternDocument& document, qsizetype piece)
 PatternDocument gradedPattern(const PatternDocument& document, const QString& size,
                               QVector<qsizetype>* sourceIndices = nullptr,
                               GradeEdgeNames edgeNames = GradeEdgeNames::ForSeamLinks);
+// Add an evaluated size as independent, cut-ready pieces without changing either project's grading.
+bool appendMarkerModel(PatternDocument& destination, const PatternDocument& source,
+                       const QString& size, const QString& modelName, int kits, QString& error);
 QJsonObject saveProduction(const ProductionData& data);
 bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionData& data);
+
+inline const QString drillLayer = QStringLiteral("SOFIT_DRILL");
+
+inline bool isDrillPoint(const Entity& entity) {
+    return entity.shape == Shape::Point && entity.layer == Layer::Construction && entity.dxfLayer == drillLayer;
+}
 
 struct LayoutPiece {
     QPolygonF cut;
     QLineF grain;
     QLineF fold;
     std::optional<QPointF> repeatPoint;
+    QPainterPath notches;
+    QVector<QPointF> drillPoints;
+    QVector<QPainterPath> symbols;
 };
 
-LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& placement);
+LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& placement,
+                        bool includeNotches = false, QPointF shrinkagePercent = {});
 
 bool matchesFabricRepeat(const ProductionData& data, const FabricPlacement& placement,
                          std::optional<QPointF> repeatPoint = std::nullopt);
@@ -72,12 +86,14 @@ QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const 
 CuttingReport cuttingReport(const PatternDocument& document, const ProductionData& data);
 
 inline constexpr qsizetype maxAutomaticCopies = 200;
-enum class FabricLayoutError { None, InvalidWidth, InvalidClearance, InvalidRepeat, InvalidFlaws, TooManyCopies, InvalidContour, TooWide, VerificationFailed };
+enum class FabricLayoutError { None, InvalidShrinkage, InvalidWidth, InvalidClearance, InvalidRepeat, InvalidFlaws, TooManyCopies, InvalidContour, TooWide, VerificationFailed };
 
 struct AutomaticFabricLayout {
     QVector<FabricPlacement> placements;
     FabricLayoutError error = FabricLayoutError::None;
     qsizetype failedCopy = -1;
+    std::optional<double> baselineLengthMm;
+    std::optional<double> optimizedLengthMm;
 };
 
 AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const ProductionData& data);

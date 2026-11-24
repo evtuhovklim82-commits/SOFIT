@@ -11,6 +11,7 @@
 #include <QMessageBox>
 #include <QWizard>
 #include <QScrollArea>
+#include <QShortcut>
 #include <QVBoxLayout>
 
 #include <cmath>
@@ -19,11 +20,26 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     QWizard wizard(parent);
     const auto tr = [](const char* text) { return QCoreApplication::translate("TemplateWizard", text); };
     wizard.setWindowTitle(tr("New Pattern from Template"));
+    wizard.setOption(QWizard::HaveHelpButton);
+    wizard.setButtonText(QWizard::HelpButton, QStringLiteral("Справка"));
+    const auto showHelp = [&wizard] {
+        QMessageBox::information(&wizard, QStringLiteral("Базовые конструкции"),
+            wizard.currentId() == 0
+                ? QStringLiteral("Выберите основу изделия. Для прилегающей юбки мастер строит перед и спинку "
+                                 "со сгибом, вытачками и сопряжением боковых срезов.")
+                : QStringLiteral("Введите мерки и прибавки в миллиметрах. Базовые конструкции строятся "
+                                 "по линиям шва. Проверьте сопряжение срезов и посадку на макете "
+                                 "перед назначением припусков и раскроем."));
+    };
+    QObject::connect(&wizard, &QWizard::helpRequested, &wizard, showHelp);
+    auto* helpShortcut = new QShortcut(QKeySequence(Qt::Key_F1), &wizard);
+    QObject::connect(helpShortcut, &QShortcut::activated, &wizard, showHelp);
+
 
     auto* templatePage = new QWizardPage;
     templatePage->setTitle(tr("Choose a template"));
     auto* selection = new QFormLayout(templatePage);
-    enum Template { Gathered, ALine, Bodice, Trousers, Dress, Apron, Pocket };
+    enum Template { Gathered, ALine, Bodice, Trousers, Dress, Apron, Pocket, FittedSkirt, ShirtCuff };
     auto* style = new QComboBox;
     style->addItem(tr("Gathered skirt"));
     style->addItem(tr("A-line skirt"));
@@ -32,6 +48,8 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     style->addItem(tr("Sleeveless dress with waist seam (fitting block)"));
     style->addItem(tr("Bib apron with waist and neck ties"));
     style->addItem(tr("Rounded patch pocket"));
+    style->addItem(QStringLiteral("Прилегающая юбка с вытачками"));
+    style->addItem(QStringLiteral("Цельнокроеная манжета рубашки"));
     selection->addRow(tr("Template"), style);
     auto* note = new QLabel(tr("All templates open as editable parametric drafts. "
                                "Fitting blocks use sewing lines and are intended for a fitting sample."));
@@ -132,8 +150,8 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     form->addRow(linkedTrousers);
 
     const int dressStart = form->rowCount();
-    const auto* skirtLength = measurement(tr("Waist to dress hem"), 620, 200, 1500);
-    const auto* hemFlare = measurement(tr("Extra dress hem circumference beyond eased hip"), 160, 0, 1500);
+    const auto* skirtLength = measurement(tr("Waist to skirt hem"), 620, 200, 1500);
+    const auto* hemFlare = measurement(tr("Extra skirt hem circumference beyond eased hip"), 160, 0, 1500);
 
     const int apronStart = form->rowCount();
     const auto* apronWidth = measurement(tr("Apron width at hem"), 700, 200, 1600);
@@ -160,10 +178,22 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     pocketInstructions->setWordWrap(true);
     form->addRow(pocketInstructions);
 
+    const int cuffStart = form->rowCount();
+    const auto* cuffWrist = measurement(QStringLiteral("Обхват запястья"), 170, 80, 350);
+    const auto* cuffEase = measurement(QStringLiteral("Прибавка к обхвату"), 20, 1, 80);
+    const auto* cuffOverlap = measurement(QStringLiteral("Ширина застёжки"), 25, 5, 80);
+    const auto* cuffDepth = measurement(QStringLiteral("Готовая ширина манжеты"), 55, 15, 150);
+    auto* cuffInstructions = new QLabel(QStringLiteral(
+        "Выкроите две манжеты. Линии построения отмечают сгиб и нахлёст. "
+        "Ориентиры пуговицы и петли расположены на одной половине детали. Припуск 10 мм."));
+    cuffInstructions->setWordWrap(true);
+    form->addRow(cuffInstructions);
+
     const auto showFields = [=](int index) {
-        if (index == Pocket) {
+        if (index == Pocket || index == ShirtCuff) {
             for (int row = 0; row < form->rowCount(); ++row)
-                form->setRowVisible(row, row >= pocketStart);
+                form->setRowVisible(row, index == Pocket ? row >= pocketStart && row < cuffStart
+                                                         : row >= cuffStart);
             return;
         }
         for (int row = 0; row < form->rowCount(); ++row) {
@@ -175,8 +205,8 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                 : row < sleeveStart ? index == Bodice || index == Dress
                 : row < finishStart ? index == Bodice
                 : row < hipStart ? index == Bodice || index == Dress
-                : row < trousersStart ? index == Trousers || index == Dress
-                : row < dressStart ? index == Trousers : index == Dress;
+                : row < trousersStart ? index == Trousers || index == Dress || index == FittedSkirt
+                : row < dressStart ? index == Trousers : index == Dress || index == FittedSkirt;
             form->setRowVisible(row, visible);
         }
         form->setRowVisible(waist, index >= Bodice && index != Apron);
@@ -220,6 +250,16 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
             if (auto document = opc::draftPatchPocket(
                     {pocketWidth->value(), pocketHeight->value(), pocketRadius->value(), pocketTurnback->value()},
                     &error))
+                return document;
+        } else if (index == ShirtCuff) {
+            if (auto document = opc::draftShirtCuff(
+                    {cuffWrist->value(), cuffEase->value(), cuffOverlap->value(), cuffDepth->value()}, &error))
+                return document;
+        } else if (index == FittedSkirt) {
+            if (auto document = opc::draftFittedSkirt(waist->value(), waistEase->value(), {
+                    fittedHip->value(), hipEase->value(), hipDepth->value(), skirtLength->value(),
+                    hemFlare->value(), lowerDart->value()
+                }, &error))
                 return document;
         } else if (index == Trousers) {
             const opc::TrouserMeasurements trousers{

@@ -11,6 +11,9 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGraphicsItem>
@@ -20,6 +23,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLineF>
@@ -30,16 +34,23 @@
 #include <QPen>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSaveFile>
 #include <QSet>
+#include <QSettings>
+#include <QStringDecoder>
 #include <QShortcut>
 #include <QSpinBox>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
+#include <QTemporaryDir>
+#include <QUuid>
 #include <QVariant>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <array>
+#include <set>
+#include <tuple>
 #include <cmath>
 #include <functional>
 
@@ -210,8 +221,21 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
     auto* pasteTable = new QPushButton(tr("Replace table from clipboard"));
     measurementButtons->addWidget(copyTable);
     measurementButtons->addWidget(pasteTable);
+    auto* appendTable = new QPushButton(QStringLiteral("Добавить мерки из буфера"));
+    auto* importTable = new QPushButton(QStringLiteral("Загрузить мерки из TSV…"));
+    auto* exportTable = new QPushButton(QStringLiteral("Сохранить мерки в TSV…"));
+    auto* exchangeButtons = new QHBoxLayout;
+    exchangeButtons->addWidget(appendTable);
+    exchangeButtons->addWidget(importTable);
+    exchangeButtons->addWidget(exportTable);
+    auto* library = new QPushButton(QStringLiteral("Библиотека мерок…"));
+    exchangeButtons->addWidget(library);
+    auto* standard = new QPushButton(QStringLiteral("Типовая фигура ГОСТ…"));
+    exchangeButtons->addWidget(standard);
+    exchangeButtons->addStretch();
+    sizesLayout->addLayout(exchangeButtons);
     const auto header = QStringLiteral("Size\tMeasurement\tValue (mm)");
-    QObject::connect(copyTable, &QPushButton::clicked, &dialog, [=, &dialog] {
+    const auto measurementTsv = [=, &dialog]() -> std::optional<QString> {
         QStringList lines{header};
         for (int row = 0; row < sizes->rowCount(); ++row) {
             QStringList cells;
@@ -220,16 +244,33 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
                 if (value.contains(u'\t') || value.contains(u'\r') || value.contains(u'\n')) {
                     QMessageBox::warning(&dialog, dialog.windowTitle(),
                                          tr("Cells containing tabs or line breaks cannot be copied as a table."));
-                    return;
+                    return std::nullopt;
                 }
                 cells.append(value);
             }
             lines.append(cells.join(u'\t'));
         }
-        QApplication::clipboard()->setText(lines.join(u'\n'));
+        return lines.join(u'\n');
+    };
+    QObject::connect(copyTable, &QPushButton::clicked, &dialog, [=] {
+        if (const auto text = measurementTsv())
+            QApplication::clipboard()->setText(*text);
     });
-    QObject::connect(pasteTable, &QPushButton::clicked, &dialog, [=, &dialog] {
-        auto text = QApplication::clipboard()->text();
+    const auto saveMeasurementTable = [=, &dialog](const QString& directory) {
+        const auto text = measurementTsv();
+        if (!text)
+            return;
+        const auto path = QFileDialog::getSaveFileName(QApplication::activeModalWidget(), exportTable->text(), directory, QStringLiteral("TSV (*.tsv)"));
+        if (path.isEmpty())
+            return;
+        QSaveFile file(path);
+        const auto bytes = text->toUtf8();
+        if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+            QMessageBox::warning(&dialog, dialog.windowTitle(),
+                QStringLiteral("Не удалось сохранить таблицу мерок.\n%1").arg(file.errorString()));
+    };
+    QObject::connect(exportTable, &QPushButton::clicked, &dialog, [=] { saveMeasurementTable({}); });
+    const auto readTsv = [=, &dialog](QString text) -> QVector<QStringList> {
         text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
         auto lines = text.split(u'\n');
         if (!lines.isEmpty() && lines.back().isEmpty())
@@ -237,18 +278,24 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         if (!lines.isEmpty() && lines.front() == header)
             lines.removeFirst();
         if (lines.isEmpty())
-            return;
+            return {};
         QVector<QStringList> rows;
         for (const auto& line : lines) {
             auto cells = line.split(u'\t');
             if (cells.size() != 3 || cells[0].trimmed().isEmpty() || line.contains(u'\r')) {
                 QMessageBox::warning(&dialog, dialog.windowTitle(),
-                    tr("Clipboard row %1 needs three tab-separated cells: size, measurement and value in mm.")
+                    QStringLiteral("Строка %1 должна содержать три колонки: размер, мерка и значение в мм.")
                         .arg(rows.size() + 1));
-                return;
+                return {};
             }
             rows.append(std::move(cells));
         }
+        return rows;
+    };
+    QObject::connect(pasteTable, &QPushButton::clicked, &dialog, [=] {
+        const auto rows = readTsv(QApplication::clipboard()->text());
+        if (rows.isEmpty())
+            return;
         sizes->setRowCount(0);
         for (const auto& cells : rows)
             addMeasurement(cells[0], cells[1], cells[2]);
@@ -258,13 +305,17 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         sizes->editItem(sizes->item(sizes->rowCount() - 1, 0));
     });
 
-    const auto readMeasurements = [sizes](QString& error) {
+    const auto readMeasurements = [sizes](QString& error, const QVector<QStringList>& appended = {}) {
         QVector<opc::PatternSize> entries;
         QMap<QString, qsizetype> sizeIndices;
-        for (int row = 0; row < sizes->rowCount(); ++row) {
-            const auto size = sizes->item(row, 0)->text().trimmed();
-            const auto name = sizes->item(row, 1)->text().trimmed();
-            const auto value = sizes->item(row, 2)->text().trimmed();
+        const auto cell = [sizes, &appended](qsizetype row, int column) {
+            return (row < sizes->rowCount() ? sizes->item(row, column)->text()
+                                            : appended[row - sizes->rowCount()][column]).trimmed();
+        };
+        for (qsizetype row = 0; row < sizes->rowCount() + appended.size(); ++row) {
+            const auto size = cell(row, 0);
+            const auto name = cell(row, 1);
+            const auto value = cell(row, 2);
             if (size.isEmpty()) {
                 error = tr("Enter a size name in measurement row %1.").arg(row + 1);
                 return QVector<opc::PatternSize>{};
@@ -286,67 +337,127 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         }
         return entries;
     };
-    auto* interpolate = new QPushButton(QStringLiteral("Добавить промежуточный размер…"));
-    auto* interpolationButtons = new QHBoxLayout;
-    sizesLayout->addLayout(interpolationButtons);
-    interpolationButtons->addWidget(interpolate);
-    interpolationButtons->addStretch();
-    QObject::connect(interpolate, &QPushButton::clicked, &dialog, [&] {
+    const auto appendMeasurements = [=, &dialog](const QString& text) {
+        const auto rows = readTsv(text);
+        if (rows.isEmpty())
+            return;
         QString error;
-        const auto entries = readMeasurements(error);
-        if (!error.isEmpty() || entries.size() < 2) {
-            QMessageBox::warning(&dialog, dialog.windowTitle(), error.isEmpty()
-                ? QStringLiteral("Добавьте как минимум два опорных размера.") : error);
+        readMeasurements(error, rows);
+        if (!error.isEmpty()) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(),
+                QStringLiteral("Мерки не добавлены.\n%1").arg(error));
             return;
         }
-
-        QDialog interpolation(&dialog);
-        interpolation.setWindowTitle(interpolate->text());
-        auto* layout = new QVBoxLayout(&interpolation);
-        auto* form = new QFormLayout;
-        layout->addLayout(form);
-        auto* first = new QComboBox;
-        auto* last = new QComboBox;
-        auto* name = new QLineEdit;
-        auto* percentage = new QDoubleSpinBox;
-        percentage->setRange(0.01, 99.99);
-        percentage->setValue(50);
-        percentage->setSuffix(QStringLiteral(" %"));
-        for (const auto& entry : entries) {
-            first->addItem(entry.name);
-            last->addItem(entry.name);
-        }
-        last->setCurrentIndex(1);
-        form->addRow(QStringLiteral("Начальный размер"), first);
-        form->addRow(QStringLiteral("Конечный размер"), last);
-        form->addRow(QStringLiteral("Доля от начального к конечному"), percentage);
-        form->addRow(QStringLiteral("Новый размер"), name);
-
-        auto* buttons = dialogButtons(layout, interpolation);
-        QObject::connect(buttons, &QDialogButtonBox::accepted, &interpolation, [&] {
-            const auto target = name->text().trimmed();
-            if (target.isEmpty() || target.contains(u'\t') || target.contains(u'\r') ||
-                target.contains(u'\n') || first->findText(target, Qt::MatchExactly) >= 0) {
-                QMessageBox::warning(&interpolation, interpolation.windowTitle(),
-                    QStringLiteral("Введите новое уникальное название размера без табуляции и переносов строки."));
-                return;
-            }
-            const auto& from = entries[first->currentIndex()].measurements;
-            const auto& to = entries[last->currentIndex()].measurements;
-            if (first->currentIndex() == last->currentIndex() || from.isEmpty() || from.keys() != to.keys()) {
-                QMessageBox::warning(&interpolation, interpolation.windowTitle(),
-                    QStringLiteral("Выберите два разных размера с одинаковым непустым набором мерок."));
-                return;
-            }
-            const double fraction = percentage->value() / 100;
-            for (auto measurement = from.cbegin(); measurement != from.cend(); ++measurement)
-                addMeasurement(target, measurement.key(),
-                    number(std::lerp(measurement.value(), to.value(measurement.key()), fraction)));
-            interpolation.accept();
-        });
-        interpolation.exec();
+        for (const auto& cells : rows)
+            addMeasurement(cells[0], cells[1], cells[2]);
+    };
+    QObject::connect(appendTable, &QPushButton::clicked, &dialog, [=] {
+        appendMeasurements(QApplication::clipboard()->text());
     });
-
+    QObject::connect(standard, &QPushButton::clicked, &dialog, [=, &dialog] {
+        QDialog reference(&dialog);
+        reference.setWindowTitle(QStringLiteral("ГОСТ 31396-2009 — женские фигуры"));
+        QFormLayout form(&reference);
+        QLabel source(QStringLiteral("Таблица 3, полнотная группа 0. Доступен фрагмент ряда "
+                                    "для обхватов груди 84–104 см и ростов 152–170 см.<br>"
+                                    "<a href='https://protect.gost.ru/gost/details/7d9919ad-6695-41c5-93e1-8224eaf3117d'>"
+                                    "Карточка Росстандарта</a>"));
+        source.setWordWrap(true);
+        source.setOpenExternalLinks(true);
+        form.addRow(&source);
+        QComboBox height, bust;
+        for (int cm : {152, 158, 164, 170})
+            height.addItem(QString::number(cm), cm);
+        // This block of table 3 lists a hip circumference 2 cm below the bust.
+        for (int cm : {84, 88, 92, 96, 100, 104})
+            bust.addItem(QString::number(cm), cm);
+        form.addRow(QStringLiteral("Рост, см"), &height);
+        form.addRow(QStringLiteral("Обхват груди, см"), &bust);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        QObject::connect(&buttons, &QDialogButtonBox::accepted, &reference, &QDialog::accept);
+        QObject::connect(&buttons, &QDialogButtonBox::rejected, &reference, &QDialog::reject);
+        if (reference.exec() != QDialog::Accepted)
+            return;
+        const int statureCm = height.currentData().toInt();
+        const int bustCm = bust.currentData().toInt();
+        const int hipCm = bustCm - 2;
+        const auto size = QStringLiteral("ГОСТ 31396-2009 %1-%2-%3").arg(statureCm).arg(bustCm).arg(hipCm);
+        const auto row = [&](const QString& measurement, int cm) {
+            return QStringLiteral("%1\t%2\t%3").arg(size, measurement).arg(cm * 10);
+        };
+        appendMeasurements(QStringList{row(QStringLiteral("height"), statureCm),
+                                       row(QStringLiteral("bust"), bustCm),
+                                       row(QStringLiteral("hip"), hipCm)}.join(u'\n'));
+    });
+    const auto importMeasurementTable = [=, &dialog](const QString& directory) {
+        const auto path = QFileDialog::getOpenFileName(QApplication::activeModalWidget(), importTable->text(), directory, QStringLiteral("TSV (*.tsv)"));
+        if (path.isEmpty())
+            return;
+        constexpr qint64 maxTableBytes = 4 * 1024 * 1024;
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(),
+                QStringLiteral("Не удалось открыть таблицу мерок.\n%1").arg(file.errorString()));
+            return;
+        }
+        const auto bytes = file.read(maxTableBytes + 1);
+        QStringDecoder decode(QStringDecoder::Utf8, QStringConverter::Flag::Stateless);
+        const QString text = decode(bytes);
+        if (file.error() != QFileDevice::NoError || bytes.size() > maxTableBytes || decode.hasError()) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(),
+                QStringLiteral("Не удалось прочитать таблицу. Требуется файл UTF-8 размером до 4 МБ."));
+            return;
+        }
+        appendMeasurements(text);
+    };
+    QObject::connect(importTable, &QPushButton::clicked, &dialog, [=] { importMeasurementTable({}); });
+    QObject::connect(library, &QPushButton::clicked, &dialog, [=, &dialog] {
+        QSettings settings;
+        const auto key = QStringLiteral("grading/measurementLibraryDirectory");
+        auto directory = settings.value(key).toString();
+        QDialog catalog(&dialog);
+        catalog.setWindowTitle(library->text());
+        QFormLayout form(&catalog);
+        QLabel location;
+        auto* choose = new QPushButton(QStringLiteral("Выбрать папку…"));
+        auto* load = new QPushButton(QStringLiteral("Добавить систему в проект…"));
+        auto* save = new QPushButton(QStringLiteral("Сохранить текущую таблицу…"));
+        form.addRow(QStringLiteral("Папка"), &location);
+        form.addRow(choose);
+        form.addRow(load);
+        form.addRow(save);
+        QDialogButtonBox close(QDialogButtonBox::Close);
+        form.addRow(&close);
+        const auto refresh = [&] {
+            const bool available = !directory.isEmpty() && QDir(directory).exists();
+            location.setText(available ? QDir::toNativeSeparators(directory) : QStringLiteral("Выберите папку с таблицами TSV"));
+            load->setEnabled(available);
+            save->setEnabled(available);
+        };
+        QObject::connect(choose, &QPushButton::clicked, &catalog, [&] {
+            const auto path = QFileDialog::getExistingDirectory(&catalog, choose->text(), directory);
+            if (!path.isEmpty()) {
+                directory = path;
+                settings.setValue(key, directory);
+                refresh();
+            }
+        });
+        QObject::connect(load, &QPushButton::clicked, &catalog, [&] { importMeasurementTable(directory); });
+        QObject::connect(save, &QPushButton::clicked, &catalog, [&] {
+            QString error;
+            const auto entries = readMeasurements(error);
+            if (!error.isEmpty() || entries.isEmpty()) {
+                QMessageBox::warning(&catalog, catalog.windowTitle(), error.isEmpty()
+                    ? QStringLiteral("Добавьте хотя бы одну строку мерок.") : error);
+                return;
+            }
+            saveMeasurementTable(directory);
+        });
+        QObject::connect(&close, &QDialogButtonBox::rejected, &catalog, &QDialog::reject);
+        refresh();
+        catalog.exec();
+    });
     auto* rulesHint = new QLabel(tr("Enter the target size and choose a point on the base piece. Enter X and Y offsets in mm. Offsets are added after formulas are recalculated, using the selected base point as the reference. Positive Y moves down. Coincident base points on the same piece share the offset."));
     rulesHint->setWordWrap(true);
     rulesLayout->addWidget(rulesHint);
@@ -404,13 +515,270 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         rules->editItem(rules->item(rules->rowCount() - 1, 0));
     });
 
+    const auto readRules = [rules](const QSet<QString>& sizeNames, QString& error) {
+        QVector<opc::GradeRule> result;
+        for (int row = 0; row < rules->rowCount(); ++row) {
+            const auto size = rules->item(row, 0)->text().trimmed();
+            auto* piece = qobject_cast<QComboBox*>(rules->cellWidget(row, 1));
+            auto* point = qobject_cast<QComboBox*>(rules->cellWidget(row, 2));
+            bool xOk, yOk;
+            const double x = rules->item(row, 3)->text().toDouble(&xOk);
+            const double y = rules->item(row, 4)->text().toDouble(&yOk);
+            if (!sizeNames.contains(size) || point->currentIndex() < 0 || !xOk || !yOk || !std::isfinite(x) || !std::isfinite(y)) {
+                error = tr("Grade rule row %1 needs a defined size, a point and two numeric offsets.").arg(row + 1);
+                return QVector<opc::GradeRule>{};
+            }
+            result.append({size, piece->currentIndex(), point->currentData().toPointF(), {x, y}});
+        }
+        return result;
+    };
+
+    auto* interpolate = new QPushButton(QStringLiteral("Добавить промежуточный размер…"));
+    auto* interpolationButtons = new QHBoxLayout;
+    sizesLayout->addLayout(interpolationButtons);
+    interpolationButtons->addWidget(interpolate);
+    interpolationButtons->addStretch();
+    auto* grid = new QPushButton(QStringLiteral("Добавить по размеру и росту…"));
+    interpolationButtons->insertWidget(1, grid);
+    auto* batchGrid = new QPushButton(QStringLiteral("Группа размеров и ростов…"));
+    interpolationButtons->insertWidget(2, batchGrid);
+    const auto interpolateSize = [&](QPushButton* command, bool twoAxes, bool batch = false) {
+        QString error;
+        const auto entries = readMeasurements(error);
+        const int count = twoAxes ? 4 : 2;
+        if (!error.isEmpty() || entries.size() < count) {
+            QMessageBox::warning(&dialog, dialog.windowTitle(), error.isEmpty()
+                ? QStringLiteral("Для этой операции нужно %1 разных опорных строк.").arg(count) : error);
+            return;
+        }
+
+        QDialog interpolation(&dialog);
+        interpolation.setWindowTitle(command->text());
+        auto* layout = new QVBoxLayout(&interpolation);
+        auto* form = new QFormLayout;
+        layout->addLayout(form);
+        const QStringList gridLabels{
+            QStringLiteral("Меньший размер, меньший рост"),
+            QStringLiteral("Больший размер, меньший рост"),
+            QStringLiteral("Меньший размер, больший рост"),
+            QStringLiteral("Больший размер, больший рост")
+        };
+        QVector<QComboBox*> references;
+        for (int i = 0; i < count; ++i) {
+            auto* reference = new QComboBox;
+            for (const auto& entry : entries)
+                reference->addItem(entry.name);
+            reference->setCurrentIndex(i);
+            references.append(reference);
+            form->addRow(twoAxes ? gridLabels[i] : i == 0 ? QStringLiteral("Начальный размер")
+                                                         : QStringLiteral("Конечный размер"), reference);
+        }
+        const auto addPercentage = [&](const QString& label) {
+            auto* field = new QDoubleSpinBox;
+            field->setRange(twoAxes ? 0 : 0.01, twoAxes ? 100 : 99.99);
+            field->setValue(50);
+            field->setSuffix(QStringLiteral(" %"));
+            form->addRow(label, field);
+            return field;
+        };
+        auto* sizeShare = batch ? nullptr : addPercentage(twoAxes ? QStringLiteral("Доля по размеру")
+                                                : QStringLiteral("Доля от начального к конечному"));
+        auto* heightShare = twoAxes && !batch ? addPercentage(QStringLiteral("Доля по росту")) : nullptr;
+        auto* name = batch ? nullptr : new QLineEdit;
+        auto* targets = batch ? new QPlainTextEdit : nullptr;
+        if (batch) {
+            targets->setPlaceholderText(QStringLiteral("49/168\t25\t25\n50/172\t50\t50"));
+            form->addRow(QStringLiteral("Размер, доля размера и доля роста (%), через табуляцию"), targets);
+            QSpinBox* limits[2][3];
+            for (int axis = 0; axis < 2; ++axis) {
+                auto* range = new QHBoxLayout;
+                const int defaults[2][3] = {{44, 52, 2}, {164, 180, 4}};
+                const QStringList labels{QStringLiteral("От"), QStringLiteral("До"), QStringLiteral("Шаг")};
+                for (int column = 0; column < 3; ++column) {
+                    limits[axis][column] = new QSpinBox;
+                    limits[axis][column]->setRange(1, 999);
+                    limits[axis][column]->setValue(defaults[axis][column]);
+                    range->addWidget(new QLabel(labels[column]));
+                    range->addWidget(limits[axis][column]);
+                }
+                form->addRow(axis == 0 ? QStringLiteral("Ряд размеров") : QStringLiteral("Ряд ростов (см)"), range);
+            }
+            auto* generate = new QPushButton(QStringLiteral("Заполнить размерно-ростовой ряд"));
+            form->addRow(generate);
+            QObject::connect(generate, &QPushButton::clicked, &interpolation, [=, &interpolation] {
+                const int sizeMin = limits[0][0]->value(), sizeMax = limits[0][1]->value();
+                const int sizeStep = limits[0][2]->value();
+                const int heightMin = limits[1][0]->value(), heightMax = limits[1][1]->value();
+                const int heightStep = limits[1][2]->value();
+                if (sizeMin >= sizeMax || heightMin >= heightMax
+                    || (sizeMax - sizeMin) % sizeStep || (heightMax - heightMin) % heightStep) {
+                    QMessageBox::warning(&interpolation, interpolation.windowTitle(),
+                        QStringLiteral("Укажите возрастающие границы и шаг, который точно приводит к верхней границе."));
+                    return;
+                }
+                const int count = ((sizeMax - sizeMin) / sizeStep + 1)
+                    * ((heightMax - heightMin) / heightStep + 1) - 4;
+                if (count < 1 || count > 500) {
+                    QMessageBox::warning(&interpolation, interpolation.windowTitle(),
+                        QStringLiteral("Ряд должен содержать от 1 до 500 новых размеров и ростов."));
+                    return;
+                }
+                QStringList lines;
+                for (int size = sizeMin; size <= sizeMax; size += sizeStep) {
+                    for (int height = heightMin; height <= heightMax; height += heightStep) {
+                        if ((size == sizeMin || size == sizeMax) && (height == heightMin || height == heightMax))
+                            continue;
+                        lines.append(QStringLiteral("%1/%2\t%3\t%4").arg(size).arg(height)
+                            .arg(number(100.0 * (size - sizeMin) / (sizeMax - sizeMin)))
+                            .arg(number(100.0 * (height - heightMin) / (heightMax - heightMin))));
+                    }
+                }
+                targets->setPlainText(lines.join(u'\n'));
+            });
+
+        } else {
+            form->addRow(QStringLiteral("Новый размер"), name);
+        }
+        auto* includeRules = new QCheckBox(QStringLiteral("Рассчитать смещения точек"));
+        form->addRow(includeRules);
+
+        auto* buttons = dialogButtons(layout, interpolation);
+        QObject::connect(buttons, &QDialogButtonBox::accepted, &interpolation, [&] {
+            const auto warn = [&](const QString& message) {
+                QMessageBox::warning(&interpolation, interpolation.windowTitle(), message);
+            };
+            struct Target {
+                QString name;
+                double sizeShare;
+                double heightShare;
+            };
+            QVector<Target> requested;
+            QSet<QString> names;
+            for (const auto& entry : entries)
+                names.insert(entry.name);
+            const auto addTarget = [&](const QString& name, double size, double height) {
+                if (name.isEmpty() || name.contains(u'\t') || name.contains(u'\r') || name.contains(u'\n')
+                    || names.contains(name) || !(size >= 0 && size <= 100 && height >= 0 && height <= 100))
+                    return false;
+                names.insert(name);
+                requested.append({name, size / 100, height / 100});
+                return true;
+            };
+            if (batch) {
+                const auto lines = targets->toPlainText().split(u'\n');
+                for (qsizetype row = 0; row < lines.size(); ++row) {
+                    if (lines[row].trimmed().isEmpty())
+                        continue;
+                    const auto cells = lines[row].split(u'\t');
+                    bool sizeOk = false, heightOk = false;
+                    const double size = cells.value(1).trimmed().toDouble(&sizeOk);
+                    const double height = cells.value(2).trimmed().toDouble(&heightOk);
+                    if (cells.size() != 3 || !sizeOk || !heightOk
+                        || !addTarget(cells.front().trimmed(), size, height)) {
+                        warn(QStringLiteral("Строка %1: укажите уникальное название и две доли от 0 до 100 %.").arg(row + 1));
+                        return;
+                    }
+                }
+                if (requested.isEmpty()) {
+                    warn(QStringLiteral("Введите хотя бы одну строку для расчёта."));
+                    return;
+                }
+            } else if (!addTarget(name->text().trimmed(), sizeShare->value(), twoAxes ? heightShare->value() : 0)) {
+                warn(QStringLiteral("Введите новое уникальное название размера без табуляции и переносов строки."));
+                return;
+            }
+            const auto& first = entries[references.front()->currentIndex()].measurements;
+            const auto keys = first.keys();
+            QMap<QString, int> referenceIndices;
+            for (int i = 0; i < count; ++i) {
+                const auto& entry = entries[references[i]->currentIndex()];
+                referenceIndices.insert(entry.name, i);
+                if (keys.isEmpty() || entry.measurements.keys() != keys) {
+                    warn(QStringLiteral("У всех опорных строк должен быть одинаковый непустой набор мерок."));
+                    return;
+                }
+            }
+            if (referenceIndices.size() != count) {
+                warn(QStringLiteral("Выберите разные опорные строки."));
+                return;
+            }
+
+            const auto blend = [&](const std::array<double, 4>& values, const Target& target) {
+                const double low = std::lerp(values[0], values[1], target.sizeShare);
+                return twoAxes ? std::lerp(low, std::lerp(values[2], values[3], target.sizeShare),
+                                          target.heightShare) : low;
+            };
+            using PointKey = std::tuple<qsizetype, double, double>;
+            std::array<QMap<PointKey, QPointF>, 4> offsets;
+            if (includeRules->isChecked()) {
+                QSet<QString> sizeNames;
+                for (const auto& entry : entries)
+                    sizeNames.insert(entry.name);
+                QString ruleError;
+                const auto existingRules = readRules(sizeNames, ruleError);
+                if (!ruleError.isEmpty()) {
+                    warn(ruleError);
+                    return;
+                }
+                for (const auto& rule : existingRules) {
+                    const auto reference = referenceIndices.constFind(rule.size);
+                    if (reference == referenceIndices.cend())
+                        continue;
+                    auto& rulesAtReference = offsets[reference.value()];
+                    const auto key = PointKey(rule.piece, rule.point.x(), rule.point.y());
+                    if (rulesAtReference.contains(key)) {
+                        warn(QStringLiteral("Уберите повторяющиеся правила для одной точки опорного размера."));
+                        return;
+                    }
+                    rulesAtReference.insert(key, rule.offset);
+                }
+                const auto points = offsets.front().keys();
+                for (int i = 1; i < count; ++i) {
+                    if (offsets[i].keys() != points) {
+                        warn(QStringLiteral("Задайте правила для одних и тех же точек во всех опорных размерах. "
+                                            "Укажите нулевое смещение явно, если точка не смещается."));
+                        return;
+                    }
+                }
+            }
+
+            for (const auto& target : requested) {
+                for (const auto& key : keys) {
+                    std::array<double, 4> values{};
+                    for (int i = 0; i < count; ++i)
+                        values[i] = entries[references[i]->currentIndex()].measurements.value(key);
+                    addMeasurement(target.name, key, number(blend(values, target)));
+                }
+                for (auto point = offsets.front().cbegin(); point != offsets.front().cend(); ++point) {
+                    const auto [piece, x, y] = point.key();
+                    std::array<double, 4> dx{}, dy{};
+                    for (int i = 0; i < count; ++i) {
+                        const auto offset = offsets[i].value(point.key());
+                        dx[i] = offset.x();
+                        dy[i] = offset.y();
+                    }
+                    addRule({target.name, piece, {x, y}, {blend(dx, target), blend(dy, target)}}, true);
+                }
+            }
+            interpolation.accept();
+        });
+        interpolation.exec();
+    };
+    QObject::connect(interpolate, &QPushButton::clicked, &dialog, [&] { interpolateSize(interpolate, false); });
+    QObject::connect(grid, &QPushButton::clicked, &dialog, [&] { interpolateSize(grid, true); });
+    QObject::connect(batchGrid, &QPushButton::clicked, &dialog, [&] { interpolateSize(batchGrid, true, true); });
+
     auto* buttons = dialogButtons(layout, dialog);
     addContextHelp(dialog, *buttons, QStringLiteral("Градация лекал"), QStringLiteral(
         "Добавьте отдельную строку для каждого сочетания размера и роста, например 48/164 и 48/176. "
         "В таблице мерок задайте значения в миллиметрах. Пропущенные мерки берутся из базовой конструкции.\n\n"
+        "Для переноса мерок между моделями скопируйте таблицу в исходном проекте и нажмите «Добавить мерки из буфера» в целевом. "
+        "Команды сохранения и загрузки TSV позволяют повторно использовать таблицу мерок из файла UTF-8. "
+        "Совпадающие мерки одного размера вызывают отказ всей вставки.\n\n"
         "Чтобы получить мерки промежуточного размера, выберите два опорных размера с одинаковым набором мерок. "
         "Задайте долю от начального к конечному размеру. Для 48/170 между 48/164 и 48/176 укажите 50 %. "
-        "При необходимости задайте смещения точек для нового размера на вкладке правил.\n\n"
+        "Чтобы также рассчитать смещения, включите «Рассчитать смещения точек». Правила обоих опорных размеров должны ссылаться на одинаковые точки.\n\n"
+        "Для расчёта группы выберите четыре опорные строки. Для каждого нового размера введите его название, долю по размеру и долю по росту через табуляцию.\n\n"
         "Для параметрических лекал включите пересчёт по меркам размера. Правила градации задают дополнительные "
         "смещения точек. Сравните контуры наложением размеров и проверьте сопрягаемые срезы перед раскладкой."));
     auto result = document.production();
@@ -429,18 +797,11 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         QSet<QString> sizeNames;
         for (const auto& size : updated.sizes)
             sizeNames.insert(size.name);
-        for (int row = 0; row < rules->rowCount(); ++row) {
-            const auto size = rules->item(row, 0)->text().trimmed();
-            auto* piece = qobject_cast<QComboBox*>(rules->cellWidget(row, 1));
-            auto* point = qobject_cast<QComboBox*>(rules->cellWidget(row, 2));
-            bool xOk, yOk;
-            const double x = rules->item(row, 3)->text().toDouble(&xOk);
-            const double y = rules->item(row, 4)->text().toDouble(&yOk);
-            if (!sizeNames.contains(size) || point->currentIndex() < 0 || !xOk || !yOk) {
-                warn(tr("Grade rule row %1 needs a defined size, a point and two numeric offsets.").arg(row + 1));
-                return;
-            }
-            updated.rules.append({size, piece->currentIndex(), point->currentData().toPointF(), {x, y}});
+        QString ruleError;
+        updated.rules = readRules(sizeNames, ruleError);
+        if (!ruleError.isEmpty()) {
+            warn(ruleError);
+            return;
         }
         for (const auto& placement : updated.placements) {
             if (!placement.size.isEmpty() && !sizeNames.contains(placement.size)) {
@@ -465,9 +826,9 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
     return std::nullopt;
 }
 
-std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::PatternDocument& document) {
+std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::PatternDocument& document, const QString& material) {
     QDialog dialog(parent);
-    dialog.setWindowTitle(tr("Fabric Layout"));
+    dialog.setWindowTitle(material.isEmpty() ? tr("Fabric Layout") : tr("Fabric Layout · %1").arg(material));
     dialog.resize(1000, 660);
     auto data = document.production();
     auto* layout = new QVBoxLayout(&dialog);
@@ -566,6 +927,25 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     auto* lengthRepeat = repeatInput(tr("Repeat along length"), data.fabricRepeatMm.y(), "markerLengthRepeat");
     repeatControls->addStretch();
 
+    auto* shrinkageControls = new QHBoxLayout;
+    layout->addLayout(shrinkageControls);
+    const auto shrinkageInput = [&](const QString& label, double value, const QString& name) {
+        auto* input = new QDoubleSpinBox;
+        input->setObjectName(name);
+        input->setRange(0, 99);
+        input->setDecimals(2);
+        input->setSuffix(QStringLiteral(" %"));
+        input->setValue(value);
+        auto* caption = new QLabel(label);
+        caption->setBuddy(input);
+        shrinkageControls->addWidget(caption);
+        shrinkageControls->addWidget(input);
+        return input;
+    };
+    auto* weft = shrinkageInput(QStringLiteral("Усадка по утку"), data.fabricShrinkagePercent.x(), "markerWeftShrinkage");
+    auto* warp = shrinkageInput(QStringLiteral("Усадка по основе"), data.fabricShrinkagePercent.y(), "markerWarpShrinkage");
+    shrinkageControls->addStretch();
+
     auto* registrationControls = new QHBoxLayout;
     layout->addLayout(registrationControls);
     auto* registration = new QComboBox;
@@ -611,12 +991,16 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     auto* stats = new QLabel;
     stats->setWordWrap(true);
     layout->addWidget(stats);
+    auto* optimization = new QLabel;
+    optimization->setWordWrap(true);
+    optimization->hide();
+    layout->addWidget(optimization);
     auto* buttons = dialogButtons(layout, dialog);
     addContextHelp(dialog, *buttons, QStringLiteral("Раскладка лекал"), QStringLiteral(
         "Укажите ширину ткани и минимальный зазор в миллиметрах. Добавьте копии деталей по размерам "
         "и проверьте количество деталей кроя. Для направленной ткани запретите разворот.\n\n"
         "Для ткани с рисунком задайте раппорт. Для совмещения рисунка на шве укажите точку на именованном срезе. "
-        "После авторасстановки проверьте отчёт раскроя. Печатайте PDF в масштабе 100 %."));
+        "После авторасстановки сравните длину с исходным алгоритмом и проверьте отчёт раскроя. Печатайте PDF в масштабе 100 %."));
 
     QMap<QString, opc::PatternDocument> graded;
     graded.insert(QString{}, document);
@@ -626,9 +1010,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     const auto cutFor = [&](const opc::FabricPlacement& placement) {
         if (!graded.contains(placement.size))
             graded.insert(placement.size, opc::gradedPattern(document, placement.size, nullptr, opc::GradeEdgeNames::Preserve));
-        return opc::fabricPiece(graded[placement.size], placement);
+        return opc::fabricPiece(graded[placement.size], placement, false, data.fabricShrinkagePercent);
     };
     const auto updateUsage = [&] {
+        optimization->hide();
         QVector<QPolygonF> placed;
         qsizetype repeats = 0;
         for (auto* item : items) {
@@ -780,6 +1165,12 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         data.pieceClearanceMm = value;
         updateUsage();
     });
+    const auto updateShrinkage = [&] {
+        data.fabricShrinkagePercent = {weft->value(), warp->value()};
+        rebuild();
+    };
+    QObject::connect(weft, &QDoubleSpinBox::valueChanged, &dialog, updateShrinkage);
+    QObject::connect(warp, &QDoubleSpinBox::valueChanged, &dialog, updateShrinkage);
     const auto updateRepeat = [&] {
         data.fabricRepeatMm = {crossRepeat->value(), lengthRepeat->value()};
         updateUsage();
@@ -970,16 +1361,29 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         reportDialog.exec();
     });
     QObject::connect(automatic, &QPushButton::clicked, &dialog, [&] {
+        QElapsedTimer timer;
+        timer.start();
         auto result = opc::arrangeFabric(document, data);
+        const auto elapsed = timer.elapsed();
         QString error;
         switch (result.error) {
         case opc::FabricLayoutError::None:
             data.placements = std::move(result.placements);
             rebuild();
             fitFabric();
+            if (result.baselineLengthMm && result.optimizedLengthMm) {
+                optimization->setText(QStringLiteral("Автоматическая раскладка: %1 → %2 мм. Экономия: %3 мм. Время поиска: %4 с.")
+                    .arg(number(*result.baselineLengthMm), number(*result.optimizedLengthMm),
+                         number(*result.baselineLengthMm - *result.optimizedLengthMm),
+                         number(elapsed / 1000.0)));
+                optimization->show();
+            }
             return;
         case opc::FabricLayoutError::TooManyCopies:
             error = tr("Automatic layout supports up to %1 copies.").arg(opc::maxAutomaticCopies);
+            break;
+        case opc::FabricLayoutError::InvalidShrinkage:
+            error = QStringLiteral("Задайте усадку от 0 до 99 % по каждой оси.");
             break;
         case opc::FabricLayoutError::InvalidWidth:
             error = tr("Enter a positive fabric width.");
@@ -1017,4 +1421,196 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     QObject::disconnect(&scene, nullptr, &dialog, nullptr);
     view->setScene(nullptr);
     return accepted ? std::optional(std::move(data)) : std::nullopt;
+}
+
+void exportMaterialLay(QWidget* parent, const opc::PatternDocument& document) {
+    const auto title = QStringLiteral("Многоматериальный настил");
+    const auto& original = document.production();
+    if (original.placements.isEmpty()) {
+        QMessageBox::information(parent, title, QStringLiteral("Добавьте комплекты в раскладку."));
+        return;
+    }
+
+    // Group matching left and right copies in source order so an assignment
+    // cannot separate a pair. An unmatched hand can still be cut on its own.
+    using HandKey = std::tuple<qsizetype, QString, opc::CutHand>;
+    QMap<HandKey, QVector<qsizetype>> handed;
+    for (qsizetype i = 0; i < original.placements.size(); ++i) {
+        const auto& copy = original.placements[i];
+        if (copy.hand != opc::CutHand::Single)
+            handed[{copy.piece, copy.size, copy.hand}].append(i);
+    }
+    QMap<qsizetype, qsizetype> pairs;
+    QSet<qsizetype> pairedLater;
+    for (auto it = handed.cbegin(); it != handed.cend(); ++it) {
+        const auto& [piece, size, hand] = it.key();
+        if (hand != opc::CutHand::Left)
+            continue;
+        const auto right = handed.constFind({piece, size, opc::CutHand::Right});
+        if (right == handed.cend())
+            continue;
+        for (qsizetype i = 0; i < std::min(it->size(), right->size()); ++i) {
+            const auto first = std::min(it->at(i), right->at(i));
+            const auto last = std::max(it->at(i), right->at(i));
+            pairs.insert(first, last);
+            pairedLater.insert(last);
+        }
+    }
+
+    QDialog assignment(parent);
+    assignment.setWindowTitle(title);
+    QVBoxLayout layout(&assignment);
+    auto* table = makeTable(&layout, {QStringLiteral("Деталь"), QStringLiteral("Копии"),
+                                     QStringLiteral("Материал"), QStringLiteral("№ настила")});
+    struct Assignment {
+        QVector<qsizetype> copies;
+        QLineEdit* material;
+        QSpinBox* lay;
+    };
+    QVector<Assignment> assignments;
+    for (qsizetype i = 0; i < original.placements.size(); ++i) {
+        if (pairedLater.contains(i))
+            continue;
+        const auto& copy = original.placements[i];
+        if (copy.piece < 0 || copy.piece >= document.pieces().size()) {
+            QMessageBox::warning(parent, title, QStringLiteral("Одна из копий ссылается на отсутствующую деталь."));
+            return;
+        }
+        const int row = table->rowCount();
+        table->insertRow(row);
+        const auto size = copy.size.isEmpty() ? QStringLiteral("База") : copy.size;
+        auto* label = new QTableWidgetItem(QStringLiteral("%1 · %2").arg(document.pieces()[copy.piece].name, size));
+        const auto pair = pairs.constFind(i);
+        auto* count = new QTableWidgetItem(pair == pairs.cend() ? QString::number(i + 1)
+            : QStringLiteral("%1 и %2").arg(i + 1).arg(*pair + 1));
+        label->setFlags(label->flags() & ~Qt::ItemIsEditable);
+        count->setFlags(count->flags() & ~Qt::ItemIsEditable);
+        table->setItem(row, 0, label);
+        table->setItem(row, 1, count);
+        auto* material = new QLineEdit(QStringLiteral("Основной"));
+        material->setMaxLength(100);
+        table->setCellWidget(row, 2, material);
+        auto* lay = new QSpinBox;
+        lay->setRange(1, 9999);
+        table->setCellWidget(row, 3, lay);
+        QVector<qsizetype> copies{i};
+        if (pair != pairs.cend())
+            copies.append(*pair);
+        assignments.append({std::move(copies), material, lay});
+    }
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    layout.addWidget(&buttons);
+    QObject::connect(&buttons, &QDialogButtonBox::accepted, &assignment, &QDialog::accept);
+    QObject::connect(&buttons, &QDialogButtonBox::rejected, &assignment, &QDialog::reject);
+    assignment.resize(650, 420);
+    if (assignment.exec() != QDialog::Accepted)
+        return;
+
+    using LayKey = std::pair<QString, int>;
+    QMap<LayKey, QVector<opc::FabricPlacement>> groups;
+    for (const auto& assignment : assignments) {
+        const auto name = assignment.material->text().trimmed();
+        if (name.isEmpty() || name.contains(u'\t') || name.contains(u'\r') || name.contains(u'\n')) {
+            QMessageBox::warning(parent, title, QStringLiteral("Укажите имя каждого материала без переносов и табуляции."));
+            return;
+        }
+        auto& group = groups[{name, assignment.lay->value()}];
+        for (const auto index : assignment.copies)
+            group.append(original.placements[index]);
+    }
+
+    struct Material {
+        QString name;
+        int lay;
+        opc::PatternDocument project;
+        int layers;
+        double length;
+    };
+    QVector<Material> materials;
+    for (auto it = groups.cbegin(); it != groups.cend(); ++it) {
+        const auto& [name, lay] = it.key();
+        const auto label = QStringLiteral("%1 · настил %2").arg(name).arg(lay);
+        auto project = document;
+        auto& data = project.production();
+        data.placements = it.value();
+        data.fabricFlaws.clear();
+
+        bool accepted = false;
+        data.fabricWidth = QInputDialog::getDouble(parent, title, QStringLiteral("Ширина материала «%1», мм").arg(label),
+                                                  data.fabricWidth, 1, 1000000, 2, &accepted);
+        if (!accepted)
+            return;
+        const int layers = QInputDialog::getInt(parent, title, QStringLiteral("Слоёв материала «%1»").arg(label),
+                                                1, 1, 10000, 1, &accepted);
+        if (!accepted)
+            return;
+        const auto arranged = opc::arrangeFabric(project, data);
+        if (arranged.error == opc::FabricLayoutError::None)
+            data.placements = arranged.placements;
+        const auto edited = editFabricLayout(parent, project, label);
+        if (!edited)
+            return;
+        // The batch owns copy membership. The editor can refine fabric settings
+        // and layout, but changing the order quantity here would change the batch.
+        auto order = [](const auto& placements) {
+            std::multiset<std::tuple<qsizetype, QString, opc::CutHand, opc::FoldEdge>> keys;
+            for (const auto& copy : placements)
+                keys.emplace(copy.piece, copy.size, copy.hand, copy.fold);
+            return keys;
+        };
+        if (order(edited->placements) != order(it.value())) {
+            QMessageBox::warning(parent, title,
+                QStringLiteral("Состав, парность и сгибы копий материала «%1» изменились.").arg(label));
+            return;
+        }
+        data = *edited;
+        const auto report = opc::cuttingReport(project, data);
+        if (!report.canExport(data.fabricWidth)) {
+            QMessageBox::warning(parent, title, QStringLiteral("Проверьте раскладку материала «%1».").arg(label));
+            return;
+        }
+        project.productInformation().material = name;
+        materials.append({name, lay, std::move(project), layers, report.usage.length});
+    }
+
+    const auto destination = QFileDialog::getExistingDirectory(parent, title);
+    if (destination.isEmpty())
+        return;
+    QDir output(destination);
+    QTemporaryDir staging(output.filePath(QStringLiteral(".sofit-lay-XXXXXX")));
+    if (!staging.isValid()) {
+        QMessageBox::warning(parent, title, staging.errorString());
+        return;
+    }
+
+    QString usage = QStringLiteral("Материал\tПроект\tШирина, мм\tКопий на слой\tДлина слоя, мм\tСлоёв\tРасход, м\tУсадка по утку, %\tУсадка по основе, %\t№ настила\n");
+    QString error;
+    for (qsizetype i = 0; i < materials.size(); ++i) {
+        const auto& material = materials[i];
+        const auto stem = QStringLiteral("material-%1").arg(i + 1);
+        const auto& data = material.project.production();
+        if (!material.project.save(staging.filePath(stem + ".sofit"), &error)
+            || !opc::exportFabricDxf(staging.filePath(stem + ".dxf"), material.project, data, error)
+            || !opc::exportFabricPdf(staging.filePath(stem + ".pdf"), material.project, data, {}, error)) {
+            QMessageBox::warning(parent, title, error);
+            return;
+        }
+        usage += QStringLiteral("%1\t%2.sofit\t%3\t%4\t%5\t%6\t%7\t%8\t%9\t%10\n").arg(material.name, stem)
+            .arg(data.fabricWidth, 0, 'f', 2).arg(data.placements.size()).arg(material.length, 0, 'f', 2)
+            .arg(material.layers).arg(material.length * material.layers / 1000., 0, 'f', 4)
+            .arg(data.fabricShrinkagePercent.x(), 0, 'f', 2).arg(data.fabricShrinkagePercent.y(), 0, 'f', 2).arg(material.lay);
+    }
+    QSaveFile report(staging.filePath(QStringLiteral("usage.tsv")));
+    const auto bytes = usage.toUtf8();
+    if (!report.open(QIODevice::WriteOnly) || report.write(bytes) != bytes.size() || !report.commit()) {
+        QMessageBox::warning(parent, title, report.errorString());
+        return;
+    }
+    const auto folder = QStringLiteral("SOFIT-lay-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces));
+    if (!output.rename(QDir(staging.path()).dirName(), folder)) {
+        QMessageBox::warning(parent, title, QStringLiteral("Не удалось сохранить комплект настила."));
+        return;
+    }
+    staging.setAutoRemove(false);
+    QMessageBox::information(parent, title, QStringLiteral("Комплект и расход сохранены в %1").arg(output.filePath(folder)));
 }

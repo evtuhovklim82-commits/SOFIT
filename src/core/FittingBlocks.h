@@ -15,6 +15,10 @@ struct DressSkirtMeasurements {
     double hip, hipEase, hipDepth, length, hemFlare, dartLength;
 };
 
+std::optional<PatternDocument> draftFittedSkirt(double waist, double waistEase,
+                                                const DressSkirtMeasurements& skirt,
+                                                QString* error = nullptr);
+
 struct FittingSeam {
     QString label;
     double first, second, targetDifference;

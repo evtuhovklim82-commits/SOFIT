@@ -1,4 +1,5 @@
 #include "PatternDocument.h"
+#include "ContourModeling.h"
 #include "Production.h"
 #include <QFile>
 #include <QFileInfo>
@@ -18,7 +19,8 @@ namespace {
 constexpr int legacyEnvelopeVersion = 14;
 constexpr int productEnvelopeVersion = 15;
 constexpr int repeatEnvelopeVersion = 16;
-constexpr int projectVersion = 17;
+constexpr int flawEnvelopeVersion = 17;
+constexpr int projectVersion = 18;
 constexpr qint64 maxProjectBytes = 64 * 1024 * 1024;
 
 QString payloadDigest(const QByteArray& bytes) {
@@ -216,8 +218,13 @@ bool PatternDocument::save(const QString& path, QString* error) const {
             } else if (step.contour) {
                 record.insert("operation", contourOperationKey(*step.contour));
                 record.insert("guides", names(step.guides));
-                record.insert("width", step.spreadMm);
+                if (step.spreadFormula.isEmpty())
+                    record.insert("width", step.spreadMm);
+                else
+                    record.insert("width", step.spreadFormula);
                 record.insert("topology", names(step.topology));
+                if (step.followingGuides)
+                    record.insert("followingGuides", names(*step.followingGuides));
                 record.insert("secondPiece", step.secondPiece);
             } else {
                 record.insert("operation", step.lengthScale == 1 ? "silhouette" : "silhouette-length");
@@ -259,8 +266,10 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     }
     const bool hasSeamRepeatPoints = std::ranges::any_of(production_.placements,
         [](const auto& placement) { return !placement.repeatEdge.isEmpty(); });
-    const int envelopeVersion = hasSeamRepeatPoints || !production_.fabricFlaws.isEmpty()
-        || !info.finishedMeasurements.isEmpty() ? projectVersion
+    const bool transportsGuides = std::ranges::any_of(history_, [](const auto& step) { return step.followingGuides.has_value(); });
+    const int envelopeVersion = transportsGuides || !production_.fabricShrinkagePercent.isNull() ? projectVersion
+        : hasSeamRepeatPoints || !production_.fabricFlaws.isEmpty()
+        || !info.finishedMeasurements.isEmpty() ? flawEnvelopeVersion
         : info.usesTechPackOptions() || !production_.fabricRepeatMm.isNull() ? repeatEnvelopeVersion
         : hasProductInformation || production_.pieceClearanceMm != 0 ? productEnvelopeVersion : legacyEnvelopeVersion;
     const auto payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
@@ -316,7 +325,8 @@ bool PatternDocument::load(const QString& path, QString* error) {
         return fail(QStringLiteral("This project requires a newer version of SOFIT"));
     const auto envelopeVersion = root.value("version").toDouble();
     if (root.value("format") != QStringLiteral("SOFIT")
-        || (envelopeVersion != projectVersion && envelopeVersion != repeatEnvelopeVersion
+        || (envelopeVersion != projectVersion && envelopeVersion != flawEnvelopeVersion
+            && envelopeVersion != repeatEnvelopeVersion
             && envelopeVersion != productEnvelopeVersion
             && envelopeVersion != legacyEnvelopeVersion))
         return loadPayload(root, false, error);
@@ -564,14 +574,27 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
             } else {
                 if (!topologyFormat || !(step.contour = contourOperationFromKey(operation)))
                     return fail(QStringLiteral("Unknown modeling operation"));
-                const auto width = entry.value("width").toDouble(-1);
+                const auto widthValue = entry.value("width");
+                const auto width = widthValue.toDouble(-1);
+                const auto formula = widthValue.toString().trimmed();
+                const bool validWidth = widthValue.isDouble() ? std::isfinite(width) && width >= 0
+                    : !formula.isEmpty() && usesSpreadWidth(*step.contour);
                 const auto panel = entry.value("secondPiece").toDouble(-2);
                 if (!readNames(entry.value("guides"), step.guides)
                     || !readNames(entry.value("topology"), step.topology)
-                    || !std::isfinite(width) || width < 0
+                    || !validWidth
                     || panel < -1 || panel >= loaded.pieces_.size() || std::trunc(panel) != panel)
                     return fail(QStringLiteral("Invalid contour modeling step"));
-                step.spreadMm = width;
+                if (entry.contains("followingGuides")) {
+                    const auto following = entry.value("followingGuides");
+                    if (!usesSpreadWidth(*step.contour) || !following.isArray()
+                        || (!following.toArray().isEmpty() && !readNames(following, step.followingGuides.emplace())))
+                        return fail(QStringLiteral("Invalid following guides"));
+                    if (!step.followingGuides)
+                        step.followingGuides.emplace();
+                }
+                step.spreadMm = widthValue.isDouble() ? width : 0;
+                step.spreadFormula = formula;
                 step.secondPiece = static_cast<qsizetype>(panel);
             }
             if (topologyFormat) {

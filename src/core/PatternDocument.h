@@ -21,7 +21,7 @@ enum class Shape { Point, Line, Rectangle, Circle, Curve };
 enum class Layer { Main, Construction, Allowance };
 
 enum class ContourOperation {
-    Cut, Spread, TransferDart, TransferDartToOutlet, MoveOpenDart, Pleat, Gather, Relief, Yoke
+    Cut, Spread, TransferDart, TransferDartToOutlet, MoveOpenDart, Pleat, Gather, Relief, Yoke, SplitDart, MergeDarts
 };
 
 QString contourOperationKey(ContourOperation operation);
@@ -64,6 +64,8 @@ struct ModelingStep {
     double lengthScale = 1;
     QString rotationPivot;
     double rotationDegrees = 0;
+    QString spreadFormula;
+    std::optional<QVector<QString>> followingGuides;
     bool operator==(const ModelingStep&) const = default;
 };
 
@@ -106,7 +108,10 @@ public:
     bool layerVisible(Layer layer) const { return layerVisibility_[static_cast<int>(layer)]; }
     void setLayerVisible(Layer layer, bool visible) { layerVisibility_[static_cast<int>(layer)] = visible; }
     const ParametricDraft& parametricDraft() const { return draft_; }
-    bool insertConstruction(const PatternDocument& source, QString* error = nullptr);
+    // Create a production contour that shares the source's draft points.
+    bool deriveParametricPiece(qsizetype source, const QString& name, QString* error = nullptr);
+    bool insertConstruction(const PatternDocument& source, QString* error = nullptr,
+                            const QMap<QString, QString>& measurementBindings = {});
     bool moveDraftPoint(const QString& name, QPointF offset, QString* error = nullptr);
     bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
     bool validateParametricSizes(const ProductionData& production, QString* error = nullptr) const;
@@ -119,8 +124,17 @@ public:
     // Change numeric settings while keeping the operation and all references intact.
     bool editModelingStep(qsizetype index, const ModelingStep& settings, QString* error = nullptr);
     bool appendContour(qsizetype piece, ContourOperation operation,
-                       const QVector<qsizetype>& guides, double spreadMm, QString* error = nullptr);
+                       const QVector<qsizetype>& guides, double spreadMm, QString* error = nullptr, const QString& spreadFormula = {},
+                       const std::optional<QVector<QString>>& followingGuides = {});
+    // Apply consecutive named guides atomically.
+    bool appendDrape(qsizetype piece, const QVector<QString>& guides, const QVector<double>& widths,
+                     ContourOperation finish = ContourOperation::Spread, QString* error = nullptr);
+    bool appendDrapeFormulas(qsizetype piece, const QVector<QString>& guides, const QVector<QString>& widths,
+                             ContourOperation finish, QString* error = nullptr);
+    bool appendDrapeFormulas(qsizetype piece, const QVector<QString>& guides, const QVector<QString>& widths,
+                             const QVector<ContourOperation>& operations, QString* error = nullptr);
     bool hasContourHistory() const { return !hiddenSources_.isEmpty(); }
+    bool applyModelingSequence(const PatternDocument& source, QString* error = nullptr);
     bool removeLastModelingStep(QString* error = nullptr);
     const QVector<SeamLink>& seamLinks() const { return seamLinks_; }
     bool addSeamLink(SeamLink link, QString* error = nullptr);
@@ -137,7 +151,9 @@ private:
     QVector<SeamLink> seamLinks_;
     bool captureContourTopology(ModelingStep& step, QString* error) const;
     QVector<Entity> bindDraftGeometry(QVector<Entity> generated) const;
-    bool replayModeling(QVector<Entity>& entities, const ProductionData& production,
+    static std::optional<double> evaluateModelingWidth(const ParametricDraft& draft,
+                                                        const QString& formula, QString* error);
+    bool replayModeling(QVector<Entity>& entities, const ProductionData& production, const ParametricDraft& draft,
                         QString* error, ModelingStep* capture = nullptr) const;
     bool validateDraftSizes(const ParametricDraft& draft, const QVector<Entity>& base,
                             const ProductionData& production, QString* error) const;

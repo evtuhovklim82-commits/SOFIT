@@ -8,14 +8,34 @@ inline bool dividesPiece(ContourOperation operation) {
         || operation == ContourOperation::Yoke;
 }
 
+inline bool redistributesDarts(ContourOperation operation) {
+    return operation == ContourOperation::SplitDart || operation == ContourOperation::MergeDarts;
+}
+
 inline bool usesSpreadWidth(ContourOperation operation) {
     return operation == ContourOperation::Spread || operation == ContourOperation::Pleat
         || operation == ContourOperation::Gather;
 }
 
+inline bool supportsCurvedBoundary(ContourOperation operation) {
+    return redistributesDarts(operation) || dividesPiece(operation) || usesSpreadWidth(operation)
+        || operation == ContourOperation::TransferDart || operation == ContourOperation::TransferDartToOutlet
+        || operation == ContourOperation::MoveOpenDart;
+}
+
+struct SpreadMotion {
+    QPolygonF movedPanel;
+    QPolygonF cut;
+    QPointF translation;
+
+    // Empty when an object touches or crosses the cut.
+    std::optional<QPointF> offsetFor(const Entity& guide) const;
+};
+
 struct ContourEdit {
     PatternDocument document;
     QVector<qsizetype> removedEntities;
+    std::optional<SpreadMotion> spreadMotion;
 };
 
 struct ContourEditResult {
@@ -25,7 +45,8 @@ struct ContourEditResult {
 
 std::optional<double> contourEdgeParameter(const Entity& edge, QPointF point);
 
-// Explicit dart operations take both legs followed by the chosen outlet.
+// Dart guides list each source leg pair first, then the outlet lines.
+// SplitDart uses spreadMm as the percentage assigned to the first outlet.
 ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
                                ContourOperation operation, const QVector<qsizetype>& guides,
                                double spreadMm = 0);
