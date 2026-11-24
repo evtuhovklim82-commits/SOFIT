@@ -3,7 +3,9 @@
 #include "Production.h"
 #include "PatternDxf.h"
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
@@ -133,7 +135,55 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
             addMeasurement(size.name, map.key(), number(map.value()));
     }
     auto* addSize = new QPushButton(tr("Add measurement row"));
-    tableButtons(sizesLayout, sizes)->insertWidget(0, addSize);
+    auto* measurementButtons = tableButtons(sizesLayout, sizes);
+    measurementButtons->insertWidget(0, addSize);
+    auto* copyTable = new QPushButton(tr("Copy measurement table"));
+    auto* pasteTable = new QPushButton(tr("Replace table from clipboard"));
+    measurementButtons->addWidget(copyTable);
+    measurementButtons->addWidget(pasteTable);
+    const auto header = QStringLiteral("Size\tMeasurement\tValue (mm)");
+    QObject::connect(copyTable, &QPushButton::clicked, &dialog, [=, &dialog] {
+        QStringList lines{header};
+        for (int row = 0; row < sizes->rowCount(); ++row) {
+            QStringList cells;
+            for (int column = 0; column < sizes->columnCount(); ++column) {
+                const auto value = sizes->item(row, column)->text();
+                if (value.contains(u'\t') || value.contains(u'\r') || value.contains(u'\n')) {
+                    QMessageBox::warning(&dialog, dialog.windowTitle(),
+                                         tr("Cells containing tabs or line breaks cannot be copied as a table."));
+                    return;
+                }
+                cells.append(value);
+            }
+            lines.append(cells.join(u'\t'));
+        }
+        QApplication::clipboard()->setText(lines.join(u'\n'));
+    });
+    QObject::connect(pasteTable, &QPushButton::clicked, &dialog, [=, &dialog] {
+        auto text = QApplication::clipboard()->text();
+        text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        auto lines = text.split(u'\n');
+        if (!lines.isEmpty() && lines.back().isEmpty())
+            lines.removeLast();
+        if (!lines.isEmpty() && lines.front() == header)
+            lines.removeFirst();
+        if (lines.isEmpty())
+            return;
+        QVector<QStringList> rows;
+        for (const auto& line : lines) {
+            auto cells = line.split(u'\t');
+            if (cells.size() != 3 || cells[0].trimmed().isEmpty() || line.contains(u'\r')) {
+                QMessageBox::warning(&dialog, dialog.windowTitle(),
+                    tr("Clipboard row %1 needs three tab-separated cells: size, measurement and value in mm.")
+                        .arg(rows.size() + 1));
+                return;
+            }
+            rows.append(std::move(cells));
+        }
+        sizes->setRowCount(0);
+        for (const auto& cells : rows)
+            addMeasurement(cells[0], cells[1], cells[2]);
+    });
     QObject::connect(addSize, &QPushButton::clicked, &dialog, [=] {
         addMeasurement({}, {}, {});
         sizes->editItem(sizes->item(sizes->rowCount() - 1, 0));
@@ -280,6 +330,14 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     width->setSuffix(tr(" mm"));
     controls->addWidget(new QLabel(tr("Fabric width")));
     controls->addWidget(width);
+    auto* clearance = new QDoubleSpinBox;
+    clearance->setObjectName(QStringLiteral("markerPieceClearance"));
+    clearance->setDecimals(3);
+    clearance->setRange(0, 1000);
+    clearance->setValue(data.pieceClearanceMm);
+    clearance->setSuffix(tr(" mm"));
+    controls->addWidget(new QLabel(tr("Piece clearance")));
+    controls->addWidget(clearance);
     auto* piece = new QComboBox;
     for (const auto& entry : document.pieces())
         piece->addItem(entry.name);
@@ -370,12 +428,12 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             placement.position = item->pos();
             placed.append(item->valid ? item->polygon().translated(item->pos()) : QPolygonF{});
         }
-        const auto usage = opc::fabricUsage(placed, data.fabricWidth);
+        const auto usage = opc::fabricUsage(placed, data.fabricWidth, data.pieceClearanceMm);
         const double displayLength = std::max(1000.0, usage.length + 200);
         fabric->setRect(0, 0, data.fabricWidth, displayLength);
         automatic->setEnabled(!items.isEmpty());
         dxf->setEnabled(!items.isEmpty());
-        auto summary = tr("Used length: %1 m · Copies: %2 · Outside fabric: %3 · Overlapping pairs: %4 · Invalid contours: %5")
+        auto summary = tr("Used length: %1 m · Copies: %2 · Outside fabric: %3 · Overlap or clearance conflicts: %4 · Invalid contours: %5")
                            .arg(usage.length / 1000, 0, 'f', 3).arg(items.size())
                            .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid);
         if (const auto utilization = usage.utilization(data.fabricWidth)) {
@@ -465,6 +523,10 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     QObject::connect(width, &QDoubleSpinBox::valueChanged, &dialog, [&](double value) {
         data.fabricWidth = value;
         rebuild();
+    });
+    QObject::connect(clearance, &QDoubleSpinBox::valueChanged, &dialog, [&](double value) {
+        data.pieceClearanceMm = value;
+        updateUsage();
     });
     QObject::connect(add, &QPushButton::clicked, &dialog, [&] {
         opc::FabricPlacement placement{piece->currentIndex(), size->currentData().toString(), {}};
@@ -570,7 +632,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         }
         text += tr("\nPlotted copies: %1. On-fold entries each count as one unfolded piece. Other counts are per cutting layer.")
             .arg(data.placements.size());
-        text += tr("\nOutside: %1 · Overlapping pairs: %2 · Invalid outlines: %3"
+        text += tr("\nOutside: %1 · Overlap or clearance conflicts: %2 · Invalid outlines: %3"
                    "\nRotation conflicts: %4 · Off fold: %5\n")
             .arg(usage.outside).arg(usage.overlaps).arg(usage.invalid)
             .arg(report.orientationViolations).arg(report.foldViolations);
@@ -661,6 +723,9 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             break;
         case opc::FabricLayoutError::InvalidWidth:
             error = tr("Enter a positive fabric width.");
+            break;
+        case opc::FabricLayoutError::InvalidClearance:
+            error = tr("Enter a piece clearance from 0 to 1000 mm.");
             break;
         case opc::FabricLayoutError::InvalidContour:
             error = tr("The cutting outline, seam allowance, or required straight fold edge is invalid.");

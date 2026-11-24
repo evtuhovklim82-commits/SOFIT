@@ -8,6 +8,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDialogButtonBox>
@@ -38,6 +39,7 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QListWidget>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QPlainTextEdit>
@@ -254,6 +256,22 @@ void testModelingWorkflow() {
     auto& view = *window.findChild<PatternView*>();
     auto& tree = *window.findChild<QTreeWidget*>();
     view.entityDrawn({opc::Shape::Curve, {0, 0}, {100, 0}, {50, 40}});
+    tree.topLevelItem(0)->setSelected(true);
+    runDialog<QDialog>(action(window, "Copy Curve as Guide…"), [](QDialog& dialog) {
+        dialog.findChild<QDoubleSpinBox*>("curveCopyX")->setValue(20);
+        dialog.findChild<QDoubleSpinBox*>("curveCopyControlY")->setValue(5);
+        dialog.findChild<QCheckBox*>()->setChecked(true);
+        dialog.accept();
+    });
+    QTemporaryDir guides;
+    const auto guideProject = guides.filePath("curve.sofit");
+    chooseFile(action(window, "&Save"), guideProject);
+    opc::PatternDocument savedGuide;
+    check(savedGuide.load(guideProject) && savedGuide.entities().size() == 2, "Save the copied guide");
+    const auto& guide = savedGuide.entities().back();
+    check(guide.layer == opc::Layer::Construction && guide.piece == -1 && guide.a == QPointF(120, 0)
+          && guide.b == QPointF(20, 0) && guide.control == QPointF(70, 45), "Apply guide offsets and direction");
+    action(window, "Undo Copy Curve as Guide").trigger();
     tree.topLevelItem(0)->setSelected(true);
     runDialog<QInputDialog>(action(window, "Split Line or Curve…"), [](QInputDialog& dialog) {
         dialog.setDoubleValue(30);
@@ -621,11 +639,32 @@ int main(int argc, char** argv) {
 
     QTemporaryDir temp;
     check(temp.isValid(), "Temporary files");
+    auto& productAction = action(window, "Product Information…");
+    runDialog<QDialog>(productAction, [](QDialog& dialog) {
+        auto* code = dialog.findChild<QLineEdit*>("productStyleCode");
+        auto* notes = dialog.findChild<QPlainTextEdit*>("productNotes");
+        check(code && notes, "Open product information fields");
+        code->setText(QStringLiteral("Модель 004"));
+        notes->setPlainText(QStringLiteral("Проверка раскроя\nMain fabric"));
+        dialog.accept();
+    });
+    action(window, "Undo Edit Product Information").trigger();
+    runDialog<QDialog>(productAction, [](QDialog& dialog) {
+        check(dialog.findChild<QLineEdit*>("productStyleCode")->text().isEmpty(), "Undo product information");
+        dialog.reject();
+    });
+    action(window, "Redo Edit Product Information").trigger();
+    const auto techPack = temp.filePath("tech-pack.pdf");
+    chooseFile(action(window, "Export Product Information PDF…"), techPack);
+    check(pageCount(readPdf(techPack)) == 1, "Export the product sheet through the UI");
     const auto pattern = temp.filePath("piece.sofit");
     chooseFile(action(window, "&Save"), pattern);
     opc::PatternDocument loaded;
     check(loaded.load(pattern) && loaded.pieces().size() == 1 && loaded.pieces()[0].allowanceMm == 12.375
-          && !loaded.layerVisible(opc::Layer::Construction), "Save through the UI");
+          && !loaded.layerVisible(opc::Layer::Construction)
+          && loaded.productInformation().styleCode == QStringLiteral("Модель 004")
+          && loaded.productInformation().notes == QStringLiteral("Проверка раскроя\nMain fabric"),
+          "Save geometry and product information through the UI");
 
     const auto svgPath = temp.filePath("piece.svg");
     chooseFile(action(window, "Export &SVG"), svgPath);
@@ -687,9 +726,13 @@ int main(int argc, char** argv) {
         auto* tabs = dialog.findChild<QTabWidget*>();
         auto* measurements = tabs->widget(0)->findChild<QTableWidget*>();
         click("Add measurement row");
-        measurements->item(0, 0)->setText("L");
-        measurements->item(0, 1)->setText("Chest");
-        measurements->item(0, 2)->setText("1000");
+        QApplication::clipboard()->setText(QStringLiteral("Size\tMeasurement\tValue (mm)\r\nL\tChest\t1000\r\n"));
+        click("Replace table from clipboard");
+        check(measurements->rowCount() == 1 && measurements->item(0, 1)->text() == "Chest",
+              "Replace the measurement grid from a spreadsheet");
+        click("Copy measurement table");
+        check(QApplication::clipboard()->text() == QStringLiteral("Size\tMeasurement\tValue (mm)\nL\tChest\t1000"),
+              "Copy a reusable measurement grid");
         tabs->setCurrentIndex(1);
         auto* rules = tabs->widget(1)->findChild<QTableWidget*>();
         click("Add grade rule");
@@ -706,6 +749,7 @@ int main(int argc, char** argv) {
 
     runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
         dialog.findChild<QDoubleSpinBox*>()->setValue(1450);
+        dialog.findChild<QDoubleSpinBox*>("markerPieceClearance")->setValue(5.5);
         for (auto* combo : dialog.findChildren<QComboBox*>()) {
             if (combo->findText("Base pattern") >= 0)
                 combo->setCurrentIndex(combo->findData("L"));
@@ -731,7 +775,7 @@ int main(int argc, char** argv) {
     action(window, "&Save").trigger();
     check(loaded.load(pattern) && loaded.production().sizes.size() == 1 && loaded.production().rules.size() == 1
           && loaded.production().placements.size() == 1 && loaded.production().placements.front().size == "L"
-          && loaded.production().fabricWidth == 1450
+          && loaded.production().fabricWidth == 1450 && loaded.production().pieceClearanceMm == 5.5
           && loaded.production().placements.front().position == QPointF(20, 40)
           && loaded.production().placements.front().reversed, "Save grading and layout through the UI");
 

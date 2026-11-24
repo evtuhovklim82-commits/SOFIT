@@ -1,4 +1,6 @@
 #pragma once
+
+#include "ProductInformation.h"
 #include <QHash>
 #include <QPointF>
 #include <QSet>
@@ -95,6 +97,8 @@ public:
     const QVector<Entity>& entities() const { return entities_; }
     QVector<Piece>& pieces() { return pieces_; }
     const QVector<Piece>& pieces() const { return pieces_; }
+    ProductInformation& productInformation() { return productInformation_; }
+    const ProductInformation& productInformation() const { return productInformation_; }
     ProductionData& production() { return production_; }
     const ProductionData& production() const { return production_; }
     bool layerVisible(Layer layer) const { return layerVisibility_[static_cast<int>(layer)]; }
@@ -142,6 +146,7 @@ private:
     QVector<ModelingStep> history_;
     QVector<SourceBinding> hiddenSources_;
     ProductionData production_;
+    ProductInformation productInformation_;
     ParametricDraft draft_;
     QVector<Entity> entities_;
     QVector<Piece> pieces_;

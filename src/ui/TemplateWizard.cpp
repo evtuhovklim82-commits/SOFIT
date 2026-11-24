@@ -23,7 +23,7 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     auto* templatePage = new QWizardPage;
     templatePage->setTitle(tr("Choose a template"));
     auto* selection = new QFormLayout(templatePage);
-    enum Template { Gathered, ALine, Bodice, Trousers, Dress, Apron };
+    enum Template { Gathered, ALine, Bodice, Trousers, Dress, Apron, Pocket };
     auto* style = new QComboBox;
     style->addItem(tr("Gathered skirt"));
     style->addItem(tr("A-line skirt"));
@@ -31,6 +31,7 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     style->addItem(tr("Trousers (fitting block)"));
     style->addItem(tr("Sleeveless dress with waist seam (fitting block)"));
     style->addItem(tr("Bib apron with waist and neck ties"));
+    style->addItem(tr("Rounded patch pocket"));
     selection->addRow(tr("Template"), style);
     auto* note = new QLabel(tr("All templates open as editable parametric drafts. "
                                "Fitting blocks use sewing lines and are intended for a fitting sample."));
@@ -144,9 +145,25 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     apronInstructions->setWordWrap(true);
     form->addRow(apronInstructions);
 
+    const int pocketStart = form->rowCount();
+    const auto* pocketWidth = measurement(tr("Finished pocket width"), 150, 25, 600);
+    const auto* pocketHeight = measurement(tr("Finished pocket height"), 170, 25, 600);
+    const auto* pocketRadius = measurement(tr("Corner radius setting"), 22, 1, 200);
+    const auto* pocketTurnback = measurement(tr("Top turnback"), 25, 5, 100);
+    auto* pocketInstructions = new QLabel(tr("Fold the turnback at the construction line. "
+        "The cutting contour adds 8 mm around the pocket. Check the fit on the garment before cutting."));
+    pocketInstructions->setWordWrap(true);
+    form->addRow(pocketInstructions);
+
     const auto showFields = [=](int index) {
+        if (index == Pocket) {
+            for (int row = 0; row < form->rowCount(); ++row)
+                form->setRowVisible(row, row >= pocketStart);
+            return;
+        }
         for (int row = 0; row < form->rowCount(); ++row) {
-            const bool visible = row >= apronStart ? index == Apron
+            const bool visible = row >= pocketStart ? false
+                : row >= apronStart ? index == Apron
                 : index == Apron ? false
                 : row < fittingStart ? index < Bodice
                 : row < bodiceStart ? index >= Bodice
@@ -187,6 +204,11 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
                     apronWidth->value(), apronLength->value(), bibWidth->value(), bibHeight->value(),
                     waistTie->value(), neckTie->value(), tieWidth->value()
                 }, &error))
+                return document;
+        } else if (index == Pocket) {
+            if (auto document = opc::draftPatchPocket(
+                    {pocketWidth->value(), pocketHeight->value(), pocketRadius->value(), pocketTurnback->value()},
+                    &error))
                 return document;
         } else if (index == Trousers) {
             const opc::TrouserMeasurements trousers{

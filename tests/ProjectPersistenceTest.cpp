@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
     write(bad, original.first(original.size() / 2));
     check(!active.load(bad, &error) && error.contains("byte"), "Report a truncated JSON file");
     altered = envelope;
-    altered["version"] = 15;
+    altered["version"] = 16;
     write(bad, QJsonDocument(altered).toJson());
     check(!active.load(bad, &error) && error.contains("newer"), "Explain a future schema version");
     QFile oversized(bad);
@@ -97,6 +97,16 @@ int main(int argc, char** argv) {
           "Create a project exceeding the input limit");
     oversized.close();
     check(!active.load(bad, &error) && error.contains("64 MiB"), "Bound project reads");
+
+    auto professional = sample();
+    professional.productInformation().title = QStringLiteral("Куртка");
+    professional.production().pieceClearanceMm = 6.25;
+    check(professional.save(bad, &error) && active.load(bad, &error), error);
+    check(QJsonDocument::fromJson(read(bad)).object().value("version").toInt() == 15
+          && active.productInformation() == professional.productInformation()
+          && active.production().pieceClearanceMm == 6.25, "Round-trip schema 15 production data");
+    check(active.load(path, &error) && active.productInformation() == opc::ProductInformation{}
+          && active.production().pieceClearanceMm == 0, "Apply defaults when reopening schema 14");
 
     const auto second = directory.filePath("resaved.sofit");
     for (const auto* name : {"bib-apron.sofit", "graded-skirt.sofit", "linked-trousers.sofit"}) {

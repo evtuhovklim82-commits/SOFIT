@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(SOFIT VERSION 3.0.0 LANGUAGES CXX)
+project(SOFIT VERSION 4.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -17,6 +17,7 @@ add_library(sofit_core STATIC
     src/core/Modeling.cpp
     src/core/ModelingHistory.cpp
     src/core/PatternPdf.cpp
+    src/core/ProductInformation.cpp
     src/core/Production.cpp
     src/core/SeamLinks.cpp
     src/core/PieceMarkings.cpp
@@ -60,7 +61,7 @@ set_target_properties(sofit PROPERTIES WIN32_EXECUTABLE TRUE MACOSX_BUNDLE TRUE)
 install(TARGETS sofit BUNDLE DESTINATION . RUNTIME DESTINATION bin)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     install(FILES LICENSE-NOTICE.txt README.md DESTINATION share/doc/sofit)
-    install(FILES docs/SOFIT-format.md DESTINATION share/doc/sofit/docs)
+    install(FILES docs/SOFIT-format.md docs/GRAFIS-26-audit.md DESTINATION share/doc/sofit/docs)
     install(DIRECTORY examples DESTINATION share/doc/sofit)
     set(CPACK_GENERATOR TGZ)
     set(CPACK_PACKAGE_CHECKSUM SHA256)

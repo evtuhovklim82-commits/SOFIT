@@ -1,6 +1,16 @@
-# SOFIT 3.0
+# SOFIT 4.0 Professional
 
 Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native Linux build remains available.
+
+## Professional workflows in 4.0
+
+- **Product → Product Information** stores a style code, title, revision, material and notes in the project. **Export Product Information PDF** adds a parts list with the current marker quantities.
+- **Construction → New Pattern from Template → Rounded patch pocket** drafts a pocket with adjustable width, height, rounded corners and top turnback. The finished size is measured below the construction fold line. The cutting outline includes an 8 mm allowance.
+- **Modeling → Copy Curve as Guide** copies a quadratic curve to the Construction layer. Set its offset, adjust its control point or reverse its direction.
+- **Grading → Sizes, Measurements and Grade Rules** copies and replaces the measurement grid using tab-separated clipboard data. Use one row per measurement and three columns in this order: size, measurement name, value in mm. Grade rules and marker placements still reference their named sizes.
+- **Layout → Fabric Layout → Piece clearance** sets the minimum gap between cutting outlines in mm. With a positive gap, clearance conflicts prevent fabric PDF or DXF export.
+
+The [GRAFIS 26 audit](docs/GRAFIS-26-audit.md) lists source evidence and remaining gaps.
 
 ## Windows .exe via GitHub Actions
 1. In GitHub Actions, open **Windows installer and portable build**. Download the `SOFIT-Windows-x64` artifact from a successful run.

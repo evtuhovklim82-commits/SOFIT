@@ -346,6 +346,45 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     file->addAction(tr("Export &DXF…"), this, &MainWindow::exportDxf);
     file->addAction(tr("Export &PDF for Printing…"), this, &MainWindow::exportPdf);
 
+    auto* product = menuBar()->addMenu(tr("P&roduct"));
+    product->addAction(tr("Product Information…"), this, [this] {
+        const auto& current = doc_.productInformation();
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Product Information"));
+        QFormLayout form(&dialog);
+        QLineEdit code(current.styleCode), title(current.title), revision(current.revision), material(current.material);
+        QPlainTextEdit notes(current.notes);
+        code.setObjectName(QStringLiteral("productStyleCode"));
+        notes.setObjectName(QStringLiteral("productNotes"));
+        form.addRow(tr("Style code"), &code);
+        form.addRow(tr("Title"), &title);
+        form.addRow(tr("Revision"), &revision);
+        form.addRow(tr("Material"), &material);
+        form.addRow(tr("Notes"), &notes);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        opc::ProductInformation info{code.text(), title.text(), revision.text(), material.text(), notes.toPlainText()};
+        if (info != current) {
+            auto updated = doc_;
+            updated.productInformation() = std::move(info);
+            undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Product Information"), nullptr));
+        }
+    });
+    product->addAction(tr("Export Product Information PDF…"), this, [this] {
+        auto path = QFileDialog::getSaveFileName(this, tr("Export Product Information PDF"), {}, tr("PDF (*.pdf)"));
+        if (path.isEmpty())
+            return;
+        if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive))
+            path += QStringLiteral(".pdf");
+        QString error;
+        if (!opc::exportProductInformationPdf(path, doc_, error))
+            QMessageBox::warning(this, tr("Export Product Information PDF"), error);
+    });
+
     auto* edit = menuBar()->addMenu(tr("&Edit"));
     auto* undoAction = undo_.createUndoAction(this, tr("Undo"));
     undoAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z));
@@ -379,7 +418,42 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     auto* split = modeling->addAction(tr("Split Line or Curve…"), this, &MainWindow::splitSelectedEdge);
     auto* join = modeling->addAction(tr("Join Free Endpoints"), this, &MainWindow::joinSelectedEdges);
     join->setToolTip(tr("Select two edges on the same layer and piece. Closes a gap of up to 5 mm."));
-    connect(modeling, &QMenu::aboutToShow, this, [this, split, join] {
+    auto* copyCurve = modeling->addAction(tr("Copy Curve as Guide…"), this, [this] {
+        const auto selected = selectedObjects();
+        if (selected.size() != 1 || doc_.entities()[selected.front()].shape != opc::Shape::Curve)
+            return;
+        const auto source = doc_.entities()[selected.front()];
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Copy Curve as Guide"));
+        QFormLayout form(&dialog);
+        QDoubleSpinBox x, y, controlX, controlY;
+        for (auto* value : {&x, &y, &controlX, &controlY}) {
+            value->setRange(-1000000, 1000000);
+            value->setDecimals(3);
+            value->setSuffix(tr(" mm"));
+        }
+        x.setObjectName(QStringLiteral("curveCopyX"));
+        controlY.setObjectName(QStringLiteral("curveCopyControlY"));
+        QCheckBox reverse(tr("Reverse direction"));
+        form.addRow(tr("Horizontal offset"), &x);
+        form.addRow(tr("Vertical offset"), &y);
+        form.addRow(tr("Additional control point X offset"), &controlX);
+        form.addRow(tr("Additional control point Y offset"), &controlY);
+        form.addRow(&reverse);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        const QPointF offset(x.value(), y.value());
+        const auto start = (reverse.isChecked() ? source.b : source.a) + offset;
+        const auto end = (reverse.isChecked() ? source.a : source.b) + offset;
+        const auto control = source.control + offset + QPointF(controlX.value(), controlY.value());
+        const opc::Entity guide{opc::Shape::Curve, start, end, control, -1, opc::Layer::Construction};
+        undo_.push(new EntityCommand(doc_, *view_, doc_.entities().size(), guide, true, tr("Copy Curve as Guide")));
+    });
+    connect(modeling, &QMenu::aboutToShow, this, [this, split, join, copyCurve] {
         const auto selected = selectedObjects();
         const bool edges = std::ranges::all_of(selected, [this](qsizetype index) {
             const auto shape = doc_.entities()[index].shape;
@@ -387,6 +461,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         });
         split->setEnabled(edges && selected.size() == 1);
         join->setEnabled(edges && selected.size() == 2);
+        copyCurve->setEnabled(selected.size() == 1 && doc_.entities()[selected.front()].shape == opc::Shape::Curve);
     });
 
     auto* rotate = modeling->addAction(tr("Rotate Construction…"), this, &MainWindow::rotateConstruction);

@@ -15,7 +15,8 @@
 
 namespace opc {
 namespace {
-constexpr int projectVersion = 14;
+constexpr int legacyEnvelopeVersion = 14;
+constexpr int projectVersion = 15;
 constexpr qint64 maxProjectBytes = 64 * 1024 * 1024;
 
 QString payloadDigest(const QByteArray& bytes) {
@@ -237,8 +238,15 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         root.insert("modelingSources", sources);
     }
     root.insert("useDraftMeasurements", production_.useDraftMeasurements);
+    const auto& info = productInformation_;
+    const bool hasProductInformation = info != ProductInformation{};
+    if (hasProductInformation) {
+        root.insert("productInformation", QJsonObject{{"styleCode", info.styleCode}, {"title", info.title},
+            {"revision", info.revision}, {"material", info.material}, {"notes", info.notes}});
+    }
     const auto payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
-    const QJsonObject envelope{{"format", "SOFIT"}, {"version", projectVersion},
+    const QJsonObject envelope{{"format", "SOFIT"}, {"version", (hasProductInformation || production_.pieceClearanceMm != 0)
+                                    ? projectVersion : legacyEnvelopeVersion},
                                {"payload", QString::fromUtf8(payload)}, {"sha256", payloadDigest(payload)}};
     const auto data = QJsonDocument(envelope).toJson();
     if (data.size() > maxProjectBytes) {
@@ -288,7 +296,9 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto root = json.object();
     if (root.value("format") == QStringLiteral("SOFIT") && root.value("version").toDouble() > projectVersion)
         return fail(QStringLiteral("This project requires a newer version of SOFIT"));
-    if (root.value("format") != QStringLiteral("SOFIT") || root.value("version").toInt() != projectVersion)
+    const auto envelopeVersion = root.value("version").toDouble();
+    if (root.value("format") != QStringLiteral("SOFIT")
+        || (envelopeVersion != projectVersion && envelopeVersion != legacyEnvelopeVersion))
         return loadPayload(root, false, error);
 
     const auto payload = root.value("payload").toString().toUtf8();
@@ -449,6 +459,15 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
         return fail(QStringLiteral("Invalid grading or fabric layout data"));
 
     PatternDocument loaded;
+    if (native && root.contains("productInformation")) {
+        const auto info = root.value("productInformation").toObject();
+        for (const auto* field : {"styleCode", "title", "revision", "material", "notes"}) {
+            if (!info.value(QLatin1String(field)).isString())
+                return fail(QStringLiteral("Invalid product information"));
+        }
+        loaded.productInformation_ = {info.value("styleCode").toString(), info.value("title").toString(),
+            info.value("revision").toString(), info.value("material").toString(), info.value("notes").toString()};
+    }
     loaded.production_ = std::move(production);
     loaded.entities_ = std::move(parsed);
     loaded.pieces_ = std::move(pieces);

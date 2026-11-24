@@ -131,4 +131,50 @@ std::optional<PatternDocument> draftBibApron(const ApronMeasurements& input, QSt
     }
     return document;
 }
+
+std::optional<PatternDocument> draftPatchPocket(const PatchPocketMeasurements& input, QString* error) {
+    ParametricDraft draft{
+        {{"pocket_width", input.widthMm}, {"pocket_height", input.heightMm},
+         {"pocket_radius", input.cornerRadiusMm}, {"pocket_turnback", input.turnbackMm}},
+        {{"half_width", "positive(pocket_width / 2)"},
+         {"radius", "positive(pocket_radius)"},
+         {"straight_bottom_half", "positive(half_width - radius)"},
+         {"side_height", "positive(pocket_height - radius)"}},
+        {{"TopL", "-half_width", "-positive(pocket_turnback)"},
+         {"TopR", "half_width", "TopL.y"},
+         {"FoldR", "half_width", "0"},
+         {"FoldL", "-half_width", "0"},
+         {"SideR", "half_width", "side_height"},
+         {"CornerR", "half_width", "pocket_height"},
+         {"BottomR", "straight_bottom_half", "pocket_height"},
+         {"BottomL", "-straight_bottom_half", "pocket_height"},
+         {"CornerL", "-half_width", "pocket_height"},
+         {"SideL", "-half_width", "side_height"}},
+        {{"pocket_top", "TopL", "TopR", {}}, {"pocket_right", "TopR", "SideR", {}},
+         {"pocket_round_right", "SideR", "BottomR", "CornerR"},
+         {"pocket_bottom", "BottomR", "BottomL", {}},
+         {"pocket_round_left", "BottomL", "SideL", "CornerL"},
+         {"pocket_left", "SideL", "TopL", {}},
+         {"pocket_fold", "FoldL", "FoldR", {}}}
+    };
+    PatternDocument document;
+    if (!document.setParametricDraft(std::move(draft), error))
+        return std::nullopt;
+    document.pieces().append({"Rounded patch pocket", 8, 1, {}, true, 90});
+    for (qsizetype i = 0; i < document.entities().size(); ++i) {
+        auto entity = document.entities()[i];
+        entity.piece = 0;
+        if (entity.shape == Shape::Point || entity.draftName == QStringLiteral("pocket_fold"))
+            entity.layer = Layer::Construction;
+        document.replace(i, entity);
+    }
+    const auto geometry = analyzePiece(document, 0);
+    if (geometry.error != ContourError::None || geometry.allowance.isEmpty()) {
+        if (error)
+            *error = QStringLiteral("These dimensions do not produce a usable pocket cutting contour.");
+        return std::nullopt;
+    }
+    return document;
+}
+
 }

@@ -1,21 +1,21 @@
 # SOFIT project format
 
-SOFIT 3.0 writes schema 14. A project contains the editable pattern and its production data. DXF carries exchange geometry and PDF carries print output. GRAFIS MDL support requires a separate analysis of actual MDL files.
+SOFIT 4.0 opens older SOFIT projects and writes schema 14 when product information and piece clearance are at their defaults. Projects using either field are saved as schema 15. A project contains the editable pattern and its production data. DXF carries exchange geometry and PDF carries print output. GRAFIS MDL support requires a separate analysis of actual MDL files.
 
-## Schema 14
+## Schemas 14 and 15
 
 The file is a UTF-8 JSON object with these fields.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `format` | string | `SOFIT` |
-| `version` | integer | `14` |
+| `version` | integer | `14` or `15` |
 | `payload` | string | A serialized UTF-8 JSON project object, escaped as a JSON string |
 | `sha256` | string | Lowercase hexadecimal SHA-256 of the UTF-8 bytes of the decoded payload string |
 
 Validate the digest before parsing the payload. Hash the decoded string verbatim, including any whitespace, without reserializing its JSON object. The digest detects accidental corruption. It does not authenticate the author. Readers limit the outer file to 64 MiB. Saving validates the serialized payload by replaying it through the same reader, then uses an atomic replacement in the destination directory. Direct-write fallback is disabled.
 
-The payload reuses the SOFIT 7–13 records and includes an explicit boolean `useDraftMeasurements`. Older readers cannot open the schema 14 envelope.
+The payload reuses the SOFIT 7–13 records and includes an explicit boolean `useDraftMeasurements`. Schema 15 uses the same envelope. Its optional `productInformation` object has string fields `styleCode`, `title`, `revision`, `material` and `notes`. The optional `production.pieceClearanceMm` is a number between 0 and 1000. Omitted fields give empty product information and zero clearance. SOFIT 3.0 reads schema 14. SOFIT versions before 3.0 require the older project structure.
 
 | Payload record | Contents |
 | --- | --- |

@@ -48,7 +48,7 @@ jobs:
           Copy-Item README.md, LICENSE-NOTICE.txt dist/SOFIT
           Copy-Item -Recurse examples dist/SOFIT/examples
           New-Item -ItemType Directory -Force dist/SOFIT/docs | Out-Null
-          Copy-Item docs/SOFIT-format.md dist/SOFIT/docs
+          Copy-Item docs/SOFIT-format.md, docs/GRAFIS-26-audit.md dist/SOFIT/docs
           Compress-Archive -Path dist/SOFIT -DestinationPath SOFIT-Windows-x64.zip
       - name: Launch the extracted portable package
         shell: pwsh

@@ -74,6 +74,11 @@ int main(int argc, char** argv) {
     check(!fabricUsage({square, square.translated(1, 1)}, 80).utilization(80),
           "Suppress utilization for invalid arrangements");
 
+    const auto tooClose = fabricUsage({square, square.translated(44, 0)}, 100, 5);
+    const auto spaced = fabricUsage({square, square.translated(45, 0)}, 100, 5);
+    check(tooClose.overlaps == 1 && spaced.overlaps == 0 && spaced.cutArea == full.cutArea
+          && spaced.outside == 0, "Check clearance without changing cut area or the fabric boundary");
+
     auto batch = production;
     batch.allowHalfTurns = false;
     batch.placements.append({0, "M", {200, 400}, true});
@@ -95,6 +100,15 @@ int main(int argc, char** argv) {
     auto expected = batch;
     expected.placements = automatic.placements;
     check(saveProduction(repeated) == saveProduction(expected), "Return identical results for identical requests");
+    auto buffered = batch;
+    buffered.pieceClearanceMm = 12;
+    auto bufferedResult = arrangeFabric(base, buffered);
+    check(bufferedResult.error == FabricLayoutError::None, "Arrange a marker with a piece clearance");
+    buffered.placements = std::move(bufferedResult.placements);
+    check(cuttingReport(base, buffered).canExport(buffered.fabricWidth), "Verify clearance before export");
+    buffered.pieceClearanceMm = -1;
+    check(arrangeFabric(base, buffered).error == FabricLayoutError::InvalidClearance,
+          "Reject invalid clearances before attempting to arrange");
     batch.fabricWidth = 59;
     const auto tooWide = arrangeFabric(base, batch);
     check(tooWide.error == FabricLayoutError::TooWide && tooWide.failedCopy == 0

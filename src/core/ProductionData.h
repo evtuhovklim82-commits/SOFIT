@@ -41,6 +41,8 @@ struct ProductionData {
     bool directionalFabric = false;
     bool useDraftMeasurements = true;
 
+    double pieceClearanceMm = 0;
+
     void removePiece(qsizetype piece);
 };
 

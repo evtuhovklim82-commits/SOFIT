@@ -664,6 +664,25 @@ void checkApronKit() {
           && readFile(dxf).contains("ENTITIES"), "Read back both apron marker exports");
 }
 
+void checkPatchPocket() {
+    QString error;
+    check(!draftPatchPocket({150, 170, 75, 25}, &error) && !error.isEmpty(),
+          "Reject a corner setting that consumes the bottom edge");
+    auto pocket = draftPatchPocket({150, 170, 22, 25}, &error);
+    check(pocket.has_value(), "Draft a rounded patch pocket: " + error);
+    const auto& entities = pocket->entities();
+    const auto fold = std::ranges::find(entities, QStringLiteral("pocket_fold"), &Entity::draftName);
+    check(fold != entities.end() && fold->layer == Layer::Construction
+          && fold->a == QPointF(-75, 0) && fold->b == QPointF(75, 0), "Mark the top turnback fold");
+    check(std::ranges::count(entities, Shape::Curve, &Entity::shape) == 2, "Build two rounded corners");
+    pocket->production().sizes.append({"L", {{"pocket_width", 180}, {"pocket_height", 190}}});
+    check(pocket->validateParametricSizes(pocket->production(), &error), error);
+    const auto graded = gradedPattern(*pocket, "L");
+    const auto cut = fabricPiece(graded, {0, "L", {}}).cut.boundingRect();
+    check(near(cut.width(), 196) && near(cut.height(), 231), "Recalculate finished size and retain 8 mm allowance");
+    roundTripAndExport(*pocket, "L");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -675,4 +694,5 @@ int main(int argc, char** argv) {
     checkLinkedTrouserBlock();
     checkTemplates();
     checkApronKit();
+    checkPatchPocket();
 }

@@ -27,4 +27,13 @@ struct ApronMeasurements {
 };
 
 std::optional<PatternDocument> draftBibApron(const ApronMeasurements& input, QString* error = nullptr);
+struct PatchPocketMeasurements {
+    double widthMm;
+    double heightMm;
+    double cornerRadiusMm;
+    double turnbackMm;
+};
+
+std::optional<PatternDocument> draftPatchPocket(const PatchPocketMeasurements& input,
+                                               QString* error = nullptr);
 }

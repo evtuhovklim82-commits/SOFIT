@@ -36,7 +36,7 @@ struct FabricUsage {
     std::optional<double> utilization(double width) const;
 };
 
-FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width);
+FabricUsage fabricUsage(const QVector<QPolygonF>& polygons, double width, double clearanceMm = 0);
 
 struct CuttingReportRow {
     qsizetype piece;
@@ -64,7 +64,7 @@ QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const 
 CuttingReport cuttingReport(const PatternDocument& document, const ProductionData& data);
 
 inline constexpr qsizetype maxAutomaticCopies = 200;
-enum class FabricLayoutError { None, InvalidWidth, TooManyCopies, InvalidContour, TooWide, VerificationFailed };
+enum class FabricLayoutError { None, InvalidWidth, InvalidClearance, TooManyCopies, InvalidContour, TooWide, VerificationFailed };
 
 struct AutomaticFabricLayout {
     QVector<FabricPlacement> placements;
