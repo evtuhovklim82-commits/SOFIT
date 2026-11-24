@@ -23,7 +23,8 @@ namespace {
 constexpr double layoutTolerance = 1e-7;
 
 bool validShrinkage(QPointF percent) {
-    return percent.x() >= 0 && percent.x() <= 99 && percent.y() >= 0 && percent.y() <= 99;
+    const auto validAxis = [](double value) { return value >= -99 && value <= 99; };
+    return validAxis(percent.x()) && validAxis(percent.y());
 }
 
 bool samePoint(QPointF a, QPointF b) {

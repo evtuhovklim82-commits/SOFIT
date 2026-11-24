@@ -1355,8 +1355,13 @@ void checkDrillMarks() {
     const auto pdf = temporary.filePath("drill.pdf");
     check(exportFabricPdf(pdf, panel, panel.production(), {}, error), error);
     for (const auto type : {PieceSymbol::Cross, PieceSymbol::Circle, PieceSymbol::Buttonhole,
-                            PieceSymbol::WarpRepeat, PieceSymbol::WeftRepeat}) {
-        for (const auto& stroke : buildPieceSymbol(type, 0, {50, 40}, 8, 25))
+                            PieceSymbol::WarpRepeat, PieceSymbol::WeftRepeat, PieceSymbol::NotchStroke,
+                            PieceSymbol::VNotch, PieceSymbol::UNotch, PieceSymbol::Arrow,
+                            PieceSymbol::ReverseArrow, PieceSymbol::GrainArrow, PieceSymbol::Tip,
+                            PieceSymbol::CenterFront, PieceSymbol::CenterBack, PieceSymbol::Scissors}) {
+        const auto glyph = buildPieceSymbol(type, 0, {50, 40}, 8, 25);
+        check(!glyph.isEmpty(), "Build an oriented glyph for every supported symbol");
+        for (const auto& stroke : glyph)
             panel.insert(panel.entities().size(), stroke);
     }
     check(panel.save(project) && panel.load(project), "Reopen the production symbols");

@@ -25,6 +25,11 @@ QVector<Entity> buildPieceSymbol(PieceSymbol type, qsizetype piece, QPointF cent
         entity.dxfLayer = pieceSymbolLayer;
         result.append(entity);
     };
+    const auto arrowHead = [&](double direction, double tip) {
+        const double base = tip - direction * h / 2;
+        add(Shape::Line, {base, -h / 3}, {tip, 0});
+        add(Shape::Line, {tip, 0}, {base, h / 3});
+    };
     switch (type) {
     case PieceSymbol::Cross:
         add(Shape::Line, {-h, 0}, {h, 0});
@@ -47,6 +52,44 @@ QVector<Entity> buildPieceSymbol(PieceSymbol type, qsizetype piece, QPointF cent
         add(Shape::Line, {-h, 0}, {h, 0});
         add(Shape::Line, {h / 2, -h / 2}, {h, 0});
         add(Shape::Line, {h, 0}, {h / 2, h / 2});
+        break;
+    case PieceSymbol::NotchStroke:
+        add(Shape::Line, {0, -h}, {0, h});
+        break;
+    case PieceSymbol::VNotch:
+        add(Shape::Line, {-h / 2, -h}, {0, h});
+        add(Shape::Line, {0, h}, {h / 2, -h});
+        break;
+    case PieceSymbol::UNotch:
+        add(Shape::Line, {-h / 2, -h}, {-h / 2, h});
+        add(Shape::Line, {-h / 2, h}, {h / 2, h});
+        add(Shape::Line, {h / 2, h}, {h / 2, -h});
+        break;
+    case PieceSymbol::Arrow:
+    case PieceSymbol::ReverseArrow:
+    case PieceSymbol::GrainArrow:
+        add(Shape::Line, {-h, 0}, {h, 0});
+        if (type != PieceSymbol::ReverseArrow)
+            arrowHead(1, h);
+        if (type != PieceSymbol::Arrow)
+            arrowHead(-1, -h);
+        break;
+    case PieceSymbol::Tip:
+        arrowHead(1, h / 4);
+        break;
+    case PieceSymbol::CenterFront:
+    case PieceSymbol::CenterBack:
+        add(Shape::Line, {-h, 0}, {h, 0});
+        add(Shape::Line, {-h, -h / 3}, {-h, h / 3});
+        add(Shape::Line, {h, -h / 3}, {h, h / 3});
+        if (type == PieceSymbol::CenterBack)
+            add(Shape::Line, {0, -h / 3}, {0, h / 3});
+        break;
+    case PieceSymbol::Scissors:
+        add(Shape::Circle, {-h * 0.65, -h * 0.4}, {-h * 0.4, -h * 0.4});
+        add(Shape::Circle, {-h * 0.65, h * 0.4}, {-h * 0.4, h * 0.4});
+        add(Shape::Line, {-h * 0.4, -h * 0.4}, {h, h * 0.4});
+        add(Shape::Line, {-h * 0.4, h * 0.4}, {h, -h * 0.4});
         break;
     }
     return result;

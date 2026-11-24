@@ -25,6 +25,11 @@ bool validName(const QString& name) {
     return name.size() <= 64 && pattern.match(name).hasMatch();
 }
 
+bool isNumericFunction(QStringView name) {
+    return name == u"sqrt" || name == u"abs" || name == u"min" || name == u"max"
+        || name == u"hypot";
+}
+
 class Formula {
 public:
     Formula(QStringView source, const std::function<double(const QString&, int)>& resolve)
@@ -90,6 +95,8 @@ private:
             } while (letter(peek()) || digit(peek()));
             const auto name = source_.mid(start, pos_ - start);
             const auto end = pos_;
+            if (isNumericFunction(name) && take(u'('))
+                return numericFunction(name, depth + 1);
             if (name == u"quadlen" && take(u'('))
                 return quadraticLength(depth + 1);
             if (name == u"capcontrol" && take(u'('))
@@ -133,6 +140,30 @@ private:
         if (!ok)
             fail(QStringLiteral("Invalid number"));
         return finite(number);
+    }
+
+    double numericFunction(QStringView name, int depth) {
+        const auto a = expression(depth);
+        if (name == u"abs" || name == u"sqrt") {
+            if (!take(u')'))
+                fail(QStringLiteral("Expected ')'"));
+            if (name == u"abs")
+                return std::abs(a);
+            if (a < 0)
+                fail(QStringLiteral("Square root requires a non-negative value"));
+            return std::sqrt(a);
+        }
+
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' between function arguments"));
+        const auto b = expression(depth);
+        if (!take(u')'))
+            fail(QStringLiteral("Expected ')'"));
+        if (name == u"min")
+            return std::min(a, b);
+        if (name == u"max")
+            return std::max(a, b);
+        return finite(std::hypot(a, b));
     }
 
     double quadraticLength(int depth) {
@@ -664,7 +695,8 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
             end = match.capturedEnd();
             const auto name = match.captured(1);
             const auto coordinate = match.captured(2);
-            const bool function = coordinate.isEmpty() && (name == u"quadlen" || name == u"positive" || name == u"capcontrol")
+            const bool function = coordinate.isEmpty()
+                && (isNumericFunction(name) || name == u"quadlen" || name == u"positive" || name == u"capcontrol")
                 && QStringView(formula).sliced(end).trimmed().startsWith(u'(');
             if (name.isEmpty() || function)
                 result += match.captured();

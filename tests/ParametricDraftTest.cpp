@@ -219,6 +219,16 @@ int main() {
         {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"hem", "C", "D", "K"}, {"left", "D", "A", {}}}
     };
     QString error;
+    ParametricDraft numeric;
+    numeric.measurements.append({"height", 50});
+    numeric.points.append({"A", "hypot(abs(-3), sqrt(16)) + min(height, 7) - max(2, -1)", "0"});
+    PatternDocument calculated;
+    check(calculated.setParametricDraft(numeric, &error) && calculated.entities().front().a.x() == 10,
+          "Evaluate geometric formula functions and nested expressions");
+    numeric.points[0].x = "sqrt(-1)";
+    check(!calculated.setParametricDraft(numeric, &error) && error.contains("non-negative")
+          && calculated.entities().front().a.x() == 10, "Reject an invalid square root transactionally");
+    error.clear();
     check(document.setParametricDraft(initial, &error) && error.isEmpty(), "Evaluate precedence, unary signs and forward references");
     check(document.entities().size() == 10 && document.entities()[2].a == QPointF(100, 0),
           "Generate points in addition to manual objects");

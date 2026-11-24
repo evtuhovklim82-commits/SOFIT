@@ -4,7 +4,11 @@
 #include <QPainterPath>
 
 namespace opc {
-enum class PieceSymbol { Cross, Circle, Buttonhole, WarpRepeat, WeftRepeat };
+enum class PieceSymbol {
+    Cross, Circle, Buttonhole, WarpRepeat, WeftRepeat,
+    NotchStroke, VNotch, UNotch, Arrow, ReverseArrow, GrainArrow, Tip,
+    CenterFront, CenterBack, Scissors
+};
 inline const QString pieceSymbolLayer = QStringLiteral("SOFIT_SYMBOL");
 
 QVector<Entity> buildPieceSymbol(PieceSymbol type, qsizetype piece, QPointF center,

@@ -1992,6 +1992,23 @@ int main(int argc, char** argv) {
           "Redo the handle move");
     MainWindow fromLibrary;
     fromLibrary.show();
+    runDialog<QFileDialog>(action(fromLibrary, "Preview Library Construction…"), [&](QFileDialog& file) {
+        file.selectFile(libraryPath);
+        QTimer::singleShot(0, &fromLibrary, [] {
+            auto* preview = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+            check(preview && preview->windowTitle() == "Preview Library Construction", "Open the library preview");
+            auto* sizes = preview->findChild<QComboBox*>();
+            const auto* view = preview->findChild<QGraphicsView*>();
+            check(sizes && sizes->count() == 2 && view && view->scene(), "Offer the base pattern and saved size");
+            sizes->setCurrentIndex(1);
+            const auto gradedWidth = view->scene()->itemsBoundingRect().width();
+            sizes->setCurrentIndex(0);
+            const auto baseWidth = view->scene()->itemsBoundingRect().width();
+            check(baseWidth > 0 && gradedWidth > baseWidth, "Draw a different outline in the graded library preview");
+            preview->reject();
+        });
+        static_cast<QDialog&>(file).accept();
+    });
     chooseFile(action(fromLibrary, "New Pattern from Library…"), libraryPath);
     const auto copied = temp.filePath("library-instance.sofit");
     chooseFile(action(fromLibrary, "&Save"), copied);

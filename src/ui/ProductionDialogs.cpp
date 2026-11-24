@@ -932,7 +932,8 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     const auto shrinkageInput = [&](const QString& label, double value, const QString& name) {
         auto* input = new QDoubleSpinBox;
         input->setObjectName(name);
-        input->setRange(0, 99);
+        input->setToolTip(QStringLiteral("Положительное значение для усадки, отрицательное для растяжения."));
+        input->setRange(-99, 99);
         input->setDecimals(2);
         input->setSuffix(QStringLiteral(" %"));
         input->setValue(value);
@@ -1383,7 +1384,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
             error = tr("Automatic layout supports up to %1 copies.").arg(opc::maxAutomaticCopies);
             break;
         case opc::FabricLayoutError::InvalidShrinkage:
-            error = QStringLiteral("Задайте усадку от 0 до 99 % по каждой оси.");
+            error = QStringLiteral("Задайте компенсацию от −99 до 99 % по каждой оси.");
             break;
         case opc::FabricLayoutError::InvalidWidth:
             error = tr("Enter a positive fabric width.");

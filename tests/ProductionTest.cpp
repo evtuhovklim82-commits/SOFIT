@@ -433,6 +433,15 @@ int main(int argc, char** argv) {
     QFile compensatedDxf(shrinkDxf);
     check(compensatedDxf.open(QIODevice::ReadOnly) && compensatedDxf.readAll().contains("20\n-100\n"),
           "Export the compensated physical length to DXF");
+    auto stretched = shrinkage;
+    stretched.fabricShrinkagePercent.setX(-20);
+    const auto contracted = fabricPiece(compensated, stretched.placements.front(), false,
+                                        stretched.fabricShrinkagePercent).cut.boundingRect();
+    ProductionData loadedStretch;
+    check(qAbs(contracted.width() - 75) < 1e-7 && qAbs(contracted.height() - 100) < 1e-7
+          && loadProduction(saveProduction(stretched), 1, loadedStretch)
+          && loadedStretch.fabricShrinkagePercent == QPointF(-20, 20),
+          "Apply and persist signed fabric compensation independently on both axes");
     auto tooNarrow = shrinkage;
     tooNarrow.fabricWidth = 95;
     check(arrangeFabric(compensated, tooNarrow).error == FabricLayoutError::TooWide

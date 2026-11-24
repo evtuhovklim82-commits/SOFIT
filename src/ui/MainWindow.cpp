@@ -668,6 +668,61 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         else
             QMessageBox::warning(this, tr("Save Construction to Library"), error);
     });
+    library->addAction(tr("Preview Library Construction…"), this, [this] {
+        QSettings settings;
+        const auto title = tr("Preview Library Construction");
+        const auto path = QFileDialog::getOpenFileName(this, title,
+            settings.value(QStringLiteral("construction/libraryFolder")).toString(), tr("SOFIT constructions (*.sofit)"));
+        if (path.isEmpty())
+            return;
+        opc::PatternDocument source;
+        QString error;
+        if (!source.load(path, &error) || source.parametricDraft().points.isEmpty()) {
+            QMessageBox::warning(this, title, error.isEmpty()
+                ? tr("The selected project has no parametric draft.") : error);
+            return;
+        }
+
+        QDialog dialog(this);
+        dialog.setWindowTitle(title);
+        QVBoxLayout layout(&dialog);
+        QLabel name(QFileInfo(path).completeBaseName(), &dialog);
+        name.setTextFormat(Qt::PlainText);
+        layout.addWidget(&name);
+        QComboBox sizes(&dialog);
+        fillExportSizes(sizes, source);
+        layout.addWidget(&sizes);
+        QGraphicsScene scene;
+        QGraphicsView drawing(&scene, &dialog);
+        drawing.setRenderHint(QPainter::Antialiasing);
+        drawing.setDragMode(QGraphicsView::ScrollHandDrag);
+        layout.addWidget(&drawing, 1);
+        QLabel details(&dialog);
+        layout.addWidget(&details);
+        QDialogButtonBox buttons(QDialogButtonBox::Close, &dialog);
+        layout.addWidget(&buttons);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        const auto showSize = [&] {
+            const auto graded = opc::gradedPattern(source, sizes.currentData().toString());
+            scene.clear();
+            QPen outline(drawing.palette().color(QPalette::Text));
+            QPen guide(drawing.palette().color(QPalette::Text), 0, Qt::DashLine);
+            outline.setCosmetic(true);
+            for (const auto& entity : graded.entities()) {
+                if (entity.shape != opc::Shape::Point)
+                    scene.addPath(opc::entityPath(entity), entity.layer == opc::Layer::Main ? outline : guide);
+            }
+            const auto bounds = scene.itemsBoundingRect();
+            scene.setSceneRect(bounds.adjusted(-5, -5, 5, 5));
+            drawing.fitInView(scene.sceneRect(), Qt::KeepAspectRatio);
+            details.setText(tr("Pieces: %1 · Measurements: %2")
+                .arg(graded.pieces().size()).arg(source.parametricDraft().measurements.size()));
+        };
+        connect(&sizes, &QComboBox::currentIndexChanged, &dialog, showSize);
+        dialog.resize(680, 550);
+        QMetaObject::invokeMethod(&dialog, showSize, Qt::QueuedConnection);
+        dialog.exec();
+    });
     library->addAction(tr("New Pattern from Library…"), this, [this] {
         QSettings settings;
         const auto path = QFileDialog::getOpenFileName(this, tr("New Pattern from Library"),
@@ -1847,6 +1902,16 @@ void MainWindow::diagnoseGradedPieces(const QVector<QAction*>& productionActions
             type.addItem(QStringLiteral("Петля"), int(opc::PieceSymbol::Buttonhole));
             type.addItem(QStringLiteral("Раппорт по основе"), int(opc::PieceSymbol::WarpRepeat));
             type.addItem(QStringLiteral("Раппорт по утку"), int(opc::PieceSymbol::WeftRepeat));
+            type.addItem(tr("Straight notch mark"), int(opc::PieceSymbol::NotchStroke));
+            type.addItem(tr("V-notch mark"), int(opc::PieceSymbol::VNotch));
+            type.addItem(tr("U-notch mark"), int(opc::PieceSymbol::UNotch));
+            type.addItem(tr("Arrow"), int(opc::PieceSymbol::Arrow));
+            type.addItem(tr("Reverse arrow"), int(opc::PieceSymbol::ReverseArrow));
+            type.addItem(tr("Grain arrow mark"), int(opc::PieceSymbol::GrainArrow));
+            type.addItem(tr("Tip mark"), int(opc::PieceSymbol::Tip));
+            type.addItem(tr("Center front mark"), int(opc::PieceSymbol::CenterFront));
+            type.addItem(tr("Center back mark"), int(opc::PieceSymbol::CenterBack));
+            type.addItem(tr("Scissors mark"), int(opc::PieceSymbol::Scissors));
             fields.addRow(QStringLiteral("Вид знака"), &type);
             QDoubleSpinBox x, y, length, angle;
             const auto center = opc::analyzePiece(doc_, piece).bounds.center();
