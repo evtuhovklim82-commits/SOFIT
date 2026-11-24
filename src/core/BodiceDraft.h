@@ -12,8 +12,8 @@ struct BodiceMeasurements {
     double upperArm, upperArmEase, cuff, sleeveLength, capHeight;
 };
 
-enum class NeckFinish { None, FlatCollar, Stand, Facing };
-enum class SleeveStyle { Fitted, Wide, Puff };
+enum class NeckFinish { None, FlatCollar, Stand, Facing, PointedCollar };
+enum class SleeveStyle { Fitted, Wide, Puff, TwoPiece };
 
 struct BodiceOptions {
     NeckFinish neckFinish = NeckFinish::None;
@@ -22,6 +22,11 @@ struct BodiceOptions {
     double extraWidth = 100;
     double crownRise = 30;
     double gatherPerCapSection = 35;
+    double elbowShape = 25;
+    double collarPointExtension = 30;
+    double dartIntakeShare = 50;
+    double dartPosition = 50;
+    double elbowLevel = 50;
 };
 
 struct BodiceSeams {

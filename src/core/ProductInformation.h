@@ -12,6 +12,16 @@ struct ProductInformation {
     QString revision;
     QString material;
     QString notes;
+    QString reportTitle;
+    QString billOfMaterials;
+    QString assemblyInstructions;
+    bool includeCuttingQuantities = true;
+    bool includeSizeMeasurements = false;
+
+    bool usesTechPackOptions() const {
+        return !reportTitle.isEmpty() || !billOfMaterials.isEmpty() || !assemblyInstructions.isEmpty()
+            || !includeCuttingQuantities || includeSizeMeasurements;
+    }
 
     bool operator==(const ProductInformation&) const = default;
 };

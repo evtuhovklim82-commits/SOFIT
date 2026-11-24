@@ -97,8 +97,8 @@ QString modelingStepName(const opc::ModelingStep& step) {
         return text("Shape Silhouette");
     switch (*step.contour) {
     case C::Cut: return text("Cut Piece");
-    case C::Relief: return text("Straight Relief Seam");
-    case C::Yoke: return text("Straight Yoke");
+    case C::Relief: return text("Relief Seam");
+    case C::Yoke: return text("Yoke");
     case C::Spread: return text("Slash and Spread");
     case C::Pleat: return text("Box Pleat");
     case C::Gather: return text("Gathering Fullness");
@@ -367,12 +367,48 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         if (dialog.exec() != QDialog::Accepted)
             return;
-        opc::ProductInformation info{code.text(), title.text(), revision.text(), material.text(), notes.toPlainText()};
+        auto info = current;
+        info.styleCode = code.text();
+        info.title = title.text();
+        info.revision = revision.text();
+        info.material = material.text();
+        info.notes = notes.toPlainText();
         if (info != current) {
             auto updated = doc_;
             updated.productInformation() = std::move(info);
             undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Product Information"), nullptr));
         }
+    });
+    product->addAction(tr("Tech Pack Options…"), this, [this] {
+        auto updated = doc_;
+        auto& info = updated.productInformation();
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Tech Pack Options"));
+        QFormLayout form(&dialog);
+        QLineEdit title(info.reportTitle);
+        QPlainTextEdit materials(info.billOfMaterials), assembly(info.assemblyInstructions);
+        QCheckBox quantities(tr("Include cutting quantities by size"));
+        QCheckBox measurements(tr("Include draft input measurements by size"));
+        quantities.setChecked(info.includeCuttingQuantities);
+        measurements.setChecked(info.includeSizeMeasurements);
+        form.addRow(tr("Report title"), &title);
+        form.addRow(tr("Bill of materials"), &materials);
+        form.addRow(tr("Assembly instructions"), &assembly);
+        form.addRow(&quantities);
+        form.addRow(&measurements);
+        QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        form.addRow(&buttons);
+        connect(&buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted)
+            return;
+        info.reportTitle = title.text().trimmed();
+        info.billOfMaterials = materials.toPlainText();
+        info.assemblyInstructions = assembly.toPlainText();
+        info.includeCuttingQuantities = quantities.isChecked();
+        info.includeSizeMeasurements = measurements.isChecked();
+        if (info != doc_.productInformation())
+            undo_.push(new PatternCommand(doc_, std::move(updated), tr("Edit Tech Pack Options"), nullptr));
     });
     product->addAction(tr("Export Product Information PDF…"), this, [this] {
         auto path = QFileDialog::getSaveFileName(this, tr("Export Product Information PDF"), {}, tr("PDF (*.pdf)"));
@@ -471,11 +507,11 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     modeling->addAction(tr("Cut Piece…"), this, [this] {
         modelPiece(opc::ContourOperation::Cut, tr("Cut Piece"));
     });
-    modeling->addAction(tr("Straight Relief Seam…"), this, [this] {
-        modelPiece(opc::ContourOperation::Relief, tr("Straight Relief Seam"));
+    modeling->addAction(tr("Relief Seam…"), this, [this] {
+        modelPiece(opc::ContourOperation::Relief, tr("Relief Seam"));
     });
-    modeling->addAction(tr("Straight Yoke…"), this, [this] {
-        modelPiece(opc::ContourOperation::Yoke, tr("Straight Yoke"));
+    modeling->addAction(tr("Yoke…"), this, [this] {
+        modelPiece(opc::ContourOperation::Yoke, tr("Yoke"));
     });
     auto* spreadAction = modeling->addAction(tr("Slash and Spread…"), this, [this] {
         modelPiece(opc::ContourOperation::Spread, tr("Slash and Spread"));
@@ -518,6 +554,45 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             undo_.push(new PatternCommand(doc_, std::move(*generated), tr("Create Pattern from Template"), view_));
             view_->fitDrawing();
         }
+    });
+    auto* library = construction->addMenu(tr("Construction Library"));
+    library->addAction(tr("Save Construction to Library…"), this, [this] {
+        if (doc_.parametricDraft().points.isEmpty()) {
+            QMessageBox::information(this, tr("Construction Library"), tr("Create a parametric draft first."));
+            return;
+        }
+        QSettings settings;
+        auto path = QFileDialog::getSaveFileName(this, tr("Save Construction to Library"),
+            settings.value(QStringLiteral("construction/libraryFolder")).toString(), tr("SOFIT constructions (*.sofit)"));
+        if (path.isEmpty())
+            return;
+        if (!path.endsWith(QStringLiteral(".sofit"), Qt::CaseInsensitive))
+            path += QStringLiteral(".sofit");
+        QString error;
+        if (doc_.save(path, &error))
+            settings.setValue(QStringLiteral("construction/libraryFolder"), QFileInfo(path).absolutePath());
+        else
+            QMessageBox::warning(this, tr("Save Construction to Library"), error);
+    });
+    library->addAction(tr("New Pattern from Library…"), this, [this] {
+        QSettings settings;
+        const auto path = QFileDialog::getOpenFileName(this, tr("New Pattern from Library"),
+            settings.value(QStringLiteral("construction/libraryFolder")).toString(), tr("SOFIT constructions (*.sofit)"));
+        if (path.isEmpty())
+            return;
+        opc::PatternDocument construction;
+        QString error;
+        if (!construction.load(path, &error) || construction.parametricDraft().points.isEmpty()) {
+            QMessageBox::warning(this, tr("Construction Library"), error.isEmpty()
+                ? tr("The selected project has no parametric draft.") : error);
+            return;
+        }
+        if (!confirmDiscard())
+            return;
+        settings.setValue(QStringLiteral("construction/libraryFolder"), QFileInfo(path).absolutePath());
+        replaceDocument({}, {});
+        undo_.push(new PatternCommand(doc_, std::move(construction), tr("Create Pattern from Library"), view_));
+        view_->fitDrawing();
     });
     auto* draftAction = construction->addAction(tr("Parametric Draft…"), this, [this] {
         QString calculationError;
@@ -758,6 +833,13 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         statusBar()->showMessage(tr("Choose a distinct leg end so the three points form a triangle."), 5000);
     });
 
+    connect(view_, &PatternView::draftDragPreviewRequested, this, [this](qsizetype index, const QPointF& offset) {
+        auto candidate = doc_;
+        if (candidate.moveDraftPoint(doc_.entities()[index].draftName, offset))
+            view_->previewDraftDrag(candidate.entities());
+        else
+            view_->previewDraftDrag({});
+    });
     connect(view_, &PatternView::entityMoved, this, &MainWindow::moveEntity);
     connect(view_, &PatternView::measured, this, [this](qreal distance) {
         statusBar()->showMessage(tr("Distance %1 mm").arg(QLocale().toString(distance, 'f', 3)));
@@ -1577,6 +1659,19 @@ void MainWindow::managePiece() {
 }
 
 void MainWindow::moveEntity(qsizetype index, const QPointF& offset) {
+    const auto& entity = doc_.entities()[index];
+    if (entity.shape == opc::Shape::Point && !entity.draftName.isEmpty()) {
+        auto updated = doc_;
+        QString error;
+        if (!updated.moveDraftPoint(entity.draftName, offset, &error)) {
+            setModelingError(error);
+            statusBar()->showMessage(error, 8000);
+            return;
+        }
+        setModelingError({});
+        applyPatternEdit(std::move(updated), tr("Move Draft Point"), true);
+        return;
+    }
     if (!canModelEdge(doc_.entities()[index]))
         return;
     auto moved = doc_.entities()[index];
@@ -2141,6 +2236,7 @@ void MainWindow::modelPiece(opc::ContourOperation operation, const QString& titl
         QMessageBox::information(this, title, openDart
             ? tr("Select two main-contour dart legs and one construction outlet.")
             : dart ? tr("Select two dart legs and an outlet on the Construction layer.")
+            : opc::dividesPiece(operation) ? tr("Select one construction line or quadratic curve with both ends on the piece contour.")
                    : tr("Select one construction line with both ends on the piece contour."));
         return;
     }

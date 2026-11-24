@@ -87,6 +87,8 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     const auto* bustEase = measurement(tr("Bust wearing ease"), 60, 0, 300);
     auto* waistEase = measurement(tr("Waist wearing ease"), 40, 0, 300);
     const auto* dart = measurement(tr("Waist dart length"), 115, 20, 250);
+    const auto* dartShare = measurement(tr("Waist suppression taken by the dart (%)"), 50, 10, 90);
+    const auto* dartPosition = measurement(tr("Dart position from center (%)"), 50, 30, 70);
     const int sleeveStart = form->rowCount();
     const auto* upperArm = measurement(tr("Upper arm circumference"), 300, 120, 800);
     const auto* upperArmEase = measurement(tr("Upper arm wearing ease"), 50, 0, 200);
@@ -97,18 +99,21 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
     const auto* tolerance = measurement(tr("Tolerance per cap section"), 3, 0, 30);
 
     auto* sleeveStyle = new QComboBox;
-    sleeveStyle->addItems({tr("Fitted"), tr("Wide hem"), tr("Puff with gathered cap and hem band")});
+    sleeveStyle->addItems({tr("Fitted"), tr("Wide hem"), tr("Puff with gathered cap and hem band"), tr("Two-piece with shaped elbow seam")});
     form->addRow(tr("Sleeve style"), sleeveStyle);
     auto* extraWidth = measurement(tr("Added hem width per sleeve"), 100, 10, 500);
     auto* crownRise = measurement(tr("Added crown height"), 30, 5, 150);
     auto* capGather = measurement(tr("Target gathering per cap section"), 65, 0, 200);
 
+    auto* elbowShape = measurement(tr("Elbow seam shaping"), 25, 5, 60);
+    auto* elbowLevel = measurement(tr("Elbow level from underarm to hem (%)"), 50, 25, 75);
     const int finishStart = form->rowCount();
     auto* neckFinish = new QComboBox;
-    neckFinish->addItems({tr("None"), tr("Flat collar"), tr("Straight stand"), tr("Neck facing")});
+    neckFinish->addItems({tr("None"), tr("Flat collar"), tr("Straight stand"), tr("Neck facing"), tr("Pointed collar")});
     form->addRow(tr("Neckline finish"), neckFinish);
     auto* finishDepth = measurement(tr("Collar, stand or facing depth"), 35, 10, 120);
 
+    auto* pointExtension = measurement(tr("Collar point extension"), 30, 5, 100);
     const int hipStart = form->rowCount();
     const auto* fittedHip = measurement(tr("Hip circumference"), 1000, 350, 2500);
     const auto* hipEase = measurement(tr("Hip wearing ease"), 60, 0, 300);
@@ -177,7 +182,13 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
         form->setRowVisible(waist, index >= Bodice && index != Apron);
         form->setRowVisible(waistEase, index >= Bodice && index != Apron);
         form->setRowVisible(flare, index == ALine);
-        form->setRowVisible(extraWidth, index == Bodice && sleeveStyle->currentIndex() > 0);
+        const auto selectedSleeve = static_cast<opc::SleeveStyle>(sleeveStyle->currentIndex());
+        form->setRowVisible(extraWidth, index == Bodice
+            && (selectedSleeve == opc::SleeveStyle::Wide || selectedSleeve == opc::SleeveStyle::Puff));
+        form->setRowVisible(elbowShape, index == Bodice && selectedSleeve == opc::SleeveStyle::TwoPiece);
+        form->setRowVisible(elbowLevel, index == Bodice && selectedSleeve == opc::SleeveStyle::TwoPiece);
+        form->setRowVisible(pointExtension, (index == Bodice || index == Dress)
+            && neckFinish->currentIndex() == int(opc::NeckFinish::PointedCollar));
         form->setRowVisible(crownRise, index == Bodice && sleeveStyle->currentIndex() == 2);
         form->setRowVisible(capGather, index == Bodice && sleeveStyle->currentIndex() == 2);
         form->setRowVisible(finishDepth, (index == Bodice || index == Dress) && neckFinish->currentIndex() > 0);
@@ -231,7 +242,8 @@ std::optional<opc::PatternDocument> createPatternFromTemplate(QWidget* parent) {
             const opc::BodiceOptions options{
                 static_cast<opc::NeckFinish>(neckFinish->currentIndex()), finishDepth->value(),
                 static_cast<opc::SleeveStyle>(sleeveStyle->currentIndex()), extraWidth->value(),
-                crownRise->value(), capGather->value()
+                crownRise->value(), capGather->value(), elbowShape->value(), pointExtension->value(),
+                dartShare->value(), dartPosition->value(), elbowLevel->value()
             };
             if (index == Dress) {
                 if (auto document = opc::draftDress(bodice, {

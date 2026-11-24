@@ -654,6 +654,16 @@ int main(int argc, char** argv) {
         dialog.reject();
     });
     action(window, "Redo Edit Product Information").trigger();
+    runDialog<QDialog>(action(window, "Tech Pack Options…"), [](QDialog& dialog) {
+        dialog.findChild<QLineEdit*>()->setText("Cutting instructions");
+        const auto fields = dialog.findChildren<QPlainTextEdit*>();
+        check(fields.size() == 2, "Open tech pack assembly and material fields");
+        fields.first()->setPlainText("Shell and interfacing");
+        fields.last()->setPlainText("Join the shoulders");
+        dialog.accept();
+    });
+    action(window, "Undo Edit Tech Pack Options").trigger();
+    action(window, "Redo Edit Tech Pack Options").trigger();
     const auto techPack = temp.filePath("tech-pack.pdf");
     chooseFile(action(window, "Export Product Information PDF…"), techPack);
     check(pageCount(readPdf(techPack)) == 1, "Export the product sheet through the UI");
@@ -665,6 +675,9 @@ int main(int argc, char** argv) {
           && loaded.productInformation().styleCode == QStringLiteral("Модель 004")
           && loaded.productInformation().notes == QStringLiteral("Проверка раскроя\nMain fabric"),
           "Save geometry and product information through the UI");
+    check(loaded.productInformation().reportTitle == "Cutting instructions"
+          && loaded.productInformation().billOfMaterials == "Shell and interfacing",
+          "Save the customized tech pack with the project");
 
     const auto svgPath = temp.filePath("piece.svg");
     chooseFile(action(window, "Export &SVG"), svgPath);
@@ -750,6 +763,8 @@ int main(int argc, char** argv) {
     runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
         dialog.findChild<QDoubleSpinBox*>()->setValue(1450);
         dialog.findChild<QDoubleSpinBox*>("markerPieceClearance")->setValue(5.5);
+        dialog.findChild<QDoubleSpinBox*>("markerCrossRepeat")->setValue(20);
+        dialog.findChild<QDoubleSpinBox*>("markerLengthRepeat")->setValue(40);
         for (auto* combo : dialog.findChildren<QComboBox*>()) {
             if (combo->findText("Base pattern") >= 0)
                 combo->setCurrentIndex(combo->findData("L"));
@@ -776,6 +791,7 @@ int main(int argc, char** argv) {
     check(loaded.load(pattern) && loaded.production().sizes.size() == 1 && loaded.production().rules.size() == 1
           && loaded.production().placements.size() == 1 && loaded.production().placements.front().size == "L"
           && loaded.production().fabricWidth == 1450 && loaded.production().pieceClearanceMm == 5.5
+          && loaded.production().fabricRepeatMm == QPointF(20, 40)
           && loaded.production().placements.front().position == QPointF(20, 40)
           && loaded.production().placements.front().reversed, "Save grading and layout through the UI");
 
@@ -1205,7 +1221,7 @@ int main(int argc, char** argv) {
     yokeWindow.show();
     chooseFile(action(yokeWindow, "&Open"), yokePath);
     yokeWindow.findChild<QTreeWidget*>()->topLevelItem(yoke.entities().size() - 1)->setSelected(true);
-    action(yokeWindow, "Straight Yoke…").trigger();
+    action(yokeWindow, "Yoke…").trigger();
     action(yokeWindow, "&Save").trigger();
     check(yoke.load(yokePath) && yoke.pieces().size() == 2 && yoke.hasContourHistory(),
           "Save the replayable yoke from the normal modeling command");
@@ -1228,11 +1244,11 @@ int main(int argc, char** argv) {
     });
     yokeTree->itemActivated(pair, 0);
     action(yokeWindow, "Undo Place Paired Notches").trigger();
-    action(yokeWindow, "Undo Straight Yoke").trigger();
+    action(yokeWindow, "Undo Yoke").trigger();
     action(yokeWindow, "&Save").trigger();
     check(yoke.load(yokePath) && yoke.pieces().size() == 1 && !yoke.hasContourHistory(),
           "Undo restores the formula guide and original piece");
-    action(yokeWindow, "Redo Straight Yoke").trigger();
+    action(yokeWindow, "Redo Yoke").trigger();
     action(yokeWindow, "Redo Place Paired Notches").trigger();
     action(yokeWindow, "&Save").trigger();
     check(yoke.load(yokePath) && yoke.pieces().size() == 2
@@ -1479,5 +1495,44 @@ int main(int argc, char** argv) {
           && opc::analyzePiece(loaded, 0).bounds.width() == 740
           && opc::analyzePiece(opc::gradedPattern(loaded, "L"), 0).bounds.width() == 840,
           "Recompute the template contour for the entered size after saving and opening");
+
+    auto& templateView = *templateWindow.findChild<PatternView*>();
+    const auto handle = std::ranges::find_if(loaded.entities(), [](const auto& entity) {
+        return entity.shape == opc::Shape::Point && entity.draftName == "TopL";
+    });
+    check(handle != loaded.entities().end(), "Find a visible template construction handle");
+    const auto handleIndex = handle - loaded.entities().begin();
+    const auto originalHandle = handle->a;
+    const auto target = templateView.mapFromScene(originalHandle + QPointF(-35, -20));
+    const auto start = templateView.mapFromScene(originalHandle);
+    const auto mouse = [&](QEvent::Type type, QPoint position) {
+        const auto button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
+        const auto buttons = type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton;
+        QMouseEvent event(type, position, templateView.viewport()->mapToGlobal(position), button, buttons, Qt::NoModifier);
+        QApplication::sendEvent(templateView.viewport(), &event);
+    };
+    mouse(QEvent::MouseButtonPress, start);
+    mouse(QEvent::MouseMove, target);
+    mouse(QEvent::MouseButtonRelease, target);
+    const auto libraryPath = temp.filePath("construction.sofit");
+    chooseFile(action(templateWindow, "Save Construction to Library…"), libraryPath);
+    opc::PatternDocument library;
+    check(library.load(libraryPath) && library.entities()[handleIndex].a != originalHandle,
+          "Drag a draft handle and save the result to the library");
+    action(templateWindow, "Undo Move Draft Point").trigger();
+    action(templateWindow, "&Save").trigger();
+    check(loaded.load(skirtPath) && loaded.entities()[handleIndex].a == originalHandle, "Undo the handle move");
+    action(templateWindow, "Redo Move Draft Point").trigger();
+    action(templateWindow, "&Save").trigger();
+    check(loaded.load(skirtPath) && loaded.entities()[handleIndex].a == library.entities()[handleIndex].a,
+          "Redo the handle move");
+    MainWindow fromLibrary;
+    fromLibrary.show();
+    chooseFile(action(fromLibrary, "New Pattern from Library…"), libraryPath);
+    const auto copied = temp.filePath("library-instance.sofit");
+    chooseFile(action(fromLibrary, "&Save"), copied);
+    check(loaded.load(copied) && loaded.parametricDraft() == library.parametricDraft()
+          && opc::saveProduction(loaded.production()) == opc::saveProduction(library.production()),
+          "Start an independent editable pattern with the library formulas and sizes");
 
 }

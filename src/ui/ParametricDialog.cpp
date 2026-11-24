@@ -77,7 +77,8 @@ std::optional<opc::PatternDocument> editParametricDraft(QWidget* parent, const o
     auto* help = new QLabel(tr("Names are case-sensitive. Use A–Z, digits and underscores. Start with a letter or underscore. "
                                "Formulas support +, -, *, / and parentheses. Use a decimal point in formulas. "
                                "Example: chest / 4 + ease or A.x + 10. "
-                               "Enter a control point for a quadratic curve, or leave it empty for a line."), &dialog);
+                               "Enter a control point for a quadratic curve, or leave it empty for a line. "
+                               "Drag a draft point on the canvas to add an offset to its formulas."), &dialog);
     help->setTextFormat(Qt::PlainText);
     help->setWordWrap(true);
     layout->addWidget(help);

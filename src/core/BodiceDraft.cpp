@@ -29,12 +29,16 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
 
     const bool wide = !skirt && options.sleeveStyle == SleeveStyle::Wide;
     const bool puff = !skirt && options.sleeveStyle == SleeveStyle::Puff;
+    const bool twoPiece = !skirt && options.sleeveStyle == SleeveStyle::TwoPiece;
     const auto inRange = [](double value, double min, double max) { return value >= min && value <= max; };
     if ((options.neckFinish != NeckFinish::None && !inRange(options.finishDepth, 10, 120))
+        || (options.neckFinish == NeckFinish::PointedCollar && !inRange(options.collarPointExtension, 5, 100))
+        || (twoPiece && (!inRange(options.elbowShape, 5, 60) || !inRange(options.elbowLevel, 25, 75)))
+        || !inRange(options.dartIntakeShare, 10, 90) || !inRange(options.dartPosition, 30, 70)
         || ((wide || puff) && !inRange(options.extraWidth, 10, 500))
         || (puff && (!inRange(options.crownRise, 5, 150) || !inRange(options.gatherPerCapSection, 0, 200)
                      || m.capHeight + options.crownRise + 20 >= m.sleeveLength)))
-        return fail(QStringLiteral("Check finish depth, added sleeve width, crown rise and gathering targets."));
+        return fail(QStringLiteral("Check collar, sleeve and waist dart settings."));
 
     const double chest = (m.bust + m.bustEase) / 4;
     const double suppression = chest - (m.waist + m.waistEase) / 4;
@@ -52,11 +56,13 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
          {"armhole_depth", m.armholeDepth}, {"neck_width", m.neckWidth},
          {"front_neck_depth", m.frontNeckDepth}, {"back_neck_depth", m.backNeckDepth},
          {"shoulder_run", m.shoulderRun}, {"shoulder_drop", m.shoulderDrop},
-         {"bust_ease", m.bustEase}, {"waist_ease", m.waistEase}, {"dart_length", m.dartLength}},
+         {"bust_ease", m.bustEase}, {"waist_ease", m.waistEase}, {"dart_length", m.dartLength},
+         {"dart_intake_share", options.dartIntakeShare}, {"dart_position", options.dartPosition}},
         {{"chest", "(bust + bust_ease) / 4"},
          {"suppression", "chest - (waist + waist_ease) / 4"},
-         {"side_waist", "chest - suppression / 2"},
-         {"dart_half", "suppression / 4"},
+         {"dart_half", "positive(suppression * dart_intake_share / 200)"},
+         {"side_waist", "chest - suppression + 2 * dart_half"},
+         {"dart_center", "dart_half + positive(side_waist - 2 * dart_half) * dart_position / 100"},
          {"shoulder_x", "neck_width + shoulder_run"}},
         {}, {}
     };
@@ -75,9 +81,9 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
         point("Underarm", "chest", "armhole_depth");
         point("SideWaist", "side_waist", "bodice_length");
         point("CenterWaist", "0", "bodice_length");
-        point("DartLeft", "side_waist / 2 - dart_half", "bodice_length");
-        point("DartRight", "side_waist / 2 + dart_half", "bodice_length");
-        point("DartTip", "side_waist / 2", "bodice_length - dart_length");
+        point("DartLeft", "dart_center - dart_half", "bodice_length");
+        point("DartRight", "dart_center + dart_half", "bodice_length");
+        point("DartTip", "dart_center", "bodice_length - dart_length");
         draft.edges.append({
             {prefix + "neck", p + "Neck", p + "ShoulderStart", p + "NeckControl"},
             {prefix + "shoulder", p + "ShoulderStart", p + "ShoulderEnd", {}},
@@ -122,17 +128,48 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             {"SHemFront", "sleeve_center - sleeve_hem_width / 2", "sleeve_hem_y"},
             {"SHemBack", "sleeve_center + sleeve_hem_width / 2", "sleeve_hem_y"}
         });
-        draft.edges.append({
-            {"sleeve_front_cap", "SFront", "SCrown", "SFrontControl"},
-            {"sleeve_back_cap", "SCrown", "SBack", "SBackControl"},
-            {"sleeve_back_seam", "SBack", "SHemBack", {}},
-            {"sleeve_hem", "SHemBack", "SHemFront", {}},
-            {"sleeve_front_seam", "SHemFront", "SFront", {}}
-        });
+        if (twoPiece) {
+            draft.measurements.append({
+                {"sleeve_elbow_shape", options.elbowShape}, {"sleeve_elbow_level", options.elbowLevel}
+            });
+            draft.parameters.append(DraftParameter{"sleeve_panel_spacing", "sleeve_half + sleeve_hem_width / 2 + 40"});
+            draft.points.append({
+                {"SJoinHem", "sleeve_center", "sleeve_hem_y"},
+                {"SJoinElbow", "sleeve_center - sleeve_elbow_shape",
+                 "cap_height + (sleeve_hem_y - cap_height) * sleeve_elbow_level / 100"}
+            });
+            // The back panel uses a translated copy of the same sewing edge.
+            for (const auto* name : {"SCrown", "SBack", "SBackControl", "SHemBack", "SJoinHem", "SJoinElbow"}) {
+                const QString point = QString::fromLatin1(name);
+                draft.points.append({point + "Rear", point + ".x + sleeve_panel_spacing", point + ".y"});
+            }
+            draft.edges.append({
+                {"sleeve_front_cap", "SFront", "SCrown", "SFrontControl"},
+                {"sleeve_front_join", "SCrown", "SJoinHem", "SJoinElbow"},
+                {"sleeve_front_hem", "SJoinHem", "SHemFront", {}},
+                {"sleeve_front_seam", "SHemFront", "SFront", {}},
+                {"sleeve_back_cap", "SCrownRear", "SBackRear", "SBackControlRear"},
+                {"sleeve_back_seam", "SBackRear", "SHemBackRear", {}},
+                {"sleeve_back_hem", "SHemBackRear", "SJoinHemRear", {}},
+                {"sleeve_back_join", "SJoinHemRear", "SCrownRear", "SJoinElbowRear"}
+            });
+            document.pieces().append({
+                {"Sleeve front panel (mirror pair)", 0, 2, {}, true, 90},
+                {"Sleeve back panel (mirror pair)", 0, 2, {}, true, 90}
+            });
+        } else {
+            draft.edges.append({
+                {"sleeve_front_cap", "SFront", "SCrown", "SFrontControl"},
+                {"sleeve_back_cap", "SCrown", "SBack", "SBackControl"},
+                {"sleeve_back_seam", "SBack", "SHemBack", {}},
+                {"sleeve_hem", "SHemBack", "SHemFront", {}},
+                {"sleeve_front_seam", "SHemFront", "SFront", {}}
+            });
 
-        const auto* sleeveName = puff ? "Puff sleeve (mirror pair)"
-                                       : wide ? "Wide-hem sleeve (mirror pair)" : "One-piece sleeve (mirror pair)";
-        document.pieces().append({sleeveName, 0, 2, {}, true, 90});
+            const auto* sleeveName = puff ? "Puff sleeve (mirror pair)"
+                                           : wide ? "Wide-hem sleeve (mirror pair)" : "One-piece sleeve (mirror pair)";
+            document.pieces().append({sleeveName, 0, 2, {}, true, 90});
+        }
         if (puff) {
             draft.measurements.append({"sleeve_band_depth", 30});
             draft.points.append({
@@ -219,7 +256,8 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
             edge.piece = 1;
         else if (edge.draftName.startsWith("finish_"))
             edge.piece = finishStart + (edge.draftName.startsWith("finish_back_") ? 1 : 0);
-        else if (edge.draftName.startsWith("band_") || edge.draftName.startsWith("skirt_back_"))
+        else if (edge.draftName.startsWith("band_") || edge.draftName.startsWith("skirt_back_")
+                 || (twoPiece && edge.draftName.startsWith("sleeve_back_")))
             edge.piece = 3;
         else
             edge.piece = 2;
@@ -236,6 +274,10 @@ static std::optional<PatternDocument> draftBodiceBlock(const BodiceMeasurements&
         if (analyzePiece(document, i).error != ContourError::None)
             return fail(QStringLiteral("The measurements do not produce closed sewing contours."));
     }
+    if (twoPiece && !document.addSeamLink({
+            {"sleeve_front_join"}, {"sleeve_back_join"}, false, true, 0, 0.1, 2
+        }, error))
+        return std::nullopt;
     return document;
 }
 

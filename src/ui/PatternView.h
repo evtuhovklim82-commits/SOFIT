@@ -26,6 +26,7 @@ public:
     void applyLayers(const opc::PatternDocument& document, const QVector<QPolygonF>& allowances,
                      const QVector<QPainterPath>& markings = {});
     void setSizeOverlays(const QVector<QPair<QPainterPath, QColor>>& overlays);
+    void previewDraftDrag(const QVector<opc::Entity>& entities);
     void setEntities(const QVector<opc::Entity>& entities);
     void insertEntity(qsizetype index, const opc::Entity& entity);
     void removeEntity(qsizetype index);
@@ -43,6 +44,7 @@ signals:
     void measured(qreal distance);
     void geometryEditRequested();
     void selectionMenuRequested(const QPoint& globalPosition);
+    void draftDragPreviewRequested(qsizetype index, const QPointF& offset);
     void entityMoved(qsizetype index, const QPointF& offset);
 
 protected:
@@ -79,6 +81,7 @@ private:
     QPoint dragPressPosition_;
     qsizetype dragIndex_ = -1;
     QVector<opc::Entity> entities_;
+    QGraphicsPathItem* draftDragPreview_ = nullptr;
     QGraphicsPathItem* preview_ = nullptr;
     QVector<QGraphicsPathItem*> items_;
     QVector<bool> entityVisibility_;

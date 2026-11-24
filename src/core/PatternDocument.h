@@ -104,6 +104,7 @@ public:
     bool layerVisible(Layer layer) const { return layerVisibility_[static_cast<int>(layer)]; }
     void setLayerVisible(Layer layer, bool visible) { layerVisibility_[static_cast<int>(layer)] = visible; }
     const ParametricDraft& parametricDraft() const { return draft_; }
+    bool moveDraftPoint(const QString& name, QPointF offset, QString* error = nullptr);
     bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
     bool validateParametricSizes(const ProductionData& production, QString* error = nullptr) const;
     std::optional<QVector<Entity>> evaluateSizeDraft(const PatternSize& size) const;

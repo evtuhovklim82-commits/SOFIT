@@ -140,7 +140,7 @@ bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
     step.spreadMm = spreadMm;
     for (auto index : guides) {
         if (index < 0 || index >= entities_.size() || entities_[index].draftName.isEmpty())
-            return fail(QStringLiteral("Choose named formula lines for the modeling guides."));
+            return fail(QStringLiteral("Choose named formula objects for the modeling guides."));
         step.guides.append(entities_[index].draftName);
     }
 
@@ -398,8 +398,12 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
                 append(index);
             guideIndices.append(local.value(name));
         }
-        if (std::ranges::any_of(working.entities(), [](const auto& entity) { return entity.shape != Shape::Line; }))
-            return fail(QStringLiteral("Contour history requires straight contour edges and straight guides."));
+        for (qsizetype j = 0; j < working.entities().size(); ++j) {
+            const auto& entity = working.entities()[j];
+            if (entity.shape != Shape::Line && !(dividesPiece(*step.contour)
+                && entity.shape == Shape::Curve && guideIndices.contains(j)))
+                return fail(QStringLiteral("Contour history requires straight source edges and a compatible guide."));
+        }
 
         const auto target = step.secondPiece;
         const bool split = dividesPiece(*step.contour);

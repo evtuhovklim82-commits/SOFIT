@@ -1,6 +1,8 @@
 #include "PatternDocument.h"
 #include "PieceGeometry.h"
+#include "Production.h"
 
+#include <algorithm>
 #include <array>
 
 #include <QHash>
@@ -389,6 +391,88 @@ QVector<Entity> PatternDocument::bindDraftGeometry(QVector<Entity> generated) co
 bool PatternDocument::captureContourTopology(ModelingStep& step, QString* error) const {
     auto source = bindDraftGeometry(DraftEvaluation(draft_).geometry(draft_));
     return replayModeling(source, production_, error, &step);
+}
+
+bool PatternDocument::moveDraftPoint(const QString& name, QPointF offset, QString* error) {
+    auto draft = draft_;
+    const auto point = std::ranges::find(draft.points, name, &DraftPoint::name);
+    if (point == draft.points.end() || !std::isfinite(offset.x()) || !std::isfinite(offset.y())) {
+        if (error)
+            *error = QStringLiteral("Invalid parametric point or offset");
+        return false;
+    }
+
+    // Combine successive handle moves into one additive term in each formula.
+    static const QRegularExpression moved(QStringLiteral(
+        R"(\A\((.*)\) \+ \(([+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\)\z)"),
+        QRegularExpression::DotMatchesEverythingOption);
+    const auto translate = [&](QString& formula, double delta) {
+        if (delta == 0)
+            return true;
+        const auto previous = moved.match(formula);
+        if (previous.hasMatch()) {
+            delta += previous.captured(2).toDouble();
+            if (!std::isfinite(delta))
+                return false;
+            formula = previous.captured(1);
+        }
+        formula = QStringLiteral("(%1) + (%2)").arg(formula, QString::number(delta, 'g', 17));
+        return true;
+    };
+    if (!translate(point->x, offset.x()) || !translate(point->y, offset.y())) {
+        if (error)
+            *error = QStringLiteral("The draft point offset is too large");
+        return false;
+    }
+
+    auto candidate = *this;
+    if (!candidate.setParametricDraft(std::move(draft), error))
+        return false;
+    QSet<qsizetype> changedPieces;
+    for (qsizetype i = 0; i < std::min(entities_.size(), candidate.entities_.size()); ++i) {
+        const auto& before = entities_[i];
+        const auto& after = candidate.entities_[i];
+        if (before.piece >= 0 && (before.a != after.a || before.b != after.b || before.control != after.control))
+            changedPieces.insert(before.piece);
+    }
+    for (const auto piece : changedPieces) {
+        const auto before = gradingPoints(*this, piece);
+        const auto after = gradingPoints(candidate, piece);
+        if (std::ranges::any_of(production_.rules, [&](const GradeRule& rule) {
+                return rule.piece == piece && before.contains(rule.point) && !after.contains(rule.point);
+            })) {
+            if (error)
+                *error = QStringLiteral("Moving this point would detach a grade rule on '%1'.").arg(pieces_[piece].name);
+            return false;
+        }
+    }
+    // Preserve valid cutting contours, while allowing repairs to unfinished pieces.
+    const auto preservesContours = [&](const PatternDocument& before, const PatternDocument& after,
+                                       const QString& size) {
+        for (const auto piece : changedPieces) {
+            const auto original = analyzePiece(before, piece);
+            if (original.error != ContourError::None || original.allowanceFailed)
+                continue;
+            const auto updated = analyzePiece(after, piece);
+            if (updated.error != ContourError::None || updated.allowanceFailed) {
+                if (error)
+                    *error = QStringLiteral("Moving this point would invalidate the cutting contour of '%1' (%2).")
+                        .arg(pieces_[piece].name, size);
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!changedPieces.isEmpty()) {
+        if (!preservesContours(*this, candidate, QStringLiteral("Base")))
+            return false;
+        for (const auto& size : production_.sizes) {
+            if (!preservesContours(gradedPattern(*this, size.name), gradedPattern(candidate, size.name), size.name))
+                return false;
+        }
+    }
+    *this = std::move(candidate);
+    return true;
 }
 
 bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) {

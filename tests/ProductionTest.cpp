@@ -263,6 +263,33 @@ int main(int argc, char** argv) {
           && saveProduction(reopenedMarker.production()) == saveProduction(triangleBatch),
           "Reject incompatible hand and fold modes atomically");
 
+    ProductionData repeat;
+    repeat.fabricWidth = 160;
+    repeat.pieceClearanceMm = 4;
+    repeat.fabricRepeatMm = {37, 29};
+    repeat.placements = {{1, {}, {}}, {1, {}, {}}, {1, {}, {}}};
+    auto registeredLayout = arrangeFabric(triangle, repeat);
+    check(registeredLayout.error == FabricLayoutError::None && registeredLayout.placements.size() == 3,
+          "Arrange copies with a two-axis repeat and clearance");
+    repeat.placements = registeredLayout.placements;
+    const auto registered = cuttingReport(triangle, repeat);
+    check(registered.canExport(repeat.fabricWidth) && registered.repeatViolations == 0,
+          "Verify both repeat axes before marker export");
+    check(exportFabricDxf(temp.filePath("registered.dxf"), triangle, repeat, dxfError),
+          "Export a registered marker as DXF");
+    repeat.placements[1].position.ry() += 0.5;
+    check(cuttingReport(triangle, repeat).repeatViolations == 1
+          && !exportFabricDxf(temp.filePath("off-repeat.dxf"), triangle, repeat, dxfError),
+          "Reject a manually moved copy that misses its repeat");
+    triangle.production() = repeat;
+    check(triangle.save(marker) && reopenedMarker.load(marker)
+          && reopenedMarker.production().fabricRepeatMm == QPointF(37, 29),
+          "Round-trip both repeat dimensions in the current schema");
+    repeat.fabricRepeatMm.setX(-1);
+    check(arrangeFabric(triangle, repeat).error == FabricLayoutError::InvalidRepeat
+          && !loadProduction(saveProduction(repeat), 2, reopenedMarker.production()),
+          "Reject an invalid repeat on arrangement and on load");
+
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());
     check(!loadProduction(saveProduction(duplicate), 2, loaded.production())

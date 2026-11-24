@@ -178,6 +178,8 @@ void PatternView::mouseMoveEvent(QMouseEvent* event) {
         const auto offset = drawingPoint(cursorScenePosition_) - *dragStart_;
         const auto& entity = entities_[dragIndex_];
         items_[dragIndex_]->setPos(entity.shape == opc::Shape::Point ? entity.a + offset : offset);
+        if (!entity.draftName.isEmpty())
+            emit draftDragPreviewRequested(dragIndex_, offset);
         event->accept();
     } else if (panning_)
         event->accept();
@@ -236,6 +238,8 @@ void PatternView::cancelDrawing() {
     }
     start_.reset();
     secondPoint_.reset();
+    delete draftDragPreview_;
+    draftDragPreview_ = nullptr;
     delete preview_;
     preview_ = nullptr;
 }
@@ -266,6 +270,23 @@ opc::Entity PatternView::draftEntity(const QPointF& point) const {
     default: break;
     }
     return {Shape::Line, *start_, point};
+}
+
+void PatternView::previewDraftDrag(const QVector<opc::Entity>& entities) {
+    if (!draftDragPreview_) {
+        draftDragPreview_ = scene()->addPath({}, QPen(QColor("#ffcc80"), 0, Qt::DashLine));
+        draftDragPreview_->setZValue(2);
+    }
+    QPainterPath changed;
+    for (qsizetype i = 0; i < std::min(entities.size(), entities_.size()); ++i) {
+        const auto& entity = entities[i];
+        const auto& original = entities_[i];
+        if (entity.shape != opc::Shape::Point && items_[i]->isVisible()
+            && entity.draftName == original.draftName
+            && (entity.a != original.a || entity.b != original.b || entity.control != original.control))
+            changed.addPath(viewEntityPath(entity));
+    }
+    draftDragPreview_->setPath(changed);
 }
 
 void PatternView::setEntities(const QVector<opc::Entity>& entities) {
@@ -335,7 +356,9 @@ void PatternView::setEntityVisible(qsizetype index, bool visible) {
 void PatternView::updateEntityStyle(qsizetype index) {
     const auto& entity = entities_[index];
     const bool construction = entity.layer == opc::Layer::Construction;
-    const auto& color = construction ? constructionColor : drawingColor;
+    const bool handle = entity.shape == opc::Shape::Point && !entity.draftName.isEmpty();
+    const auto color = handle ? QColor("#ffcc80") : construction ? constructionColor : drawingColor;
+    items_[index]->setToolTip(handle ? tr("Drag draft point %1").arg(entity.draftName) : QString());
     items_[index]->setPen(QPen(color, 0, construction ? Qt::DashLine : Qt::SolidLine));
     const bool point = entity.shape == opc::Shape::Point;
     items_[index]->setBrush(point ? QBrush(color) : QBrush(Qt::NoBrush));
@@ -471,7 +494,7 @@ void PatternView::mousePressEvent(QMouseEvent* event) {
                 item->setSelected(!toggle || !item->isSelected());
                 const auto index = items_.indexOf(static_cast<QGraphicsPathItem*>(item));
                 if (!toggle && scene()->selectedItems().size() == 1 && index >= 0
-                    && entities_[index].draftName.isEmpty()) {
+                    && (entities_[index].draftName.isEmpty() || entities_[index].shape == opc::Shape::Point)) {
                     dragPressPosition_ = event->pos();
                     dragIndex_ = index;
                     dragStart_ = drawingPoint(cursorScenePosition_);

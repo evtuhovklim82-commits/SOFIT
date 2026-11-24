@@ -129,6 +129,7 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
     const qsizetype guideCount = dart ? 3 : 1;
     if (piece < 0 || piece >= document.pieces().size())
         return failure("Choose a piece.");
+    std::optional<Entity> curvedSeam;
     if (guides.size() != guideCount)
         return failure(dart ? "Select two dart legs and an outlet line on the Construction layer."
                             : "Select one cut line on the Construction layer.");
@@ -156,10 +157,12 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
         const bool contourLeg = openDart && i < 2;
         const bool assigned = contourLeg ? guide.piece == piece : guide.piece == -1 || guide.piece == piece;
         const auto layer = contourLeg ? Layer::Main : Layer::Construction;
-        if (guide.shape != Shape::Line || guide.layer != layer || !guide.draftName.isEmpty()
+        const bool cutCurve = dividesPiece(operation) && guide.shape == Shape::Curve;
+        if ((!cutCurve && guide.shape != Shape::Line) || guide.layer != layer || !guide.draftName.isEmpty()
             || !assigned || !std::isfinite(length(guide.b - guide.a)) || near(guide.a, guide.b))
             return failure(openDart ? "Use two straight main-contour dart legs and one manual construction outlet."
-                                    : "Use nonzero manual construction lines assigned to this piece or unassigned.");
+                            : dividesPiece(operation) ? "Use a nonzero construction line or quadratic curve."
+                            : "Use nonzero manual construction lines assigned to this piece or unassigned.");
         guideSet.insert(index);
     }
 
@@ -265,8 +268,22 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
         if (end < 0 || a == ring[end])
             return failure("Both ends of the cut must be distinct points on the contour.");
         const auto b = ring[end];
-        if (!interiorSegment(ring, a, b))
+        if (guide.shape == Shape::Curve) {
+            // Check the curve against the source, then validate both exact output contours.
+            QPointF previous = a;
+            constexpr int segments = 128;
+            for (int i = 1; i <= segments; ++i) {
+                const double t = double(i) / segments;
+                const double u = 1 - t;
+                const auto point = u * u * a + 2 * u * t * guide.control + t * t * b;
+                if (!interiorSegment(ring, previous, point))
+                    return failure("The curved cut must stay inside the contour.");
+                previous = point;
+            }
+            curvedSeam = Entity{Shape::Curve, b, a, guide.control, piece};
+        } else if (!interiorSegment(ring, a, b)) {
             return failure("The cut must run through the interior without touching or crossing another edge.");
+        }
         const auto startIndex = ring.indexOf(a);
         first = arc(ring, startIndex, end);
         second = arc(ring, end, startIndex);
@@ -299,6 +316,8 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
     for (auto i = removed.size(); i > 0; --i)
         edit.document.remove(removed[i - 1]);
     appendRing(edit.document, piece, first);
+    if (curvedSeam)
+        edit.document.replace(edit.document.entities().size() - 1, *curvedSeam);
     for (const auto& mark : markings) {
         edit.document.insert(edit.document.entities().size(),
                              {Shape::Line, mark.p1(), mark.p2(), {}, piece, Layer::Construction});
@@ -315,6 +334,11 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
         const auto otherIndex = edit.document.pieces().size();
         edit.document.pieces().append(other);
         appendRing(edit.document, otherIndex, second);
+        if (curvedSeam) {
+            std::swap(curvedSeam->a, curvedSeam->b);
+            curvedSeam->piece = otherIndex;
+            edit.document.replace(edit.document.entities().size() - 1, *curvedSeam);
+        }
     }
     const QVector<qsizetype> changedPieces = second.isEmpty()
         ? QVector<qsizetype>{piece} : QVector<qsizetype>{piece, edit.document.pieces().size() - 1};

@@ -219,7 +219,7 @@ bool exportFabricDxf(const QString& path, const PatternDocument& document,
     const auto report = cuttingReport(document, data);
     const auto& usage = report.usage;
     if (!report.canExport(data.fabricWidth)) {
-        error = QStringLiteral("The fabric layout must contain valid copies within the fabric and meet overlap, clearance, orientation and fold checks.");
+        error = QStringLiteral("The fabric layout must contain valid copies within the fabric and meet overlap, clearance, repeat, orientation and fold checks.");
         return false;
     }
     QSaveFile file(path);

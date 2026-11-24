@@ -16,7 +16,8 @@
 namespace opc {
 namespace {
 constexpr int legacyEnvelopeVersion = 14;
-constexpr int projectVersion = 15;
+constexpr int productEnvelopeVersion = 15;
+constexpr int projectVersion = 16;
 constexpr qint64 maxProjectBytes = 64 * 1024 * 1024;
 
 QString payloadDigest(const QByteArray& bytes) {
@@ -244,9 +245,15 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         root.insert("productInformation", QJsonObject{{"styleCode", info.styleCode}, {"title", info.title},
             {"revision", info.revision}, {"material", info.material}, {"notes", info.notes}});
     }
+    if (info.usesTechPackOptions()) {
+        root.insert("techPack", QJsonObject{{"reportTitle", info.reportTitle}, {"billOfMaterials", info.billOfMaterials},
+            {"assemblyInstructions", info.assemblyInstructions}, {"includeCuttingQuantities", info.includeCuttingQuantities},
+            {"includeSizeMeasurements", info.includeSizeMeasurements}});
+    }
+    const int envelopeVersion = info.usesTechPackOptions() || !production_.fabricRepeatMm.isNull() ? projectVersion
+        : hasProductInformation || production_.pieceClearanceMm != 0 ? productEnvelopeVersion : legacyEnvelopeVersion;
     const auto payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
-    const QJsonObject envelope{{"format", "SOFIT"}, {"version", (hasProductInformation || production_.pieceClearanceMm != 0)
-                                    ? projectVersion : legacyEnvelopeVersion},
+    const QJsonObject envelope{{"format", "SOFIT"}, {"version", envelopeVersion},
                                {"payload", QString::fromUtf8(payload)}, {"sha256", payloadDigest(payload)}};
     const auto data = QJsonDocument(envelope).toJson();
     if (data.size() > maxProjectBytes) {
@@ -298,7 +305,8 @@ bool PatternDocument::load(const QString& path, QString* error) {
         return fail(QStringLiteral("This project requires a newer version of SOFIT"));
     const auto envelopeVersion = root.value("version").toDouble();
     if (root.value("format") != QStringLiteral("SOFIT")
-        || (envelopeVersion != projectVersion && envelopeVersion != legacyEnvelopeVersion))
+        || (envelopeVersion != projectVersion && envelopeVersion != productEnvelopeVersion
+            && envelopeVersion != legacyEnvelopeVersion))
         return loadPayload(root, false, error);
 
     const auto payload = root.value("payload").toString().toUtf8();
@@ -467,6 +475,19 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
         }
         loaded.productInformation_ = {info.value("styleCode").toString(), info.value("title").toString(),
             info.value("revision").toString(), info.value("material").toString(), info.value("notes").toString()};
+    }
+    if (native && root.contains("techPack")) {
+        const auto pack = root.value("techPack").toObject();
+        if (!pack.value("reportTitle").isString() || !pack.value("billOfMaterials").isString()
+            || !pack.value("assemblyInstructions").isString() || !pack.value("includeCuttingQuantities").isBool()
+            || !pack.value("includeSizeMeasurements").isBool())
+            return fail(QStringLiteral("Invalid tech pack options"));
+        auto& info = loaded.productInformation_;
+        info.reportTitle = pack.value("reportTitle").toString();
+        info.billOfMaterials = pack.value("billOfMaterials").toString();
+        info.assemblyInstructions = pack.value("assemblyInstructions").toString();
+        info.includeCuttingQuantities = pack.value("includeCuttingQuantities").toBool();
+        info.includeSizeMeasurements = pack.value("includeSizeMeasurements").toBool();
     }
     loaded.production_ = std::move(production);
     loaded.entities_ = std::move(parsed);

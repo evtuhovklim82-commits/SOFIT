@@ -42,6 +42,7 @@ struct ProductionData {
     bool useDraftMeasurements = true;
 
     double pieceClearanceMm = 0;
+    QPointF fabricRepeatMm;
 
     void removePiece(qsizetype piece);
 };

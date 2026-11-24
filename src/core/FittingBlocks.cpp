@@ -220,6 +220,9 @@ FittingCheck checkFittingBlock(const PatternDocument& document, const QString& s
         compare("Back armhole and sleeve cap", sum({"back_armhole"}), sum({"sleeve_back_cap"}), targetCap);
         compare("Sleeve underarm seam (front, back)", sum({"sleeve_front_seam"}), sum({"sleeve_back_seam"}));
     }
+    if (hasEdge("sleeve_front_join")) {
+        compare("Sleeve elbow seam (front, back)", sum({"sleeve_front_join"}), sum({"sleeve_back_join"}));
+    }
     if (hasEdge("band_attach")) {
         compare("Sleeve band and gathered hem", sum({"band_attach"}), sum({"sleeve_hem"}),
                 measurement("sleeve_extra_width"));

@@ -20,7 +20,12 @@ bool exportProductInformationPdf(const QString& path, const PatternDocument& doc
     QTextCharFormat heading;
     heading.setFontPointSize(18);
     heading.setFontWeight(QFont::Bold);
-    cursor.insertText(tr("Product Information"), heading);
+    const auto reportTitle = info.reportTitle.trimmed().isEmpty() ? tr("Product Information") : info.reportTitle;
+    const auto section = [&](const QString& label) {
+        cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
+        cursor.insertText(label, heading);
+    };
+    cursor.insertText(reportTitle, heading);
     const auto field = [&](const QString& label, const QString& value) {
         if (!value.isEmpty()) {
             cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
@@ -33,7 +38,60 @@ bool exportProductInformationPdf(const QString& path, const PatternDocument& doc
     field(tr("Material"), info.material);
     field(tr("Notes"), info.notes);
 
-    if (!document.pieces().isEmpty()) {
+    const auto textSection = [&](const QString& label, const QString& text) {
+        if (text.trimmed().isEmpty())
+            return;
+        section(label);
+        cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
+        cursor.insertText(text);
+    };
+    textSection(tr("Bill of materials"), info.billOfMaterials);
+    textSection(tr("Assembly instructions"), info.assemblyInstructions);
+
+    if (info.includeSizeMeasurements) {
+        QMap<QString, double> base;
+        for (const auto& measurement : document.parametricDraft().measurements)
+            base.insert(measurement.name, measurement.mm);
+        const auto& production = document.production();
+        qsizetype rowCount = base.size();
+        for (const auto& size : production.sizes) {
+            for (auto it = size.measurements.cbegin(); it != size.measurements.cend(); ++it)
+                rowCount += !base.contains(it.key());
+            rowCount += base.size();
+        }
+        if (rowCount > 0) {
+            section(tr("Draft input measurements (mm)"));
+            cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
+            QTextTableFormat format;
+            format.setHeaderRowCount(1);
+            format.setCellPadding(3);
+            auto* table = cursor.insertTable(rowCount + 1, 3, format);
+            const auto cell = [table](int row, int column, const QString& value) {
+                table->cellAt(row, column).firstCursorPosition().insertText(value);
+            };
+            cell(0, 0, tr("Size"));
+            cell(0, 1, tr("Measurement"));
+            cell(0, 2, tr("Millimetres"));
+            int row = 1;
+            const auto measurements = [&](const QString& size, const QMap<QString, double>& values) {
+                for (auto it = values.cbegin(); it != values.cend(); ++it) {
+                    cell(row, 0, size);
+                    cell(row, 1, it.key());
+                    cell(row++, 2, QString::number(it.value(), 'g', 12));
+                }
+            };
+            measurements(tr("Base"), base);
+            for (const auto& size : production.sizes) {
+                auto values = base;
+                for (auto it = size.measurements.cbegin(); it != size.measurements.cend(); ++it)
+                    values.insert(it.key(), it.value());
+                measurements(size.name, values);
+            }
+            cursor.setPosition(table->lastPosition() + 1);
+        }
+    }
+
+    if (info.includeCuttingQuantities && !document.pieces().isEmpty()) {
         const auto rows = cuttingKitRows(document, cuttingReport(document, document.production()));
         cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
         cursor.insertText(tr("Parts and marker quantities"), heading);
@@ -64,7 +122,7 @@ bool exportProductInformationPdf(const QString& path, const PatternDocument& doc
         QPdfWriter writer(&output);
         writer.setPageSize(QPageSize(QPageSize::A4));
         writer.setResolution(96);
-        writer.setTitle(info.title.isEmpty() ? tr("Product Information") : info.title);
+        writer.setTitle(info.reportTitle.isEmpty() && !info.title.isEmpty() ? info.title : reportTitle);
         report.print(&writer);
     }
     if (output.error() != QFileDevice::NoError || output.size() == 0 || !output.commit()) {

@@ -45,6 +45,9 @@ void addNeckFinish(ParametricDraft& draft, PatternDocument& document, const Bodi
     }
 
     const bool stand = options.neckFinish == NeckFinish::Stand;
+    const bool pointed = options.neckFinish == NeckFinish::PointedCollar;
+    if (pointed)
+        draft.measurements.append({"collar_point_extension", options.collarPointExtension});
     if (stand) {
         draft.parameters.append({
             {"finish_back_length", "quadlen(0, back_neck_depth, neck_width, back_neck_depth, neck_width, 0)"},
@@ -65,7 +68,8 @@ void addNeckFinish(ParametricDraft& draft, PatternDocument& document, const Bodi
         const QString sectionShoulder = !stand && suffix == "outer"
             ? "neck_width + neck_width * finish_depth / (neck_width + finish_depth)" : shoulderX;
         const auto shoulder = point("Shoulder", sectionShoulder, "0");
-        const auto front = point("Front", frontX, frontY);
+        const QString pointExtension = pointed && suffix == "outer" ? " + collar_point_extension" : "";
+        const auto front = point("Front", frontX + pointExtension, frontY);
         const auto backControl = stand ? QString{} : point("BackControl", sectionShoulder, backY);
         const auto frontControl = stand ? QString{} : point("FrontControl", sectionShoulder, frontY);
         draft.edges.append({
@@ -80,7 +84,9 @@ void addNeckFinish(ParametricDraft& draft, PatternDocument& document, const Bodi
         {"finish_collar_front_end", "NCFrontneck", "NCFrontouter", {}},
         {"finish_collar_guide_shoulder", "NCShoulderneck", "NCShoulderouter", {}}
     });
-    document.pieces().append({stand ? "Straight neck stand (center back fold)" : "Flat collar (center back fold)",
+    const auto* name = stand ? "Straight neck stand (center back fold)"
+                     : pointed ? "Pointed collar (center back fold)" : "Flat collar (center back fold)";
+    document.pieces().append({name,
                               0, 2, {}, true, 90});
 }
 }

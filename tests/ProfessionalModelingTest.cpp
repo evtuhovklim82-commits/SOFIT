@@ -52,6 +52,7 @@ void roundTripAndExport(const PatternDocument& document, const QString& size = {
     check(loaded.parametricDraft() == document.parametricDraft() && loaded.pieces() == document.pieces()
           && loaded.modelingHistory() == document.modelingHistory()
           && loaded.seamLinks() == document.seamLinks()
+          && loaded.productInformation() == document.productInformation()
           && saveProduction(loaded.production()) == saveProduction(document.production()),
           "Round trip formulas, size data and piece metadata");
     check(loaded.entities().size() == document.entities().size(), "Round trip all entities");
@@ -170,7 +171,7 @@ PatternDocument formulaPanel(const ParametricDraft& draft, const QStringList& co
     panel.pieces().append({"Panel"});
     for (qsizetype i = 0; i < panel.entities().size(); ++i) {
         auto entity = panel.entities()[i];
-        if (entity.shape != Shape::Line)
+        if (entity.shape != Shape::Line && !(entity.shape == Shape::Curve && construction.contains(entity.draftName)))
             continue;
         if (construction.contains(entity.draftName))
             entity.layer = Layer::Construction;
@@ -546,6 +547,38 @@ void checkContourHistory() {
     roundTripAndExport(openDart, "L");
 }
 
+void checkCurvedReliefAndHandles() {
+    ParametricDraft draft;
+    draft.measurements = {{"width", 100}, {"height", 80}, {"cut_y", 30}, {"bend", 16}};
+    draft.points = {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "height"},
+                    {"D", "0", "height"}, {"E", "0", "cut_y"}, {"F", "width", "cut_y"},
+                    {"Control", "width / 2", "cut_y + bend"}};
+    draft.edges = {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}},
+                   {"left", "D", "A", {}}, {"cut", "E", "F", "Control"}};
+    auto pattern = formulaPanel(draft, {"cut"});
+    pattern.pieces()[0].allowanceMm = 2;
+    pattern.production().sizes.append({"L", {{"width", 140}, {"height", 100}, {"cut_y", 40}}});
+    QString error;
+    check(pattern.appendContour(0, ContourOperation::Relief, {namedEdge(pattern, "cut")}, 0, &error), error);
+    check(pattern.addSeamLink({{"@1:seam-A"}, {"@1:seam-B"}, false, true, 0, 0.1, 2}, &error), error);
+    for (int i = 0; i < 100; ++i)
+        check(pattern.moveDraftPoint("Control", {0.1, -0.05}, &error), error);
+    const auto moved = pattern.parametricDraft();
+    check(!pattern.moveDraftPoint("Control", {0, -300}, &error) && pattern.parametricDraft() == moved,
+          "Reject a curve that would leave the panel and keep the active formulas");
+    for (const auto& size : {QString{}, QString("L")}) {
+        auto grade = gradedPattern(pattern, size);
+        const auto& a = grade.entities()[namedEdge(grade, "@1:seam-A")];
+        const auto& b = grade.entities()[namedEdge(grade, "@1:seam-B")];
+        check(a.shape == Shape::Curve && b.shape == Shape::Curve && a.a == b.b && a.b == b.a
+              && a.control == b.control && near(a.control.x(), size.isEmpty() ? 60 : 80)
+              && near(a.control.y(), size.isEmpty() ? 41 : 51)
+              && grade.inspectSeamLinks().checks.first().withinTolerance,
+              "Replay moved quadratic sewing edges and paired seam marks for each size");
+    }
+    roundTripAndExport(pattern, "L");
+}
+
 void checkTemplates() {
     const BodiceMeasurements m{920, 740, 420, 210, 68, 75, 22, 116, 38, 60, 40,
                                115, 300, 50, 220, 285, 87};
@@ -609,6 +642,52 @@ void checkTemplates() {
             return seam.label.startsWith("Front neckline") && std::abs(seam.second - seam.first) > 1;
         }), "Report neckline mismatch introduced by manual grading");
     }
+    BodiceOptions tailored{NeckFinish::PointedCollar};
+    tailored.sleeveStyle = SleeveStyle::TwoPiece;
+    tailored.dartIntakeShare = 70;
+    tailored.dartPosition = 60;
+    QString error;
+    auto twoPiece = draftBodiceAndSleeve(m, tailored, &error);
+    check(twoPiece && twoPiece->pieces().size() == 5 && twoPiece->seamLinks().size() == 1, error);
+    twoPiece->production().sizes.append({"L", {{"sleeve_elbow_shape", 40}, {"sleeve_length", 300}, {"sleeve_elbow_level", 60},
+                                               {"collar_point_extension", 42}, {"dart_position", 65}}});
+    for (const auto& size : {QString{}, QString("L")}) {
+        const auto grade = gradedPattern(*twoPiece, size);
+        const auto seam = grade.inspectSeamLinks();
+        check(seam.checks.size() == 1 && seam.checks.first().withinTolerance && seam.notches.size() == 2,
+              "Sewing curves and paired elbow notches agree after grading");
+        const auto& frontJoin = grade.entities()[namedEdge(grade, "sleeve_front_join")];
+        check(near(frontJoin.a.x() - frontJoin.control.x(), size.isEmpty() ? 25 : 40)
+              && near(frontJoin.control.y(), size.isEmpty() ? 186 : 214.8),
+              "Elbow shaping follows the size input");
+        const auto& collar = grade.entities()[namedEdge(grade, "finish_collar_front_end")];
+        check(near(collar.b.x() - collar.a.x(), size.isEmpty() ? 30 : 42),
+              "Collar point extension follows the size input");
+        const auto& dart = grade.entities()[namedEdge(grade, "front_dart_left")];
+        const auto& otherLeg = grade.entities()[namedEdge(grade, "front_dart_right")];
+        const double suppression = (m.bust + m.bustEase - m.waist - m.waistEase) / 4;
+        check(near(otherLeg.b.x() - dart.a.x(), suppression * 0.7) && dart.b.x() > 120,
+              "Dart intake redistributes waist suppression and remains editable by size");
+    }
+    auto& pack = twoPiece->productInformation();
+    pack.reportTitle = "Jacket construction pack";
+    pack.billOfMaterials = "Shell fabric and thread";
+    pack.assemblyInstructions = "Match elbow notches before sewing";
+    pack.includeSizeMeasurements = true;
+    const QTemporaryDir reports;
+    const auto pdf = reports.filePath("tech-pack.pdf");
+    check(exportProductInformationPdf(pdf, *twoPiece, error) && readFile(pdf).startsWith("%PDF-"), error);
+    roundTripAndExport(*twoPiece, "L");
+    auto marker = twoPiece->production();
+    marker.fabricRepeatMm = {40, 55};
+    marker.placements = {{2, "L", {80, 55}}};
+    const auto markerPdf = reports.filePath("marker.pdf");
+    check(exportFabricPdf(markerPdf, *twoPiece, marker, {}, error)
+          && readFile(markerPdf).startsWith("%PDF-"), "Export a graded registered marker as tiled PDF: " + error);
+    marker.placements.first().position.rx() += 1;
+    check(!exportFabricPdf(markerPdf, *twoPiece, marker, {}, error) && error.contains("repeat"),
+          "Prevent PDF export of an unregistered placement");
+
     const auto dress = draftDress(m, {1000, 60, 195, 620, 160, 100}, BodiceOptions{NeckFinish::Facing});
     check(dress && dress->pieces().size() == 6 && checkFittingBlock(*dress).missingSeams.isEmpty(),
           "Add facings to the sleeveless dress without losing the skirt seam checks");
@@ -689,6 +768,7 @@ int main(int argc, char** argv) {
     QGuiApplication app(argc, argv);
     checkModeling();
     checkContourHistory();
+    checkCurvedReliefAndHandles();
     checkRotationHistory();
     checkSeamLinks();
     checkLinkedTrouserBlock();
