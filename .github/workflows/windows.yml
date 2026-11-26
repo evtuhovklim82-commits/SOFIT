@@ -22,7 +22,19 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
       - name: Run all SOFIT tests
-        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error
+        id: ctest
+        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error --output-junit ctest-release.xml
+      - name: Upload CTest diagnostics after failure
+        if: ${{ failure() && steps.ctest.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: SOFIT-Windows-CTest
+          path: |
+            ctest-release.xml
+            build/ctest-release.xml
+            build/Testing/Temporary/LastTest.log
+            build/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: error
       - name: Run GUI workflow at 150% scaling
         shell: pwsh
         env:
