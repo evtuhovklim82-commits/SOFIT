@@ -11,6 +11,7 @@ namespace opc {
 struct PatternSize {
     QString name;
     QMap<QString, double> measurements;
+    QString source;
 };
 
 struct GradeRule {

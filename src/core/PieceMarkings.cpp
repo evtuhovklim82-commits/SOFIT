@@ -1,4 +1,5 @@
 #include "PieceMarkings.h"
+#include "EntityPath.h"
 
 #include <QFont>
 #include <QFontMetricsF>
@@ -10,6 +11,12 @@
 #include <limits>
 
 namespace opc {
+bool validEdgeSymbol(const EdgeSymbol& symbol) {
+    return int(symbol.type) >= int(PieceSymbol::Cross) && int(symbol.type) <= int(PieceSymbol::Scissors)
+        && symbol.fraction > 0 && symbol.fraction < 1 && symbol.sizeMm >= 0.1 && symbol.sizeMm <= 1000
+        && symbol.insetMm >= 0.1 && symbol.insetMm <= 1000;
+}
+
 QVector<Entity> buildPieceSymbol(PieceSymbol type, qsizetype piece, QPointF center,
                                  double lengthMm, double angleDegrees) {
     if (piece < 0 || !std::isfinite(center.x()) || !std::isfinite(center.y())
@@ -149,6 +156,48 @@ PieceMarkings buildPieceMarkings(const Piece& piece, const PieceGeometry& geomet
         marks.grainline.lineTo(tip - direction * head - normal * head / 2);
     }
 
+    const auto cutAnchor = [&](const QLineF& ray) -> std::optional<QPointF> {
+        if (geometry.allowance.isEmpty())
+            return ray.p1();
+        const auto direction = ray.p2() - ray.p1();
+        const auto& allowance = geometry.allowance;
+        double nearest = std::numeric_limits<double>::infinity();
+        std::optional<QPointF> point;
+        for (qsizetype i = 0; i < allowance.size(); ++i) {
+            QPointF intersection;
+            const QLineF edge(allowance[i], allowance[(i + 1) % allowance.size()]);
+            if (ray.intersects(edge, &intersection) == QLineF::NoIntersection)
+                continue;
+            const double distance = QPointF::dotProduct(intersection - ray.p1(), direction);
+            const double alongEdge = QPointF::dotProduct(intersection - edge.p1(), edge.p2() - edge.p1());
+            if (distance >= -1e-6 && distance < nearest && alongEdge >= 0
+                && alongEdge <= QPointF::dotProduct(edge.p2() - edge.p1(), edge.p2() - edge.p1())) {
+                nearest = distance;
+                point = intersection;
+            }
+        }
+        return point;
+    };
+    for (const auto& [symbol, ray] : geometry.symbolAnchors) {
+        const auto anchor = symbol.fromCutOutline ? cutAnchor(ray) : std::optional(ray.p1());
+        if (!anchor || !validEdgeSymbol(symbol)) {
+            ++marks.invalidAnchoredSymbols;
+            continue;
+        }
+        const auto outward = ray.p2() - ray.p1();
+        const auto angle = std::atan2(outward.x(), -outward.y()) * (180 / std::numbers::pi);
+        QPainterPath glyph;
+        for (const auto& item : buildPieceSymbol(symbol.type, 0, *anchor - outward * symbol.insetMm,
+                                                  symbol.sizeMm, angle))
+            glyph.addPath(entityPath(item));
+        const auto& outline = symbol.fromCutOutline && !geometry.allowance.isEmpty() ? geometry.allowance : ring;
+        if (glyph.isEmpty() || !symbolFitsContour(glyph, outline)) {
+            ++marks.invalidAnchoredSymbols;
+            continue;
+        }
+        marks.anchoredSymbols.append(std::move(glyph));
+    }
+
     if (piece.notches.isEmpty() && geometry.notchAnchors.isEmpty())
         return marks;
     QVector<double> distances{0.0};
@@ -174,28 +223,12 @@ PieceMarkings buildPieceMarkings(const Piece& piece, const PieceGeometry& geomet
     for (const auto& ray : anchors) {
         const auto anchor = ray.p1();
         const auto outward = ray.p2() - anchor;
-        QPointF cutAnchor = anchor;
-        if (useAllowance && !geometry.allowance.isEmpty()) {
-            const auto& allowance = geometry.allowance;
-            double nearest = std::numeric_limits<double>::infinity();
-            for (qsizetype i = 0; i < allowance.size(); ++i) {
-                QPointF intersection;
-                const QLineF edge(allowance[i], allowance[(i + 1) % allowance.size()]);
-                if (ray.intersects(edge, &intersection) == QLineF::NoIntersection)
-                    continue;
-                const double distance = QPointF::dotProduct(intersection - anchor, outward);
-                const double alongEdge = QPointF::dotProduct(intersection - edge.p1(), edge.p2() - edge.p1());
-                if (distance >= -1e-6 && distance < nearest && alongEdge >= 0
-                    && alongEdge <= QPointF::dotProduct(edge.p2() - edge.p1(), edge.p2() - edge.p1())) {
-                    nearest = distance;
-                    cutAnchor = intersection;
-                }
-            }
-            if (!std::isfinite(nearest))
-                ++marks.notchesMissingCutOutline;
-        }
-        marks.notches.moveTo(cutAnchor - outward * 1.5);
-        marks.notches.lineTo(cutAnchor + outward * 3);
+        const auto point = useAllowance ? cutAnchor(ray) : std::optional(anchor);
+        if (!point)
+            ++marks.notchesMissingCutOutline;
+        const auto position = point.value_or(anchor);
+        marks.notches.moveTo(position - outward * 1.5);
+        marks.notches.lineTo(position + outward * 3);
     }
     return marks;
 }

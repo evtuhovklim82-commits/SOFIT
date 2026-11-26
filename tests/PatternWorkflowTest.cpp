@@ -5,6 +5,7 @@
 #include "PatternDxf.h"
 #include "PieceGeometry.h"
 #include "Production.h"
+#include "ProductionDialogs.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -41,6 +42,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QPlainTextEdit>
@@ -396,6 +398,35 @@ void testContourModelingWorkflow() {
     check(opc::exportPatternDxf(temp.filePath("transferred.dxf"), document, visible, {geometry}, error),
           "Export the transferred dart to DXF");
 
+    action(window, "Undo Close and Transfer Dart").trigger();
+    view.entityDrawn({opc::Shape::Line, apex, {50, 80}, {}, -1, opc::Layer::Construction});
+    view.entityDrawn({opc::Shape::Line, apex, {0, 40}, {}, -1, opc::Layer::Construction});
+    tree.clearSelection();
+    for (int i = 2; i < 7; ++i)
+        tree.topLevelItem(i)->setSelected(true);
+    int questions = 0;
+    QTimer selectOutlets;
+    QObject::connect(&selectOutlets, &QTimer::timeout, [&] {
+        auto* field = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+        check(field, "Ask for each outlet and then its share");
+        if (++questions == 4) {
+            field->setTextValue(QStringLiteral("40 35 25"));
+            selectOutlets.stop();
+        }
+        field->accept();
+    });
+    selectOutlets.start(0);
+    action(window, QStringLiteral("Разделить вытачку…")).trigger();
+    const auto modeledCount = tree.topLevelItemCount();
+    check(questions == 4 && modeledCount > 9, "Model all three selected outlets");
+    const auto undoTitle = QStringLiteral("Undo Разделить вытачку");
+    const auto redoTitle = QStringLiteral("Redo Разделить вытачку");
+    action(window, undoTitle).trigger();
+    check(tree.topLevelItemCount() == 7, "Undo restores the source contour, both legs and all three outlets");
+    action(window, redoTitle).trigger();
+    check(tree.topLevelItemCount() == modeledCount, "Redo restores the three outlets");
+
+
 }
 
 }
@@ -643,6 +674,23 @@ void testMaterialLay() {
         if (current == 0) {
             auto* table = modal->findChild<QTableWidget*>();
             check(table && table->rowCount() == 3, "Assign the two pieces and one paired set");
+            auto* tableLength = modal->findChild<QDoubleSpinBox*>("layTableLength");
+            auto* maximumLayers = modal->findChild<QSpinBox*>("layMaximumLayers");
+            check(tableLength && maximumLayers, "Find cutting table and layer limits");
+            tableLength->setValue(200);
+            maximumLayers->setValue(3);
+            auto* profile = modal->findChild<QComboBox*>("cuttingEquipmentProfile");
+            auto* saveProfile = modal->findChild<QPushButton*>("saveCuttingEquipmentProfile");
+            check(profile && saveProfile, "Find reusable equipment profiles");
+            profile->setEditText("Cutting table A");
+            saveProfile->click();
+            check(QSettings().value("cuttingEquipment/profiles").toMap().contains("Cutting table A"),
+                  "Save the named equipment locally");
+            tableLength->setValue(1);
+            maximumLayers->setValue(1);
+            profile->activated(profile->findText("Cutting table A"));
+            check(tableLength->value() == 200 && maximumLayers->value() == 3,
+                  "Reload both limits from a named profile");
             qobject_cast<QLineEdit*>(table->cellWidget(0, 2))->setText("Shell");
             qobject_cast<QLineEdit*>(table->cellWidget(1, 2))->setText("Lining");
             qobject_cast<QLineEdit*>(table->cellWidget(2, 2))->setText("Shell");
@@ -652,8 +700,10 @@ void testMaterialLay() {
             check(field, "Configure each material width and layer count");
             if (current == 1 || current == 4 || current == 7)
                 field->setDoubleValue(current == 1 ? 100 : current == 4 ? 120 : 200);
-            else
+            else {
+                check(field->intMaximum() == 3, "Apply the layer limit to every lay");
                 field->setIntValue(current == 2 ? 3 : 2);
+            }
         } else if (current == 3 || current == 6 || current == 9) {
             check(modal->findChild<QGraphicsView*>(), "Open each material/lay marker");
             if (current == 3) {
@@ -680,6 +730,34 @@ void testMaterialLay() {
     check(step == 12 && !window.isWindowModified(), "Export the batch without editing the source project");
     const QDir root(directory.path());
     const auto folders = root.entryList({"SOFIT-lay-*"}, QDir::Dirs);
+    step = 0;
+    QObject::disconnect(&drive, nullptr, nullptr, nullptr);
+    QObject::connect(&drive, &QTimer::timeout, [&] {
+        auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!modal)
+            return;
+        switch (step++) {
+        case 0:
+            modal->findChild<QDoubleSpinBox*>("layTableLength")->setValue(1);
+            break;
+        case 1:
+        case 2:
+        case 3:
+            break;
+        default: {
+            auto* message = qobject_cast<QMessageBox*>(modal);
+            check(step == 5 && message && message->icon() == QMessageBox::Warning
+                  && message->text().contains(QStringLiteral("длине стола 1")),
+                  "Reject a marker exceeding the cutting table length before choosing an export directory");
+            drive.stop();
+            break;
+        }
+        }
+        modal->accept();
+    });
+    drive.start(0);
+    action(window, QStringLiteral("Многоматериальный настил…")).trigger();
+    check(step == 5, "Stop material export at the table length limit");
     check(folders.size() == 1, "Create one complete material lay folder");
     const QDir output(root.filePath(folders.front()));
     QFile usage(output.filePath("usage.tsv"));
@@ -704,6 +782,192 @@ void testMaterialLay() {
         }
         readPdf(output.filePath(stem + ".pdf"));
     }
+
+    step = 0;
+    QObject::disconnect(&drive, nullptr, nullptr, nullptr);
+    QObject::connect(&drive, &QTimer::timeout, [&] {
+        auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!modal)
+            return;
+        switch (step++) {
+        case 0: {
+            auto* picker = qobject_cast<QFileDialog*>(modal);
+            check(picker, "Select the saved order manifest");
+            picker->selectFile(output.filePath("order.sofit-order"));
+            break;
+        }
+        case 1: {
+            auto* table = modal->findChild<QTableWidget*>();
+            check(table && table->rowCount() == 3
+                  && qobject_cast<QLineEdit*>(table->cellWidget(1, 2))->text() == "Lining"
+                  && qobject_cast<QSpinBox*>(table->cellWidget(2, 3))->value() == 2,
+                  "Restore material and lay assignment");
+            check(modal->findChild<QDoubleSpinBox*>("layTableLength")->value() == 200
+                  && modal->findChild<QSpinBox*>("layMaximumLayers")->value() == 3,
+                  "Restore equipment limits");
+            check(modal->findChild<QComboBox*>("cuttingEquipmentProfile")->currentText() == "Cutting table A",
+                  "Restore the equipment name with the saved order");
+            auto* saveOnly = modal->findChild<QCheckBox*>("saveMaterialOrderOnly");
+            check(saveOnly, "Offer saving without manufacturing exports");
+            saveOnly->setChecked(true);
+            break;
+        }
+        case 2: {
+            auto* width = qobject_cast<QInputDialog*>(modal);
+            check(width && width->doubleValue() == 100, "Restore material width");
+            break;
+        }
+        case 3: {
+            auto* layers = qobject_cast<QInputDialog*>(modal);
+            check(layers && layers->intValue() == 3, "Restore layer count");
+            layers->setIntValue(2);
+            break;
+        }
+        case 4:
+            check(modal->findChild<QDoubleSpinBox*>("markerWarpShrinkage")->value() == 25,
+                  "Restore marker shrinkage");
+            break;
+        case 5:
+        case 6:
+        case 7:
+        case 8:
+        case 9:
+        case 10:
+            break;
+        case 11: {
+            auto* picker = qobject_cast<QFileDialog*>(modal);
+            check(picker, "Select the destination for the revised order");
+            picker->selectFile(directory.path());
+            break;
+        }
+        default: {
+            auto* message = qobject_cast<QMessageBox*>(modal);
+            check(step == 13 && message && message->icon() == QMessageBox::Information,
+                  "Save the revised order in a new folder");
+            drive.stop();
+            break;
+        }
+        }
+        modal->accept();
+    });
+    drive.start(0);
+    action(window, QStringLiteral("Открыть производственный заказ…")).trigger();
+    auto revised = root.entryList({"SOFIT-lay-*"}, QDir::Dirs);
+    revised.removeAll(folders.front());
+    check(revised.size() == 1 && !window.isWindowModified(), "Keep the order independent of the open project");
+    const QDir revisedOrder(root.filePath(revised.front()));
+    check(revisedOrder.exists("order.sofit-order") && revisedOrder.exists("material-1.sofit")
+          && revisedOrder.entryList({"*.pdf", "*.dxf"}, QDir::Files).isEmpty(),
+          "Save an editable order without cutting exports");
+    QFile revisedUsage(revisedOrder.filePath("usage.tsv"));
+    check(revisedUsage.open(QIODevice::ReadOnly)
+          && revisedUsage.readAll().contains("Lining\tmaterial-1.sofit\t100.00\t1\t40.00\t2\t0.0800"),
+          "Use the edited layer count in the regenerated consumption report");
+
+}
+
+void testPlannedOrder(bool mixed = false, bool splitToFit = false) {
+    QTemporaryDir directory;
+    check(directory.isValid(), "Create a folder for a size-planned order");
+    opc::PatternDocument source;
+    source.pieces() = {{"Front"}};
+    source.insert(0, {opc::Shape::Rectangle, {}, {70, 40}, {}, 0});
+    source.production().sizes = {{"M", {}}};
+    const QDir root(directory.path());
+    const auto path = root.filePath("source.sofit");
+    check(source.save(path), "Save the source for the planned order");
+    MainWindow window;
+    window.show();
+    chooseFile(action(window, "&Open"), path);
+    const int layCount = splitToFit ? 6 : mixed ? 2 : 3;
+    const int widthDialogs = splitToFit ? 2 : layCount;
+    const int destinationStep = 2 + widthDialogs + layCount;
+    int step = 0;
+    QTimer drive;
+    QObject::connect(&drive, &QTimer::timeout, [&] {
+        auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!modal)
+            return;
+        const int current = step++;
+        if (current == 0) {
+            auto* table = modal->findChild<QTableWidget*>();
+            check(table && table->rowCount() == 2, "Present base and named size quantities");
+            qobject_cast<QSpinBox*>(table->cellWidget(0, 1))->setValue(mixed ? 3 : 1);
+            qobject_cast<QSpinBox*>(table->cellWidget(1, 1))->setValue(mixed ? 7 : 3);
+            for (auto* field : modal->findChildren<QSpinBox*>()) {
+                if (field->maximum() == 10000)
+                    field->setValue(2);
+                if (mixed && field->maximum() == opc::maxAutomaticCopies)
+                    field->setValue(4);
+            }
+            modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            return;
+        }
+        if (current == 1) {
+            auto* table = modal->findChild<QTableWidget*>();
+            check(table && table->rowCount() == (mixed ? 6 : 3) && !table->cellWidget(0, 3)->isEnabled(),
+                  "Create fixed lays and preserve their size quantities");
+            if (splitToFit)
+                modal->findChild<QDoubleSpinBox*>("layTableLength")->setValue(45);
+            modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            return;
+        }
+        const bool widthStep = splitToFit ? current == 2 || current == 7 : current % 2 == 0;
+        if (current < destinationStep && widthStep) {
+            auto* width = qobject_cast<QInputDialog*>(modal);
+            check(width, "Confirm width for each planned lay");
+            if (splitToFit)
+                width->setDoubleValue(70);
+
+        } else if (current < destinationStep) {
+            check(modal->findChild<QGraphicsView*>(), "Arrange each planned marker");
+        } else if (current == destinationStep) {
+            auto* picker = qobject_cast<QFileDialog*>(modal);
+            check(picker, "Select the output folder for the planned order");
+            picker->selectFile(root.absolutePath());
+        } else {
+            auto* message = qobject_cast<QMessageBox*>(modal);
+            check(current == destinationStep + 1 && message && message->icon() == QMessageBox::Information,
+                  "Confirm the planned order and cutting output");
+            drive.stop();
+        }
+        modal->accept();
+    });
+    drive.start(0);
+    action(window, QStringLiteral("Спланировать заказ по размерам…")).trigger();
+    const auto folders = root.entryList({"SOFIT-lay-*"}, QDir::Dirs);
+    check(step == destinationStep + 2 && folders.size() == 1 && !window.isWindowModified(),
+          "Save a self-contained plan without modifying the active project");
+    const QDir output(root.filePath(folders.front()));
+    QFile usage(output.filePath("usage.tsv"));
+    check(usage.open(QIODevice::ReadOnly), "Read order consumption");
+    const auto report = usage.readAll();
+    if (!mixed)
+        check(report.contains("material-1.sofit\t1500.00\t1\t40.00\t1")
+          && report.contains("material-2.sofit\t1500.00\t1\t40.00\t2")
+          && report.contains("material-3.sofit\t1500.00\t1\t40.00\t1"),
+          "Persist exact size demand as one base layer and three M layers");
+    QMap<QString, int> totals;
+    for (int i = 1; i <= layCount; ++i) {
+        const auto stem = QStringLiteral("material-%1").arg(i);
+        opc::PatternDocument marker;
+        check(marker.load(output.filePath(stem + ".sofit"))
+              && marker.production().placements.size() == (splitToFit || !mixed ? 1 : (i == 1 ? 4 : 2))
+              && output.exists(stem + ".dxf") && output.exists(stem + ".pdf"),
+              "Save and export every size marker");
+        const int layers = (splitToFit ? i <= 4 : mixed ? i == 1 : i == 2) ? 2 : 1;
+        for (const auto& placement : marker.production().placements)
+            totals[placement.size] += layers;
+        if (mixed) {
+            const auto fields = report.split('\n')[i].split('\t');
+            check(fields.size() >= 6 && fields[3].toInt() == marker.production().placements.size()
+                  && fields[5].toInt() == layers, "Record the mixed kit and layer counts in the order");
+            if (splitToFit)
+                check(fields[4].toDouble() <= 45, "Every replacement marker fits the specified table");
+        }
+    }
+    const QMap<QString, int> expected{{QString{}, mixed ? 3 : 1}, {QStringLiteral("M"), mixed ? 7 : 3}};
+    check(totals == expected, "Export exactly the ordered number of kits for each size");
 }
 
 int main(int argc, char** argv) {
@@ -731,6 +995,9 @@ int main(int argc, char** argv) {
     testContourModelingWorkflow();
     testMarkerModelImport();
     testMaterialLay();
+    testPlannedOrder();
+    testPlannedOrder(true);
+    testPlannedOrder(true, true);
     MainWindow window;
     window.show();
 
@@ -768,6 +1035,8 @@ int main(int argc, char** argv) {
         }
         check(perimeter && dimensions, "Show perimeter and dimensions");
         dialog.findChild<QDoubleSpinBox*>()->setValue(12.375);
+        dialog.findChild<QCheckBox*>("pieceFabricOverride")->setChecked(true);
+        dialog.findChild<QDoubleSpinBox*>("pieceWeft")->setValue(5);
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
     check(overlayCount(view) == 1, "Show the derived allowance");
@@ -776,6 +1045,12 @@ int main(int argc, char** argv) {
     check(overlayCount(view) == 0, "Undo allowance");
     action(window, "Redo Edit Piece").trigger();
     check(overlayCount(view) == 1, "Redo allowance");
+    runDialog<QDialog>(action(window, "Piece, Contour and Allowance…"), [](QDialog& dialog) {
+        check(dialog.findChild<QCheckBox*>("pieceFabricOverride")->isChecked()
+              && dialog.findChild<QDoubleSpinBox*>("pieceWeft")->value() == 5,
+              "Redo individual piece compensation through piece properties");
+        dialog.reject();
+    });
 
     view.entityMoved(0, {5, 5});
     check(overlayCount(view) == 0, "Hide invalid allowance after boundary edits");
@@ -1021,6 +1296,27 @@ int main(int argc, char** argv) {
         check(inputFile.open(QIODevice::WriteOnly) && inputFile.write(rows) == rows.size(),
               "Write a UTF-8 table with a Russian measurement name");
         inputFile.close();
+        const auto compare = [&](const QString& path, bool match) {
+            QTimer::singleShot(0, [&, path, match] {
+                auto* picker = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+                check(picker, "Open the reference measurement TSV");
+                QTimer::singleShot(0, [match] {
+                    auto* result = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                    auto* details = result ? result->findChild<QPlainTextEdit*>("measurementComparisonDetails") : nullptr;
+                    check(details && (match ? details->toPlainText().isEmpty()
+                          : details->toPlainText().contains(QStringLiteral("L / Обхват бёдер"))
+                            && details->toPlainText().contains(QStringLiteral("L / Waist"))),
+                          "Compare reference values and report absent and extra measurements");
+                    result->reject();
+                });
+                picker->selectFile(path);
+                static_cast<QDialog*>(picker)->accept();
+            });
+            click(QStringLiteral("Сверить с TSV…"));
+            check(measurements->rowCount() == 17, "Comparison must leave the project measurements intact");
+        };
+        compare(outputPath, true);
+        compare(inputPath, false);
         const auto libraryKey = QStringLiteral("grading/measurementLibraryDirectory");
         QSettings().setValue(libraryKey, exchange.path());
         QTimer::singleShot(0, [&] {
@@ -1071,9 +1367,24 @@ int main(int argc, char** argv) {
             auto* reference = qobject_cast<QDialog*>(QApplication::activeModalWidget());
             check(reference && reference->windowTitle().contains("31396-2009"), "Open the size standard");
             const auto fields = reference->findChildren<QComboBox*>();
-            check(fields.size() == 2, "Find stature and bust selectors");
-            fields[0]->setCurrentText("164");
-            fields[1]->setCurrentText("92");
+            check(fields.size() == 3 && fields[0]->count() == 6, "Find all six fullness groups");
+            const QVector<int> expected{46, 65, 76, 75, 61, 33};
+            for (int group = 0; group < fields[0]->count(); ++group) {
+                fields[0]->setCurrentIndex(group);
+                int figures = 0;
+                for (int height = 0; height < fields[1]->count(); ++height) {
+                    fields[1]->setCurrentIndex(height);
+                    figures += fields[2]->count();
+                }
+                check(figures == expected[group], "Match the number of figures in the printed fullness group");
+            }
+            fields[0]->setCurrentIndex(5);
+            fields[1]->setCurrentText("176");
+            check(fields[2]->findText("112") >= 0 && fields[2]->findText("116") < 0,
+                  "Exclude a combination absent from the fifth fullness group");
+            fields[0]->setCurrentIndex(0);
+            fields[1]->setCurrentText("164");
+            fields[2]->setCurrentText("92");
             reference->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
         });
         click(QStringLiteral("Типовая фигура ГОСТ…"));
@@ -1124,6 +1435,7 @@ int main(int argc, char** argv) {
           && loaded.production().sizes[5].name == "49/173"
           && loaded.production().sizes[7].name == "51/174"
           && loaded.production().sizes.back().name == QStringLiteral("ГОСТ 31396-2009 164-92-90")
+          && loaded.production().sizes.back().source == QStringLiteral("ГОСТ 31396-2009, таблица 3, полнотная группа 0")
           && loaded.production().sizes.back().measurements.value("height") == 1640
           && loaded.production().sizes.back().measurements.value("bust") == 920
           && loaded.production().sizes.back().measurements.value("hip") == 900
@@ -1566,6 +1878,32 @@ int main(int argc, char** argv) {
             editor->reject();
         });
         edgeAllowance->click();
+        QPushButton* setup = nullptr;
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Prepare for Cutting…")
+                setup = button;
+        }
+        report->setCurrentItem(report->topLevelItem(0)->child(0));
+        check(setup && setup->isEnabled(), "Prepare the selected piece through Part Assistant");
+        QTimer::singleShot(0, [] {
+            auto* wizard = qobject_cast<QWizard*>(QApplication::activeModalWidget());
+            check(wizard && wizard->currentPage()->title() == "Seam allowance", "Start with allowance settings");
+            const auto cornerChoices = wizard->currentPage()->findChildren<QComboBox*>("cuttingCornerTreatment");
+            check(cornerChoices.size() > 1, "List independently configurable corners");
+            cornerChoices.front()->setCurrentIndex(2);
+            wizard->next();
+            check(wizard->currentPage()->title() == "Edge markings", "Offer a notch anchored to a seam edge");
+            auto* edges = wizard->currentPage()->findChild<QComboBox*>();
+            check(edges && edges->count() > 1, "List eligible edges");
+            edges->setCurrentIndex(1);
+            QTimer::singleShot(0, [] {
+                if (auto* warning = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+                    warning->accept();
+            });
+            wizard->button(QWizard::FinishButton)->click();
+            check(wizard->result() == QDialog::Accepted, "Validate and apply the two steps together");
+        });
+        setup->click();
         QPushButton* drill = nullptr;
         for (auto* button : dialog.findChildren<QPushButton*>()) {
             if (button->text() == QStringLiteral("Точка сверления…"))
@@ -2027,5 +2365,98 @@ int main(int argc, char** argv) {
     action(fromLibrary, "&Save").trigger();
     check(loaded.load(copied) && loaded.pieces().size() == 2 * library.pieces().size(),
           "Restore the inserted pieces through Redo");
+
+    runDialog<QFileDialog>(action(fromLibrary, QStringLiteral("Вставить конструкцию с привязкой мерок…")),
+        [&](QFileDialog& file) {
+            file.selectFile(libraryPath);
+            QTimer::singleShot(0, [] {
+                auto* binding = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                check(binding && binding->findChild<QCheckBox*>(), "Offer revision tracking with explicit measurement binding");
+                binding->findChild<QCheckBox*>()->setChecked(true);
+                binding->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            });
+            static_cast<QDialog&>(file).accept();
+        });
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.libraryInstances().size() == 1, "Save the tracked library instance");
+    const auto previousRevision = loaded.libraryInstances().front().revision;
+    auto revised = library;
+    QString updateError;
+    check(revised.moveDraftPoint("TopL", {-1, 0}, &updateError), "Change a source formula in the next revision");
+    const auto revisionPath = temp.filePath("construction-next.sofit");
+    check(revised.save(revisionPath), "Save a new library revision");
+    runDialog<QInputDialog>(action(fromLibrary, QStringLiteral("Обновить экземпляр конструкции…")),
+        [&](QInputDialog& selector) {
+            QTimer::singleShot(0, [&] {
+                auto* file = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+                check(file, "Choose a library file for the selected instance");
+                file->selectFile(revisionPath);
+                static_cast<QDialog*>(file)->accept();
+            });
+            selector.accept();
+        });
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.libraryInstances().front().revision != previousRevision,
+          "Refresh the selected library instance from disk");
+    const auto newRevision = loaded.libraryInstances().front().revision;
+    const auto updateLabel = QStringLiteral("Обновление экземпляра конструкции");
+    action(fromLibrary, QStringLiteral("Undo ") + updateLabel).trigger();
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.libraryInstances().front().revision == previousRevision,
+          "Undo the library revision together with its formula changes");
+    action(fromLibrary, QStringLiteral("Redo ") + updateLabel).trigger();
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.libraryInstances().front().revision == newRevision,
+          "Redo the library revision as one change");
+
+    opc::PatternDocument groupGrade;
+    groupGrade.pieces().append({"Panel", 5});
+    groupGrade.insert(0, {opc::Shape::Curve, {0, 0}, {100, 0}, {50, -20}, 0, opc::Layer::Main});
+    groupGrade.insert(1, {opc::Shape::Line, {100, 0}, {100, 100}, {}, 0, opc::Layer::Main});
+    groupGrade.insert(2, {opc::Shape::Line, {100, 100}, {0, 100}, {}, 0, opc::Layer::Main});
+    groupGrade.insert(3, {opc::Shape::Line, {0, 100}, {0, 0}, {}, 0, opc::Layer::Main});
+    groupGrade.production().sizes = {{"Curve"}, {"Piece"}};
+    QTimer::singleShot(0, [] {
+        auto* grading = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        check(grading, "Open grading editor for group offsets");
+        auto* command = [&]() -> QPushButton* {
+            for (auto* button : grading->findChildren<QPushButton*>())
+                if (button->text() == QStringLiteral("Offset curve or piece…"))
+                    return button;
+            return nullptr;
+        }();
+        check(command, "Find the curve and piece grading command");
+        for (int i = 0; i < 2; ++i) {
+            QTimer::singleShot(0, [i] {
+                auto* group = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                check(group, "Open group offsets");
+                const auto selectors = group->findChildren<QComboBox*>();
+                check(selectors.size() == 3, "Find size, piece and target selectors");
+                selectors[0]->setCurrentIndex(i);
+                selectors[2]->setCurrentIndex(1 - i);
+                group->findChildren<QDoubleSpinBox*>()[1]->setValue(10);
+                group->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            });
+            command->click();
+        }
+        grading->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    const auto groupRules = editGrading(nullptr, groupGrade);
+    check(groupRules && groupRules->rules.size() == 8, "Generate rules for three curve points and five piece points");
+    groupGrade.production() = *groupRules;
+    const auto groupPath = temp.filePath("group-grade.sofit");
+    check(groupGrade.save(groupPath) && loaded.load(groupPath), "Reopen saved curve and piece grade rules");
+    const auto curveGrade = opc::gradedPattern(loaded, "Curve");
+    const auto pieceGrade = opc::gradedPattern(loaded, "Piece");
+    check(curveGrade.entities()[0].control == QPointF(50, -10)
+          && curveGrade.entities()[0].b == curveGrade.entities()[1].a
+          && curveGrade.entities()[2].a == QPointF(100, 100),
+          "Move shared endpoints and the curve control without shifting unrelated points");
+    for (const auto* result : {&curveGrade, &pieceGrade}) {
+        const auto geometry = opc::analyzePiece(*result, 0);
+        check(geometry.error == opc::ContourError::None && !geometry.allowanceFailed
+              && !geometry.allowance.isEmpty(), "Retain a cutting allowance after group grading");
+    }
+    check(pieceGrade.entities()[2].a == QPointF(100, 110), "Translate the complete piece");
 
 }

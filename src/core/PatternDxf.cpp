@@ -64,6 +64,14 @@ public:
         }
     }
 
+    void symbol(const QPainterPath& path) {
+        // Flatten compensated circles to within 0.01 mm.
+        const auto zoom = QTransform::fromScale(100, 100);
+        const auto unzoom = QTransform::fromScale(0.01, 0.01);
+        for (const auto& stroke : path.toSubpathPolygons(zoom))
+            polyline(pieceSymbolLayer, unzoom.map(stroke), false);
+    }
+
 private:
     QTextStream& stream_;
 };
@@ -139,6 +147,9 @@ bool exportPatternDxf(const QString& path, const PatternDocument& document,
             layerKeys.insert(key);
         }
     }
+    if (std::ranges::any_of(geometry, [](const PieceGeometry& item) { return !item.symbolAnchors.isEmpty(); })
+        && !layerKeys.contains(pieceSymbolLayer.toCaseFolded()))
+        layers.append(pieceSymbolLayer);
     writeHeader(dxf, layers);
 
     dxf.section("ENTITIES");
@@ -192,6 +203,12 @@ bool exportPatternDxf(const QString& path, const PatternDocument& document,
             continue;
         const auto marks = buildPieceMarkings(document.pieces()[i], geometry[i],
                                               document.layerVisible(Layer::Allowance));
+        if (marks.invalidAnchoredSymbols) {
+            error = QStringLiteral("An edge symbol lies outside its sewing or cutting contour.");
+            return false;
+        }
+        for (const auto& symbol : marks.anchoredSymbols)
+            dxf.symbol(symbol);
         dxf.lines("NOTCH", marks.notches);
         dxf.lines("GRAINLINE", marks.grainline);
         if (!marks.label.isEmpty()) {
@@ -233,7 +250,8 @@ bool exportFabricDxf(const QString& path, const PatternDocument& document,
     DxfWriter dxf(stream);
     QStringList layers{"0", "CUT", "FOLD", "GRAINLINE", "FABRIC", "NOTCH", drillLayer};
     if (std::ranges::any_of(document.entities(), [](const auto& entity) {
-            return entity.layer == Layer::Construction && entity.dxfLayer == pieceSymbolLayer;
+            return (entity.layer == Layer::Construction && entity.dxfLayer == pieceSymbolLayer)
+                || !entity.seamSymbols.isEmpty();
         }))
         layers.append(pieceSymbolLayer);
     writeHeader(dxf, layers);
@@ -259,11 +277,7 @@ bool exportFabricDxf(const QString& path, const PatternDocument& document,
                 error = QStringLiteral("A production symbol is outside its cutting contour.");
                 return false;
             }
-            // Flatten compensated circles (ellipses) to within 0.01 mm.
-            const auto zoom = QTransform::fromScale(100, 100);
-            const auto unzoom = QTransform::fromScale(0.01, 0.01);
-            for (const auto& stroke : symbol.toSubpathPolygons(zoom))
-                dxf.polyline(pieceSymbolLayer, unzoom.map(stroke).translated(placement.position), false);
+            dxf.symbol(symbol.translated(placement.position));
         }
         for (const auto& point : geometry.drillPoints) {
             if (!geometry.cut.containsPoint(point, Qt::OddEvenFill)) {

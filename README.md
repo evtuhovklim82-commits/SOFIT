@@ -18,6 +18,20 @@ Free/open-source clothing-pattern editor targeting Windows 10/11 x64. The native
 
 - **Modeling → Cut Piece, Relief Seam and Yoke** accept straight or quadratic guides across a contour made of lines and quadratic curves. Enable **Snap to Objects** to place a guide endpoint on a curve. Parametric guides can use an exact point formula on the source edge.
 
+- **Размеры, мерки и правила градации → Сверить с TSV…** сравнивает текущую таблицу с эталонным файлом по размерам, меркам и источникам. В отчёте видны пропуски, лишние строки и несовпадающие значения.
+- **Раскладка → Спланировать заказ по размерам…** принимает количество комплектов для базового и сохранённых размеров. Задайте предел комплектов на слой, чтобы разрешить смешанные размеры и повторные комплекты в настиле. Планировщик сохраняет точное количество каждого размера и соблюдает предел по слоям. В производственном заказе можно уточнить материал, ширину и расположение лекал перед сохранением и экспортом.
+- В окне назначения материалов можно сохранить и повторно выбрать именованный профиль с пределами длины стола и числа слоёв. Снимок параметров оборудования остаётся в заказе.
+- В свойствах детали можно задать свои проценты компенсации по утку и основе. Снимите флажок для наследования настроек материала, или задайте два нуля, чтобы исключить деталь из компенсации. Раскладка и её DXF/PDF учитывают настройку детали во всех размерах.
+
+- **Моделирование → Разделить вытачку** принимает две исходные ножки и от двух до десяти линий вывода из общей вершины. Введите положительные веса всех выводов в порядке выбора, например `40 35 25`. Угловой раствор делится пропорционально весам. Формульные объекты пересчитываются по сохранённым размерам.
+
+- **Part Assistant → Prepare for Cutting** задаёт ширину припуска и обработку углов, затем предлагает добавить надсечку по доле длины выбранного ребра. Мастер проверяет все размеры перед применением.
+- **Part Assistant → Унаследовать контур** может включать прикреплённые формульные точки, линии и квадратичные направляющие. Они используют формулы исходной конструкции.
+- **Modeling → Cut Along Crossing Guides** делит вручную построенную деталь по 2–8 направляющим. Можно включить одну квадратичную кривую. Каждый разрез должен пересекать другой внутри контура, а концы направляющих должны лежать на периметре.
+- **Обновить цепочку конструкций** обновляет отслеживаемые формульные экземпляры в открытом проекте от исходных файлов к зависимым. Сохраните открытый проект и положите все связанные `.sofit` в ту же папку под именами, записанными при вставке. При цикле, отсутствующем файле или несовместимой редакции команда оставляет открытый проект без изменений. Сохранение источников осуществляется отдельно.
+- **Типовая фигура ГОСТ** в редакторе градации добавляет рост, обхват груди и обхват бёдер из таблицы 3 ГОСТ 31396-2009. Доступны 356 фигур в шести полнотных группах. [Карточка Росстандарта](https://protect.gost.ru/gost/details/7d9919ad-6695-41c5-93e1-8224eaf3117d) · [Таблица 3, с. 14–17](https://ohranatruda.ru/upload/iblock/caf/4293808596.pdf#page=16).
+- **Modeling → Draft Stand from Neckline** строит прямую стойку по выбранной формульной горловине, сверяет длины и поддерживает парные надсечки.
+
 ### Production automation
 
 Pass one option and one `.sofit` project to the SOFIT executable.
@@ -210,6 +224,13 @@ Silhouette shaping retains edge-specific allowances and arc-length notch fractio
 5. Save and reopen the project to continue editing the formulas.
 
 Identifiers are case-sensitive and use ASCII letters, digits and underscores, with a letter or underscore first. Measurements and parameters share one namespace. Formulas can use `+`, `-`, `*`, `/`, parentheses, a decimal point, scientific notation and named point coordinates such as `B.x` and `B.y`. The function `quadlen(ax, ay, cx, cy, bx, by)` measures a quadratic Bézier seam from start to end through its control point, using the same length calculation as the seam tools. The function `positive(expression)` returns its argument when it is greater than zero and produces a named formula error otherwise. Coordinates are in mm and Y increases downwards. Points start on the Construction layer and edges on the Main layer.
+
+To construct a quadratic curve with two specified endpoint tangents, set its control point coordinates to
+`tangentx(A.x, A.y, angleA, B.x, B.y, angleB)` and `tangenty(A.x, A.y, angleA, B.x, B.y, angleB)`.
+Angles are in degrees, measured from positive X toward positive Y. Both rays point from their endpoints toward
+the control point. Parallel rays and intersections behind or at either endpoint produce a formula error.
+The endpoints and angles can depend on measurements and are recalculated for each size.
+
 
 Edit or delete generated objects in the draft editor. Piece and layer assignments are retained when a generated object's name stays the same. Renaming a point also requires updating formulas and edges that reference it. Review grade rules and fabric placements after editing the base contour.
 

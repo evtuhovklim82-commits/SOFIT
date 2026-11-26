@@ -1,5 +1,9 @@
 #include "PatternTemplates.h"
 #include "PieceGeometry.h"
+#include "Production.h"
+
+#include <algorithm>
+#include <QSet>
 
 #include <cmath>
 #include <utility>
@@ -219,6 +223,89 @@ std::optional<PatternDocument> draftPatchPocket(const PatchPocketMeasurements& i
         return std::nullopt;
     }
     return document;
+}
+
+bool addLinkedSeamPocket(PatternDocument& document, qsizetype opening, double depthMm, int notchPairs,
+                         QString* error) {
+    const auto fail = [&](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (!(depthMm >= 30 && depthMm <= 500) || notchPairs < 0 || notchPairs > 20)
+        return fail(QStringLiteral("Use a pocket depth from 30 to 500 mm and up to 20 notch pairs."));
+    const auto section = measureSeamSection(document, {opening});
+    if (!section)
+        return fail(QStringLiteral("Select a straight seam edge for the pocket opening."));
+    const auto& source = document.entities()[opening];
+    auto draft = document.parametricDraft();
+    const auto edge = std::ranges::find(draft.edges, source.draftName, &DraftEdge::name);
+    if (source.piece < 0 || source.shape != Shape::Line || edge == draft.edges.end() || !edge->control.isEmpty()
+        || std::ranges::any_of(document.production().rules, [&](const auto& rule) { return rule.piece == source.piece; }))
+        return fail(QStringLiteral("The opening must be a straight formula edge with measurement-based grading."));
+
+    QSet<QString> occupied;
+    for (const auto& node : draft.measurements)
+        occupied.insert(node.name);
+    for (const auto& node : draft.parameters)
+        occupied.insert(node.name);
+    for (const auto& node : draft.points)
+        occupied.insert(node.name);
+    for (const auto& node : draft.edges)
+        occupied.insert(node.name);
+    QString prefix;
+    int unit = 0;
+    do {
+        prefix = QStringLiteral("seam_pocket_%1_").arg(++unit);
+    } while (std::ranges::any_of(occupied, [&](const auto& name) { return name.startsWith(prefix); }));
+
+    double offset = 0;
+    for (const auto& object : document.entities())
+        offset = std::max({offset, object.a.x(), object.b.x(), object.control.x()});
+    const auto x = QString::number(offset + 40, 'g', 17);
+    const auto width = prefix + "width";
+    const auto depth = prefix + "depth";
+    const auto radius = prefix + "radius";
+    const auto right = x + " + " + width;
+    draft.measurements.append({depth, depthMm});
+    draft.parameters += {{width, QStringLiteral("hypot(%2.x - %1.x, %2.y - %1.y)").arg(edge->start, edge->end)},
+                         {radius, QStringLiteral("min(positive(%1) / 4, positive(%2) / 4)").arg(depth, width)}};
+    draft.points += {{prefix + "A", x, "0"}, {prefix + "B", right, "0"},
+        {prefix + "C", right, depth + " - " + radius}, {prefix + "D", right + " - " + radius, depth},
+        {prefix + "E", x + " + " + radius, depth}, {prefix + "F", x, depth + " - " + radius},
+        {prefix + "RightControl", right, depth}, {prefix + "LeftControl", x, depth}};
+    const QVector<DraftEdge> outline{{prefix + "opening", prefix + "A", prefix + "B", {}},
+        {prefix + "side_right", prefix + "B", prefix + "C", {}},
+        {prefix + "round_right", prefix + "C", prefix + "D", prefix + "RightControl"},
+        {prefix + "bottom", prefix + "D", prefix + "E", {}},
+        {prefix + "round_left", prefix + "E", prefix + "F", prefix + "LeftControl"},
+        {prefix + "side_left", prefix + "F", prefix + "A", {}}};
+    draft.edges += outline;
+    auto candidate = document;
+    const auto piece = candidate.pieces().size();
+    candidate.pieces().append({QStringLiteral("In-seam pocket bag · %1").arg(unit), 10, 2, {}, true, 90});
+    for (const auto& boundary : outline)
+        candidate.insert(candidate.entities().size(), {boundary.control.isEmpty() ? Shape::Line : Shape::Curve,
+            {}, {}, {}, piece, Layer::Main, boundary.name});
+    SeamLink link;
+    link.first = {source.draftName};
+    link.second = {outline.front().name};
+    link.notchPairs = notchPairs;
+    link.toleranceMm = 0.01;
+    if (!candidate.setParametricDraft(std::move(draft), error) || !candidate.addSeamLink(link, error))
+        return false;
+    const auto matches = [](const PatternDocument& pattern) {
+        const auto report = pattern.inspectSeamLinks();
+        return !report.checks.isEmpty() && report.checks.back().withinTolerance;
+    };
+    if (!matches(candidate))
+        return fail(QStringLiteral("The pocket bag does not match the opening."));
+    for (const auto& size : candidate.production().sizes) {
+        if (!matches(gradedPattern(candidate, size.name)))
+            return fail(QStringLiteral("The pocket bag does not match the opening in size '%1'.").arg(size.name));
+    }
+    document = std::move(candidate);
+    return true;
 }
 
 }

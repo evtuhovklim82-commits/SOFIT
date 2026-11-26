@@ -46,4 +46,8 @@ struct PatchPocketMeasurements {
 
 std::optional<PatternDocument> draftPatchPocket(const PatchPocketMeasurements& input,
                                                QString* error = nullptr);
+
+bool addLinkedSeamPocket(PatternDocument& document, qsizetype opening, double depthMm, int notchPairs,
+                         QString* error = nullptr);
+
 }

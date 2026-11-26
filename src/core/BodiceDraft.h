@@ -30,6 +30,19 @@ struct BodiceOptions {
     double capEase = 4;
 };
 
+struct LinkedSleeveMeasurements {
+    double lengthMm = 600;
+    double capRiseMm = 120;
+    double hemWidthMm = 240;
+    double frontEaseMm = 4;
+    double backEaseMm = 4;
+    int notchPairs = 1;
+};
+
+bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
+                     const QVector<qsizetype>& back, const LinkedSleeveMeasurements& measurements,
+                     bool reverseFront, bool reverseBack, QString* error = nullptr);
+
 struct BodiceSeams {
     double frontArmhole, backArmhole, frontCap, backCap;
 };

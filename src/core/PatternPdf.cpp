@@ -189,7 +189,7 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
     for (qsizetype i = 0; i < document.entities().size(); ++i) {
         const auto& entity = document.entities()[i];
         if (entity.piece >= 0 && entity.layer == Layer::Main
-            && (!entity.seamNotches.isEmpty() || linkedNotches.contains(i)))
+            && (!entity.seamNotches.isEmpty() || !entity.seamSymbols.isEmpty() || linkedNotches.contains(i)))
             edgeMarkedPieces[entity.piece] = true;
         if (objectVisibility[i] && document.layerVisible(entity.layer)) {
             append(entityPath(entity), entity.layer, entity.shape == Shape::Point);
@@ -205,6 +205,12 @@ bool exportPatternPdf(const QString& path, const PatternDocument& document,
             continue;
         const auto marks = buildPieceMarkings(piece, analyzePiece(document, i),
                                               document.layerVisible(Layer::Allowance));
+        if (marks.invalidAnchoredSymbols) {
+            error = QStringLiteral("An edge symbol lies outside its sewing or cutting contour.");
+            return false;
+        }
+        for (const auto& symbol : marks.anchoredSymbols)
+            append(symbol, Layer::Main);
         append(marks.notches, Layer::Main);
         append(marks.grainline, Layer::Main);
         append(marks.labelPath(), Layer::Main, true);

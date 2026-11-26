@@ -19,13 +19,13 @@
 #include <tuple>
 
 namespace opc {
-namespace {
-constexpr double layoutTolerance = 1e-7;
-
 bool validShrinkage(QPointF percent) {
     const auto validAxis = [](double value) { return value >= -99 && value <= 99; };
     return validAxis(percent.x()) && validAxis(percent.y());
 }
+
+namespace {
+constexpr double layoutTolerance = 1e-7;
 
 bool samePoint(QPointF a, QPointF b) {
     return a.x() == b.x() && a.y() == b.y();
@@ -262,7 +262,10 @@ QJsonObject saveProduction(const ProductionData& data) {
         QJsonObject measurements;
         for (auto it = size.measurements.cbegin(); it != size.measurements.cend(); ++it)
             measurements.insert(it.key(), it.value());
-        sizes.append(QJsonObject{{"name", size.name}, {"measurements", measurements}});
+        QJsonObject row{{"name", size.name}, {"measurements", measurements}};
+        if (!size.source.isEmpty())
+            row.insert("source", size.source);
+        sizes.append(row);
     }
     for (const auto& rule : data.rules)
         rules.append(QJsonObject{{"size", rule.size}, {"piece", rule.piece},
@@ -353,6 +356,12 @@ bool loadProduction(const QJsonObject& json, qsizetype pieceCount, ProductionDat
         const auto row = value.toObject();
         PatternSize size{row.value("name").toString()};
         if (size.name.trimmed().isEmpty() || names.contains(size.name) || !row.value("measurements").isObject())
+            return false;
+        if (row.contains("source") && !row.value("source").isString())
+            return false;
+        size.source = row.value("source").toString();
+        if (size.source.size() > 512 || size.source.contains(u'\t')
+            || size.source.contains(u'\r') || size.source.contains(u'\n'))
             return false;
         const auto measurements = row.value("measurements").toObject();
         for (auto it = measurements.begin(); it != measurements.end(); ++it) {
@@ -466,6 +475,9 @@ LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& pl
     if (geometry.error != ContourError::None || geometry.allowanceFailed)
         return {};
     const auto& piece = graded.pieces()[placement.piece];
+    shrinkagePercent = piece.fabricShrinkageOverride.value_or(shrinkagePercent);
+    if (!validShrinkage(shrinkagePercent))
+        return {};
     QTransform rotation;
     rotation.rotate(90 - piece.grainAngle.value_or(90) + (placement.reversed ? 180 : 0));
     const auto compensation = QTransform::fromScale(100 / (100 - shrinkagePercent.x()),
@@ -477,7 +489,12 @@ LayoutPiece fabricPiece(const PatternDocument& graded, const FabricPlacement& pl
     QVector<QPointF> drillPoints;
     QVector<QPainterPath> symbols;
     if (includeNotches) {
-        notches = toFabric.map(buildPieceMarkings(piece, geometry, !geometry.allowance.isEmpty()).notches);
+        const auto marks = buildPieceMarkings(piece, geometry, !geometry.allowance.isEmpty());
+        if (marks.invalidAnchoredSymbols)
+            return {};
+        notches = toFabric.map(marks.notches);
+        for (const auto& mark : marks.anchoredSymbols)
+            symbols.append(toFabric.map(mark));
         for (const auto& entity : graded.entities()) {
             if (entity.piece != placement.piece)
                 continue;
@@ -722,6 +739,79 @@ QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const 
             rows.append(size->value(i, {i, size.key()}));
     }
     return rows;
+}
+
+QVector<SizeLay> planSizeLays(const QMap<QString, int>& demand, int maximumLayers) {
+    if (maximumLayers < 1 || maximumLayers > 10000)
+        return {};
+    QVector<SizeLay> lays;
+    for (auto size = demand.cbegin(); size != demand.cend(); ++size) {
+        int outstanding = size.value();
+        if (outstanding < 0 || outstanding > 1000000)
+            return {};
+        while (outstanding > 0) {
+            if (lays.size() == 9999)
+                return {};
+            const int layers = std::min(outstanding, maximumLayers);
+            lays.append({size.key(), layers});
+            outstanding -= layers;
+        }
+    }
+    return lays;
+}
+
+QVector<KitLay> planKitLays(const QMap<QString, int>& demand, int maximumLayers, int maximumKitsPerLayer) {
+    if (maximumLayers < 1 || maximumLayers > 10000 || maximumKitsPerLayer < 1
+        || maximumKitsPerLayer > maxAutomaticCopies
+        || std::ranges::any_of(demand, [](int count) { return count < 0 || count > 1000000; }))
+        return {};
+    if (maximumKitsPerLayer == 1) {
+        QVector<KitLay> result;
+        for (const auto& lay : planSizeLays(demand, maximumLayers))
+            result.append({{{lay.size, 1}}, lay.layers});
+        return result;
+    }
+
+    auto remaining = demand;
+    remaining.removeIf([](auto size) { return size.value() == 0; });
+    QVector<KitLay> result;
+    while (!remaining.isEmpty()) {
+        if (result.size() == 9999)
+            return {};
+        KitLay lay{{}, maximumLayers};
+        int available = maximumKitsPerLayer;
+        for (auto size = remaining.cbegin(); size != remaining.cend() && available > 0; ++size) {
+            lay.kitsPerSize.insert(size.key(), 1);
+            --available;
+        }
+        // Keep small demand sizes from capping the whole run if the larger
+        // sizes can use the remaining marker slots.
+        while (available > 0) {
+            auto best = lay.kitsPerSize.end();
+            int layersWithExtraKit = 0;
+            for (auto kits = lay.kitsPerSize.begin(); kits != lay.kitsPerSize.end(); ++kits) {
+                const int layers = remaining.value(kits.key()) / (kits.value() + 1);
+                if (layers > layersWithExtraKit) {
+                    layersWithExtraKit = layers;
+                    best = kits;
+                }
+            }
+            if (best == lay.kitsPerSize.end())
+                break;
+            ++best.value();
+            --available;
+        }
+        for (auto kits = lay.kitsPerSize.cbegin(); kits != lay.kitsPerSize.cend(); ++kits)
+            lay.layers = std::min(lay.layers, remaining.value(kits.key()) / kits.value());
+        for (auto kits = lay.kitsPerSize.cbegin(); kits != lay.kitsPerSize.cend(); ++kits) {
+            auto count = remaining.find(kits.key());
+            count.value() -= kits.value() * lay.layers;
+            if (count.value() == 0)
+                remaining.erase(count);
+        }
+        result.append(std::move(lay));
+    }
+    return result;
 }
 
 AutomaticFabricLayout arrangeFabric(const PatternDocument& document, const ProductionData& data) {

@@ -13,6 +13,11 @@ enum class ContourError {
     SelfIntersecting, UncertainCurves, TooComplex
 };
 
+struct AnchoredSymbol {
+    EdgeSymbol symbol;
+    QLineF outward;
+};
+
 struct PieceGeometry {
     ContourError error = ContourError::Empty;
     double perimeterMm = 0;
@@ -20,6 +25,7 @@ struct PieceGeometry {
     QPolygonF allowance;
     QPolygonF contour;
     bool allowanceFailed = false;
+    QVector<AnchoredSymbol> symbolAnchors;
     QVector<QLineF> notchAnchors; // Seam point and outward direction.
 };
 

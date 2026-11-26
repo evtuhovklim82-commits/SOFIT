@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
     write(bad, original.first(original.size() / 2));
     check(!active.load(bad, &error) && error.contains("byte"), "Report a truncated JSON file");
     altered = envelope;
-    altered["version"] = 19;
+    altered["version"] = 999;
     write(bad, QJsonDocument(altered).toJson());
     check(!active.load(bad, &error) && error.contains("newer"), "Explain a future schema version");
     QFile oversized(bad);

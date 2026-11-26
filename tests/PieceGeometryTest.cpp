@@ -356,6 +356,55 @@ void testContourCutAndSpread() {
     check(!modelContour(document, 0, ContourOperation::Spread, {slash}, 0).edit,
           "Reject zero spread width");
 
+    auto crossingCuts = document;
+    const auto vertical = guide(crossingCuts, {50, 0}, {50, 80});
+    const auto quarters = cutCrossingGuides(crossingCuts, 0, {slash, vertical});
+    check(quarters.edit.has_value(), qPrintable(quarters.error));
+    check(quarters.edit->document.pieces().size() == 4
+          && crossingCuts.pieces().size() == 1, "Split two crossing guides into four panels atomically");
+    for (qsizetype i = 0; i < 4; ++i) {
+        const auto panel = analyzePiece(quarters.edit->document, i);
+        check(panel.error == ContourError::None && !panel.allowanceFailed && near(area(panel.contour), 2000),
+              "Preserve the area and compute an allowance for each quarter");
+    }
+    const auto diagonal = guide(crossingCuts, {0, 0}, {100, 80});
+    const auto sectors = cutCrossingGuides(crossingCuts, 0, {slash, vertical, diagonal});
+    check(sectors.edit.has_value(), qPrintable(sectors.error));
+    check(sectors.edit->document.pieces().size() == 6, "Deduplicate the common crossing of three cuts");
+    double totalArea = 0;
+    for (qsizetype i = 0; i < 6; ++i) {
+        const auto panel = analyzePiece(sectors.edit->document, i);
+        check(panel.error == ContourError::None && !panel.allowanceFailed,
+              "Validate all six cut contours and their allowances");
+        totalArea += area(panel.contour);
+    }
+    check(near(totalArea, 8000), "Preserve the seam area across all six panels");
+
+    crossingCuts.remove(diagonal);
+    crossingCuts.remove(vertical);
+    const auto shortGuide = guide(crossingCuts, {50, 20}, {50, 60});
+    check(!cutCrossingGuides(crossingCuts, 0, {slash, shortGuide}).edit && crossingCuts.pieces().size() == 1,
+          "Reject a crossing guide with interior endpoints without changing the source");
+
+    auto curvedCuts = polygon({{0, 0}, {100, 0}, {100, 80}, {0, 80}});
+    const auto across = guide(curvedCuts, {50, 0}, {50, 80});
+    const auto curve = curvedCuts.entities().size();
+    curvedCuts.insert(curve, {Shape::Curve, {0, 35}, {100, 35}, {50, 65}, -1, Layer::Construction});
+    const auto curvedPanels = cutCrossingGuides(curvedCuts, 0, {curve, across});
+    check(curvedPanels.edit.has_value(), qPrintable(curvedPanels.error));
+    const auto& curvedResult = curvedPanels.edit->document;
+    check(curvedResult.pieces().size() == 4, "Split a quadratic guide at its exact crossing with a straight guide");
+    qsizetype curvedEdges = 0;
+    for (const auto& edge : curvedResult.entities()) {
+        if (edge.shape != Shape::Curve || edge.layer != Layer::Main)
+            continue;
+        ++curvedEdges;
+        check((edge.a == QPointF(50, 50) || edge.b == QPointF(50, 50))
+              && (edge.control == QPointF(25, 50) || edge.control == QPointF(75, 50)),
+              "Retain the exact quadratic controls on both sides of the cut");
+    }
+    check(curvedEdges == 4, "Retain a curved seam along both sides of each quadratic segment");
+
     auto concave = polygon({{0, 0}, {100, 0}, {100, 100}, {70, 100}, {70, 30},
                             {30, 30}, {30, 100}, {0, 100}});
     const auto outside = guide(concave, {0, 70}, {100, 70});

@@ -20,6 +20,7 @@ struct Edge {
     double chordError = 0;
     qsizetype entityIndex = -1;
     double width = 0;
+    std::optional<bool> bevelAtStart;
 };
 
 double length(const QPointF& vector) {
@@ -117,6 +118,7 @@ bool flatten(const Edge& edge, QVector<Edge>& chords, double& perimeter, double 
     left.control = first;
     auto right = edge;
     right.start = split;
+    right.bevelAtStart.reset();
     right.control = second;
     return flatten(left, chords, perimeter, lengthBudget / 2, depth + 1)
         && flatten(right, chords, perimeter, lengthBudget / 2, depth + 1);
@@ -193,7 +195,7 @@ QPolygonF offsetRing(const QPolygonF& ring, double width) {
     return offset;
 }
 
-QPolygonF offsetVariableRing(const QPolygonF& ring, const QVector<Edge>& chords) {
+QPolygonF offsetVariableRing(const QPolygonF& ring, const QVector<Edge>& chords, bool bevel) {
     const double orientation = signedAreaTwice(ring) > 0 ? 1 : -1;
     QPolygonF offset;
     QVector<qsizetype> edgeStarts;
@@ -219,7 +221,10 @@ QPolygonF offsetVariableRing(const QPolygonF& ring, const QVector<Edge>& chords)
         const auto denominator = cross(before, after);
         const bool nearlyStraight = QPointF::dotProduct(before, after) > 0
             && std::abs(denominator) < 0.05;
-        if (nearlyStraight && previousWidth != nextWidth) {
+        const bool convexCorner = denominator * orientation > 1e-8 && !nearlyStraight
+            && (chords[previous].entityIndex != chords[i].entityIndex
+                || (!chords[previous].curved && !chords[i].curved));
+        if ((chords[i].bevelAtStart.value_or(bevel) && convexCorner) || (nearlyStraight && previousWidth != nextWidth)) {
             offset.append(a);
             edgeStarts.append(offset.size());
             offset.append(b);
@@ -434,6 +439,7 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
         bool reversed;
     };
     QVector<NotchSpan> spans;
+    bool conflictingCorners = false;
     qsizetype current = 0;
     for (qsizetype i = 0; i < edges.size(); ++i) {
         auto edge = edges[current / 2];
@@ -441,6 +447,12 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
         const auto firstChord = chords.size();
         if (reversed)
             std::swap(edge.start, edge.end);
+        const auto& source = document.entities()[edge.entityIndex];
+        const auto& adjoining = document.entities()[edges[links[current] / 2].entityIndex];
+        const auto nextCorner = reversed ? source.bevelAtEnd : source.bevelAtStart;
+        const auto previousCorner = links[current] % 2 ? adjoining.bevelAtEnd : adjoining.bevelAtStart;
+        conflictingCorners |= nextCorner && previousCorner && nextCorner != previousCorner;
+        edge.bevelAtStart = nextCorner ? nextCorner : previousCorner;
         current = links[current ^ 1];
         if (current == 0 && i + 1 < edges.size())
             return {ContourError::Disconnected};
@@ -460,7 +472,7 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
                 return {ContourError::TooComplex};
             chords.append(edge);
         }
-        if (linked.notches.contains(edge.entityIndex) || !document.entities()[edge.entityIndex].seamNotches.isEmpty())
+        if (linked.notches.contains(edge.entityIndex) || !source.seamNotches.isEmpty() || !source.seamSymbols.isEmpty())
             spans.append({firstChord, chords.size(), edge.entityIndex, reversed});
     }
     QPolygonF ring;
@@ -475,9 +487,15 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
     geometry.error = ContourError::None;
     geometry.bounds = path.boundingRect();
     const auto width = chords.front().width;
-    if (std::ranges::any_of(chords, [](const Edge& edge) { return edge.width > 0; })) {
+    geometry.allowanceFailed = conflictingCorners;
+    if (!conflictingCorners && std::ranges::any_of(chords, [](const Edge& edge) { return edge.width > 0; })) {
         const bool uniform = std::ranges::all_of(chords, [width](const Edge& edge) { return edge.width == width; });
-        geometry.allowance = uniform ? offsetRing(ring, width) : offsetVariableRing(ring, chords);
+        const auto bevel = document.pieces()[piece].bevelAllowanceCorners;
+        const bool hasOverride = std::ranges::any_of(chords, [](const Edge& edge) {
+            return edge.bevelAtStart.has_value();
+        });
+        geometry.allowance = uniform && !bevel && !hasOverride ? offsetRing(ring, width)
+                                                              : offsetVariableRing(ring, chords, bevel);
         geometry.allowanceFailed = geometry.allowance.isEmpty();
     }
     const double orientation = signedAreaTwice(ring) > 0 ? 1 : -1;
@@ -492,16 +510,24 @@ PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece) {
                 }))
                 fractions.append(fraction);
         }
-        for (const auto fraction : fractions) {
+        const auto anchorAt = [&](double fraction) -> std::optional<QLineF> {
             const auto distance = (span.reversed ? 1 - fraction : fraction) * distances.back();
             const auto index = std::upper_bound(distances.begin(), distances.end(), distance)
                 - distances.begin() - 1;
             if (index < 0 || index + 1 >= distances.size())
-                continue;
+                return {};
             const auto& chord = chords[span.first + index];
             const auto tangent = (chord.end - chord.start) / (distances[index + 1] - distances[index]);
             const auto anchor = chord.start + tangent * (distance - distances[index]);
-            geometry.notchAnchors.append(QLineF(anchor, anchor + orientation * QPointF(tangent.y(), -tangent.x())));
+            return QLineF(anchor, anchor + orientation * QPointF(tangent.y(), -tangent.x()));
+        };
+        for (const auto fraction : fractions) {
+            if (const auto anchor = anchorAt(fraction))
+                geometry.notchAnchors.append(*anchor);
+        }
+        for (const auto& symbol : document.entities()[span.entity].seamSymbols) {
+            if (const auto anchor = anchorAt(symbol.fraction))
+                geometry.symbolAnchors.append({symbol, *anchor});
         }
     }
     geometry.contour = std::move(ring);

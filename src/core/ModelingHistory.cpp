@@ -21,6 +21,7 @@ constexpr std::array operationKeys{
     std::pair{ContourOperation::SplitDart, "split-dart"},
     std::pair{ContourOperation::MergeDarts, "merge-darts"},
     std::pair{ContourOperation::Pleat, "pleat"},
+    std::pair{ContourOperation::PleatWithTabs, "pleat-with-tabs"},
     std::pair{ContourOperation::Gather, "gather"},
     std::pair{ContourOperation::Relief, "relief"},
     std::pair{ContourOperation::Yoke, "yoke"},
@@ -132,7 +133,8 @@ bool PatternDocument::appendSilhouette(qsizetype piece, double axisFraction, dou
 
 bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
                                     const QVector<qsizetype>& guides, double spreadMm, QString* error, const QString& spreadFormula,
-                                    const std::optional<QVector<QString>>& followingGuides) {
+                                    const std::optional<QVector<QString>>& followingGuides,
+                                    const QVector<double>& outletWeights) {
     const auto fail = [error](const QString& message) {
         if (error)
             *error = message;
@@ -153,6 +155,7 @@ bool PatternDocument::appendContour(qsizetype piece, ContourOperation operation,
     step.spreadMm = spreadMm;
     step.spreadFormula = spreadFormula.trimmed();
     step.followingGuides = followingGuides;
+    step.outletWeights = outletWeights;
     if (!step.spreadFormula.isEmpty() && !usesSpreadWidth(operation))
         return fail(QStringLiteral("A width formula requires a spread, pleat or gather."));
     for (auto index : guides) {
@@ -323,7 +326,7 @@ bool PatternDocument::applyModelingSequence(const PatternDocument& source, QStri
         QVector<qsizetype> guides;
         for (const auto& name : step.guides)
             guides.append(findObject(name));
-        if (!candidate.appendContour(piece, *step.contour, guides, step.spreadMm, &detail, step.spreadFormula, step.followingGuides))
+        if (!candidate.appendContour(piece, *step.contour, guides, step.spreadMm, &detail, step.spreadFormula, step.followingGuides, step.outletWeights))
             return stepError(detail);
         if (candidate.history_.back().topology != step.topology)
             return stepError(QStringLiteral("Связи между контуром и направляющими изменились."));
@@ -353,6 +356,7 @@ bool PatternDocument::editModelingStep(qsizetype index, const ModelingStep& sett
         step.lengthScale = settings.lengthScale;
     } else if (usesSpreadWidth(*step.contour) || *step.contour == ContourOperation::SplitDart) {
         step.spreadMm = settings.spreadMm;
+        step.outletWeights = settings.outletWeights;
         step.spreadFormula = settings.spreadFormula.trimmed();
         if (!step.spreadFormula.isEmpty() && !usesSpreadWidth(*step.contour))
             return fail(QStringLiteral("A width formula requires a spread, pleat or gather."));
@@ -586,7 +590,7 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
                 return fail(detail);
             width = *evaluated;
         }
-        const auto result = modelContour(working, 0, *step.contour, guideIndices, width);
+        const auto result = modelContour(working, 0, *step.contour, guideIndices, width, step.outletWeights);
         if (!result.edit)
             return fail(result.error);
         if (!toTransport.isEmpty()) {
@@ -630,6 +634,9 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
                     return fail(QStringLiteral("A generated edge was reassigned or moved to another layer."));
                 entity.seamAllowanceMm = metadata->seamAllowanceMm;
                 entity.seamNotches = metadata->seamNotches;
+                entity.seamSymbols = metadata->seamSymbols;
+                entity.bevelAtStart = metadata->bevelAtStart;
+                entity.bevelAtEnd = metadata->bevelAtEnd;
             }
             outputs.append(entity);
             entity.piece = localPiece;

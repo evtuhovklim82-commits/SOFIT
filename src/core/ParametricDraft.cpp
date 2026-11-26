@@ -5,13 +5,19 @@
 #include <algorithm>
 #include <array>
 
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFileInfo>
 #include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QRegularExpression>
 #include <QStringView>
 #include <QSet>
 #include <cmath>
 #include <functional>
 #include <iterator>
+#include <numbers>
 #include <utility>
 
 namespace opc {
@@ -25,9 +31,13 @@ bool validName(const QString& name) {
     return name.size() <= 64 && pattern.match(name).hasMatch();
 }
 
+bool isTangentFunction(QStringView name) {
+    return name == u"tangentx" || name == u"tangenty";
+}
+
 bool isNumericFunction(QStringView name) {
     return name == u"sqrt" || name == u"abs" || name == u"min" || name == u"max"
-        || name == u"hypot";
+        || name == u"hypot" || name == u"atan2deg";
 }
 
 class Formula {
@@ -65,9 +75,9 @@ private:
                 value = finite(value * operand(depth));
             } else if (take(u'/')) {
                 const auto divisor = operand(depth);
-                if (divisor == 0)
+                if (evaluating_ && divisor == 0)
                     fail(QStringLiteral("Division by zero"));
-                value = finite(value / divisor);
+                value = evaluating_ ? finite(value / divisor) : 0;
             } else {
                 return value;
             }
@@ -95,17 +105,23 @@ private:
             } while (letter(peek()) || digit(peek()));
             const auto name = source_.mid(start, pos_ - start);
             const auto end = pos_;
+            if (name == u"iflt" && take(u'('))
+                return conditional(depth + 1);
             if (isNumericFunction(name) && take(u'('))
                 return numericFunction(name, depth + 1);
+            if (isTangentFunction(name) && take(u'('))
+                return tangentControl(name, depth + 1);
             if (name == u"quadlen" && take(u'('))
                 return quadraticLength(depth + 1);
             if (name == u"capcontrol" && take(u'('))
                 return capControl(depth + 1);
+            if (name == u"capwidth" && take(u'('))
+                return capWidth(depth + 1);
             if (name == u"positive" && take(u'(')) {
                 const auto value = expression(depth + 1);
                 if (!take(u')'))
                     fail(QStringLiteral("Expected ')'"));
-                if (value <= 0)
+                if (evaluating_ && value <= 0)
                     fail(QStringLiteral("Expected a value greater than zero"));
                 return value;
             }
@@ -116,7 +132,7 @@ private:
                     fail(QStringLiteral("Expected point coordinate x or y"));
                 ++pos_;
             }
-            return resolve_(source_.mid(start, pos_ - start).toString(), depth + 1);
+            return evaluating_ ? resolve_(source_.mid(start, pos_ - start).toString(), depth + 1) : 0;
         }
 
         while (digit(peek()))
@@ -139,7 +155,29 @@ private:
         const auto number = source_.mid(start, pos_ - start).toDouble(&ok);
         if (!ok)
             fail(QStringLiteral("Invalid number"));
-        return finite(number);
+        return evaluating_ ? finite(number) : 0;
+    }
+
+    double conditional(int depth) {
+        const auto left = expression(depth);
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' after the left comparison operand"));
+        const auto right = expression(depth);
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' after the right comparison operand"));
+
+        // Parse both branches, but resolve references and evaluate only the selected one.
+        const bool wasEvaluating = evaluating_;
+        evaluating_ = wasEvaluating && left < right;
+        const auto whenLess = expression(depth);
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' between conditional branches"));
+        evaluating_ = wasEvaluating && left >= right;
+        const auto otherwise = expression(depth);
+        evaluating_ = wasEvaluating;
+        if (!take(u')'))
+            fail(QStringLiteral("Expected ')'"));
+        return left < right ? whenLess : otherwise;
     }
 
     double numericFunction(QStringView name, int depth) {
@@ -149,7 +187,7 @@ private:
                 fail(QStringLiteral("Expected ')'"));
             if (name == u"abs")
                 return std::abs(a);
-            if (a < 0)
+            if (evaluating_ && a < 0)
                 fail(QStringLiteral("Square root requires a non-negative value"));
             return std::sqrt(a);
         }
@@ -163,7 +201,46 @@ private:
             return std::min(a, b);
         if (name == u"max")
             return std::max(a, b);
+        if (name == u"atan2deg") {
+            if (evaluating_ && std::hypot(a, b) <= 1e-9)
+                fail(QStringLiteral("A zero vector has no direction"));
+            return std::atan2(a, b) * (180 / std::numbers::pi);
+        }
         return finite(std::hypot(a, b));
+    }
+
+    double tangentControl(QStringView name, int depth) {
+        std::array<double, 6> arguments;
+        for (std::size_t i = 0; i < arguments.size(); ++i) {
+            if (i > 0 && !take(u','))
+                fail(QStringLiteral("Expected ',' between tangent arguments"));
+            arguments[i] = expression(depth);
+        }
+        if (!take(u')'))
+            fail(QStringLiteral("Expected ')'"));
+        if (!evaluating_)
+            return 0;
+
+        const auto direction = [](double degrees) {
+            const double angle = std::remainder(degrees, 360.) * (std::numbers::pi / 180.);
+            return QPointF(std::cos(angle), std::sin(angle));
+        };
+        const auto cross = [](const QPointF& a, const QPointF& b) {
+            return a.x() * b.y() - a.y() * b.x();
+        };
+        const QPointF start(arguments[0], arguments[1]);
+        const QPointF end(arguments[3], arguments[4]);
+        const auto startRay = direction(arguments[2]);
+        const auto endRay = direction(arguments[5]);
+        const double determinant = cross(startRay, endRay);
+        if (std::abs(determinant) < 1e-9)
+            fail(QStringLiteral("Endpoint tangents are parallel or nearly parallel"));
+        const double fromStart = cross(end - start, endRay) / determinant;
+        const double fromEnd = cross(end - start, startRay) / determinant;
+        if (fromStart <= 1e-6 || fromEnd <= 1e-6)
+            fail(QStringLiteral("Endpoint tangent rays must intersect away from both endpoints"));
+        const auto control = start + startRay * fromStart;
+        return finite(name == u"tangentx" ? control.x() : control.y());
     }
 
     double quadraticLength(int depth) {
@@ -175,6 +252,8 @@ private:
         }
         if (!take(u')'))
             fail(QStringLiteral("Expected ')'"));
+        if (!evaluating_)
+            return 0;
         const auto length = seamLength({Shape::Curve, {coordinates[0], coordinates[1]},
                                         {coordinates[4], coordinates[5]}, {coordinates[2], coordinates[3]}});
         if (!length)
@@ -192,6 +271,8 @@ private:
         const double target = expression(depth);
         if (!take(u')'))
             fail(QStringLiteral("Expected ')'"));
+        if (!evaluating_)
+            return 0;
         if (width <= 0 || rise <= 0 || target <= 0)
             fail(QStringLiteral("Sleeve cap width, rise and target length must be positive"));
 
@@ -208,6 +289,35 @@ private:
                 low = control;
             else
                 high = control;
+        }
+        return (low + high) / 2;
+    }
+
+    double capWidth(int depth) {
+        const auto rise = expression(depth);
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' after arc rise"));
+        const auto target = expression(depth);
+        if (!take(u')'))
+            fail(QStringLiteral("Expected ')'"));
+        if (!evaluating_)
+            return 0;
+        if (rise <= 0 || target <= rise)
+            fail(QStringLiteral("The half arc length must exceed the rise"));
+
+        // The control is halfway across from the crown and at crown height.
+        // Increasing horizontal scale strictly increases the arc length.
+        double low = 0;
+        double high = target;
+        for (int i = 0; i < 36; ++i) {
+            const auto width = (low + high) / 2;
+            const auto length = seamLength({Shape::Curve, {}, {width, rise}, {width / 2, 0}});
+            if (!length)
+                fail(QStringLiteral("Cannot measure the arc"));
+            if (*length < target)
+                low = width;
+            else
+                high = width;
         }
         return (low + high) / 2;
     }
@@ -240,6 +350,7 @@ private:
     QStringView source_;
     const std::function<double(const QString&, int)>& resolve_;
     qsizetype pos_ = 0;
+    bool evaluating_ = true;
 };
 
 class DraftEvaluation {
@@ -450,6 +561,9 @@ QVector<Entity> PatternDocument::bindDraftGeometry(QVector<Entity> generated) co
             replacement.layer = original.layer;
             replacement.seamAllowanceMm = original.seamAllowanceMm;
             replacement.seamNotches = original.seamNotches;
+            replacement.seamSymbols = original.seamSymbols;
+            replacement.bevelAtStart = original.bevelAtStart;
+            replacement.bevelAtEnd = original.bevelAtEnd;
             replacement.dxfLayer = original.dxfLayer;
         }
         entities.append(replacement);
@@ -559,7 +673,8 @@ bool PatternDocument::moveDraftPoint(const QString& name, QPointF offset, QStrin
     return true;
 }
 
-bool PatternDocument::deriveParametricPiece(qsizetype source, const QString& name, QString* error) {
+bool PatternDocument::deriveParametricPiece(qsizetype source, const QString& name, QString* error,
+                                           bool includeConstruction) {
     const auto fail = [error](const QString& message) {
         if (error)
             *error = message;
@@ -586,17 +701,31 @@ bool PatternDocument::deriveParametricPiece(qsizetype source, const QString& nam
     }
     qsizetype number = 0;
     for (auto entity : entities_) {
-        if (entity.piece != source || entity.layer != Layer::Main)
+        if (entity.piece != source)
+            continue;
+        const bool outline = entity.layer == Layer::Main;
+        if (!outline && (!includeConstruction || entity.layer != Layer::Construction
+                         || entity.draftName.isEmpty()))
             continue;
         const auto edge = edges.constFind(entity.draftName);
-        if (edge == edges.cend())
-            return fail(QStringLiteral("The source contour must consist of original formula edges."));
-        auto shared = edge.value();
+        const bool point = !outline && entity.shape == Shape::Point && names.contains(entity.draftName);
+        if (edge == edges.cend() && !point)
+            return fail(outline ? QStringLiteral("The source contour must consist of original formula edges.")
+                                : QStringLiteral("A construction object has no original formula definition."));
+        QString alias;
         do {
-            shared.name = QStringLiteral("derived_edge_%1").arg(++number);
-        } while (names.contains(shared.name));
-        draft.edges.append(shared);
-        entity.draftName = shared.name;
+            alias = QStringLiteral("derived_%1_%2").arg(point ? QStringLiteral("point") : QStringLiteral("edge")).arg(++number);
+        } while (names.contains(alias));
+        names.insert(alias);
+        if (point) {
+            draft.points.append({alias, entity.draftName + QStringLiteral(".x"),
+                                       entity.draftName + QStringLiteral(".y")});
+        } else {
+            auto shared = edge.value();
+            shared.name = alias;
+            draft.edges.append(shared);
+        }
+        entity.draftName = alias;
         entity.piece = derived;
         candidate.insert(candidate.entities_.size(), entity);
     }
@@ -616,11 +745,99 @@ bool PatternDocument::deriveParametricPiece(qsizetype source, const QString& nam
     return true;
 }
 
+namespace {
+template<typename NameMap>
+QString rewriteFormula(const QString& formula, const NameMap& scalarNames, const NameMap& objectNames) {
+    static const QRegularExpression tokens(QStringLiteral(
+        R"regex((?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|([A-Za-z_][A-Za-z_0-9]*)(\.[xy])?)regex"));
+    QString result;
+    qsizetype end = 0;
+    auto matches = tokens.globalMatch(formula);
+    while (matches.hasNext()) {
+        const auto match = matches.next();
+        result += formula.mid(end, match.capturedStart() - end);
+        end = match.capturedEnd();
+        const auto name = match.captured(1);
+        const auto coordinate = match.captured(2);
+        const bool function = coordinate.isEmpty()
+            && (isNumericFunction(name) || isTangentFunction(name) || name == u"iflt" || name == u"quadlen" || name == u"positive" || name == u"capcontrol" || name == u"capwidth")
+            && QStringView(formula).sliced(end).trimmed().startsWith(u'(');
+        if (name.isEmpty() || function)
+            result += match.captured();
+        else if (coordinate.isEmpty())
+            result += scalarNames.value(name, name);
+        else
+            result += objectNames.value(name, name) + coordinate;
+    }
+    return result + formula.mid(end);
+}
+
+QString digest(const QJsonArray& records) {
+    return QString::fromLatin1(QCryptographicHash::hash(QJsonDocument(records).toJson(QJsonDocument::Compact),
+                                                       QCryptographicHash::Sha256).toHex());
+}
+
+QString structureDigest(const PatternDocument& source) {
+    QJsonArray records;
+    for (const auto& piece : source.pieces())
+        records.append(QJsonArray{piece.name, piece.cutCount, piece.allowanceMm});
+    QMap<QString, QJsonArray> objects;
+    for (const auto& entity : source.entities())
+        objects.insert(entity.draftName, QJsonArray{entity.draftName, int(entity.shape), entity.piece, int(entity.layer)});
+    for (const auto& object : objects)
+        records.append(object);
+    return digest(records);
+}
+
+QString formulaDigest(const ParametricDraft& draft, const LibraryInstance& instance) {
+    QJsonArray records;
+    const auto collect = [&](const auto& map, const auto& definitions, auto fields) {
+        for (auto it = map.cbegin(); it != map.cend(); ++it) {
+            const auto node = std::ranges::find(definitions, it.value(), [](const auto& item) { return item.name; });
+            if (node == definitions.end())
+                return false;
+            auto record = fields(*node);
+            record.prepend(it.value());
+            record.prepend(it.key());
+            records.append(record);
+        }
+        return true;
+    };
+    if (!collect(instance.parameters, draft.parameters, [](const auto& item) { return QJsonArray{item.formula}; })
+        || !collect(instance.points, draft.points, [](const auto& item) { return QJsonArray{item.x, item.y}; })
+        || !collect(instance.edges, draft.edges, [](const auto& item) { return QJsonArray{item.start, item.end, item.control}; }))
+        return {};
+    return digest(records);
+}
+
+QString sourceFormulaRevision(const ParametricDraft& draft, LibraryInstance instance) {
+    for (auto* table : {&instance.parameters, &instance.points, &instance.edges}) {
+        for (auto it = table->begin(); it != table->end(); ++it)
+            it.value() = it.key();
+    }
+    return formulaDigest(draft, instance);
+}
+
+bool canTrackLibrarySource(const PatternDocument& source) {
+    return source.modelingHistory().isEmpty() && source.seamLinks().isEmpty()
+        && source.production().rules.isEmpty()
+        && std::ranges::all_of(source.entities(), [](const Entity& item) { return !item.draftName.isEmpty(); });
+}
+}
+
 bool PatternDocument::insertConstruction(const PatternDocument& source, QString* error,
-                                         const QMap<QString, QString>& measurementBindings) {
+                                         const QMap<QString, QString>& measurementBindings,
+                                         const QString& libraryName) {
     if (source.draft_.points.isEmpty()) {
         if (error)
             *error = QStringLiteral("The selected project has no parametric draft.");
+        return false;
+    }
+
+    if (!libraryName.isEmpty() && (libraryName.trimmed().isEmpty() || libraryName.size() > 255
+                                   || !canTrackLibrarySource(source))) {
+        if (error)
+            *error = QStringLiteral("A tracked library source requires formula objects without manual grading, seam links or modeling history.");
         return false;
     }
 
@@ -683,34 +900,10 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
     for (const auto& edge : source.draft_.edges)
         objectNames.insert(edge.name, reserveName(edge.name, objects));
 
-    const auto rewriteFormula = [&](const QString& formula) {
-        static const QRegularExpression tokens(QStringLiteral(
-            R"regex((?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?|([A-Za-z_][A-Za-z_0-9]*)(\.[xy])?)regex"));
-        QString result;
-        qsizetype end = 0;
-        auto matches = tokens.globalMatch(formula);
-        while (matches.hasNext()) {
-            const auto match = matches.next();
-            result += formula.mid(end, match.capturedStart() - end);
-            end = match.capturedEnd();
-            const auto name = match.captured(1);
-            const auto coordinate = match.captured(2);
-            const bool function = coordinate.isEmpty()
-                && (isNumericFunction(name) || name == u"quadlen" || name == u"positive" || name == u"capcontrol")
-                && QStringView(formula).sliced(end).trimmed().startsWith(u'(');
-            if (name.isEmpty() || function)
-                result += match.captured();
-            else if (coordinate.isEmpty())
-                result += scalarNames.value(name, name);
-            else
-                result += objectNames.value(name, name) + coordinate;
-        }
-        return result + formula.mid(end);
-    };
     for (const auto& parameter : source.draft_.parameters)
-        draft.parameters.append({scalarNames.value(parameter.name), rewriteFormula(parameter.formula)});
+        draft.parameters.append({scalarNames.value(parameter.name), rewriteFormula(parameter.formula, scalarNames, objectNames)});
     for (const auto& point : source.draft_.points)
-        draft.points.append({objectNames.value(point.name), rewriteFormula(point.x), rewriteFormula(point.y)});
+        draft.points.append({objectNames.value(point.name), rewriteFormula(point.x, scalarNames, objectNames), rewriteFormula(point.y, scalarNames, objectNames)});
     for (const auto& edge : source.draft_.edges)
         draft.edges.append({objectNames.value(edge.name), objectNames.value(edge.start),
                             objectNames.value(edge.end), objectNames.value(edge.control)});
@@ -745,7 +938,7 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
         mapObjects(step.guides);
         if (step.followingGuides)
             mapObjects(*step.followingGuides);
-        step.spreadFormula = rewriteFormula(step.spreadFormula);
+        step.spreadFormula = rewriteFormula(step.spreadFormula, scalarNames, objectNames);
         step.rotationPivot = mapObject(step.rotationPivot);
         step.secondPiece = mapPiece(step.secondPiece);
         candidate.history_.append(std::move(step));
@@ -787,6 +980,252 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
             return false;
         }
     }
+    if (!libraryName.isEmpty()) {
+        LibraryInstance instance;
+        instance.sourceName = libraryName;
+        instance.sourceStructure = structureDigest(source);
+        for (const auto& measurement : source.draft_.measurements)
+            instance.measurements.insert(measurement.name, scalarNames.value(measurement.name));
+        for (const auto& parameter : source.draft_.parameters)
+            instance.parameters.insert(parameter.name, scalarNames.value(parameter.name));
+        for (const auto& point : source.draft_.points)
+            instance.points.insert(point.name, objectNames.value(point.name));
+        for (const auto& edge : source.draft_.edges)
+            instance.edges.insert(edge.name, objectNames.value(edge.name));
+        instance.installedFormulas = formulaDigest(candidate.draft_, instance);
+        instance.revision = sourceFormulaRevision(source.draft_, instance);
+        candidate.libraryInstances_.append(std::move(instance));
+    }
+    *this = std::move(candidate);
+    return true;
+}
+
+bool PatternDocument::smoothCurveChain(const QVector<qsizetype>& indices, double startDegrees,
+                                       double endDegrees, QString* error) {
+    const auto fail = [&](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (indices.size() < 2 || indices.size() > 32 || !std::isfinite(startDegrees) || !std::isfinite(endDegrees))
+        return fail(QStringLiteral("Choose two to 32 quadratic edges and valid end directions."));
+    const auto chain = measureSeamSection(*this, indices);
+    if (!chain)
+        return fail(QStringLiteral("The edges must form an open chain on one piece."));
+    const auto piece = entities_[chain->edges.front().index].piece;
+    if (piece < 0 || std::ranges::any_of(production_.rules, [piece](const auto& rule) { return rule.piece == piece; }))
+        return fail(QStringLiteral("Use a piece with measurement-based grading."));
+    auto draft = draft_;
+    QSet<QString> used;
+    for (const auto& point : draft.points)
+        used.insert(point.name);
+    for (const auto& parameter : draft.parameters)
+        used.insert(parameter.name);
+    for (const auto& measurement : draft.measurements)
+        used.insert(measurement.name);
+    for (const auto& edge : draft.edges)
+        used.insert(edge.name);
+    QString prefix;
+    int unit = 0;
+    do {
+        prefix = QStringLiteral("smooth_chain_%1_").arg(++unit);
+    } while (std::ranges::any_of(used, [&](const auto& name) { return name.startsWith(prefix); }));
+
+    QVector<qsizetype> definitions;
+    QStringList vertices;
+    for (const auto& entry : chain->edges) {
+        const auto& entity = entities_[entry.index];
+        const auto definition = std::ranges::find(draft.edges, entity.draftName, &DraftEdge::name);
+        if (entity.shape != Shape::Curve || definition == draft.edges.end() || definition->control.isEmpty())
+            return fail(QStringLiteral("Each selected edge must be an original quadratic formula curve."));
+        const auto& start = entry.reversed ? definition->end : definition->start;
+        const auto& end = entry.reversed ? definition->start : definition->end;
+        if (!vertices.isEmpty() && start != vertices.back())
+            return fail(QStringLiteral("Adjacent curves must share the same formula endpoint."));
+        if (vertices.isEmpty())
+            vertices.append(start);
+        vertices.append(end);
+        definitions.append(definition - draft.edges.begin());
+    }
+
+    QStringList directions;
+    for (qsizetype joint = 0; joint < vertices.size(); ++joint) {
+        const auto direction = prefix + QStringLiteral("direction_%1").arg(joint + 1);
+        directions.append(direction);
+        if (joint == 0 || joint == vertices.size() - 1) {
+            draft.parameters.append({direction, QString::number(joint == 0 ? startDegrees : endDegrees, 'g', 17)});
+            continue;
+        }
+        const auto& previous = vertices[joint - 1];
+        const auto& current = vertices[joint];
+        const auto& next = vertices[joint + 1];
+        const auto bisector = QStringLiteral(
+            "atan2deg((%2.y - %1.y) / hypot(%2.x - %1.x, %2.y - %1.y) + (%3.y - %2.y) / hypot(%3.x - %2.x, %3.y - %2.y),"
+            "(%2.x - %1.x) / hypot(%2.x - %1.x, %2.y - %1.y) + (%3.x - %2.x) / hypot(%3.x - %2.x, %3.y - %2.y))")
+            .arg(previous, current, next);
+        draft.parameters.append({direction, bisector});
+    }
+    for (qsizetype i = 0; i < definitions.size(); ++i) {
+        const auto name = prefix + QStringLiteral("control_%1").arg(i + 1);
+        const auto arguments = QStringLiteral("(%1.x, %1.y, %2, %3.x, %3.y, %4 + 180)")
+            .arg(vertices[i], directions[i], vertices[i + 1], directions[i + 1]);
+        draft.points.append({name, "tangentx" + arguments, "tangenty" + arguments});
+        draft.edges[definitions[i]].control = name;
+    }
+
+    auto candidate = *this;
+    if (!candidate.setParametricDraft(std::move(draft), error))
+        return false;
+    QStringList sizes{QString{}};
+    for (const auto& size : production_.sizes)
+        sizes.append(size.name);
+    for (const auto& size : sizes) {
+        const auto geometry = analyzePiece(gradedPattern(candidate, size), piece);
+        if (geometry.error != ContourError::None || geometry.allowanceFailed)
+            return fail(QStringLiteral("The smoothed cutting contour is invalid in '%1'.")
+                .arg(size.isEmpty() ? QStringLiteral("Base pattern") : size));
+    }
+    *this = std::move(candidate);
+    return true;
+}
+
+bool PatternDocument::updateLibraryConstruction(qsizetype index, const PatternDocument& source, QString* error) {
+    const auto fail = [&](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    if (index < 0 || index >= libraryInstances_.size())
+        return fail(QStringLiteral("Choose a tracked library instance."));
+    const auto& instance = libraryInstances_[index];
+    if (!canTrackLibrarySource(source) || structureDigest(source) != instance.sourceStructure)
+        return fail(QStringLiteral("The library revision changes the piece or object structure."));
+    if (formulaDigest(draft_, instance) != instance.installedFormulas)
+        return fail(QStringLiteral("The instance contains local formula edits or missing objects."));
+    const auto matches = [](const auto& definitions, const auto& bindings) {
+        return definitions.size() == bindings.size()
+            && std::ranges::all_of(definitions, [&](const auto& item) { return bindings.contains(item.name); });
+    };
+    if (!matches(source.draft_.measurements, instance.measurements)
+        || !matches(source.draft_.parameters, instance.parameters)
+        || !matches(source.draft_.points, instance.points)
+        || !matches(source.draft_.edges, instance.edges))
+        return fail(QStringLiteral("The library revision changes the names of measurements or formula objects."));
+
+    auto scalarNames = instance.measurements;
+    scalarNames.insert(instance.parameters);
+    auto objectNames = instance.points;
+    objectNames.insert(instance.edges);
+    auto draft = draft_;
+    for (const auto& measurement : instance.measurements) {
+        if (std::ranges::find(draft.measurements, measurement, &Measurement::name) == draft.measurements.end())
+            return fail(QStringLiteral("A bound project measurement is missing."));
+    }
+    for (const auto& edge : source.draft_.edges) {
+        const auto mapped = std::ranges::find(draft.edges, instance.edges.value(edge.name), &DraftEdge::name);
+        if (mapped->start != objectNames.value(edge.start) || mapped->end != objectNames.value(edge.end)
+            || mapped->control != objectNames.value(edge.control))
+            return fail(QStringLiteral("The library revision changes the connections of a formula edge."));
+    }
+    for (const auto& parameter : source.draft_.parameters) {
+        auto mapped = std::ranges::find(draft.parameters, instance.parameters.value(parameter.name), &DraftParameter::name);
+        mapped->formula = rewriteFormula(parameter.formula, scalarNames, objectNames);
+    }
+    for (const auto& point : source.draft_.points) {
+        auto mapped = std::ranges::find(draft.points, instance.points.value(point.name), &DraftPoint::name);
+        mapped->x = rewriteFormula(point.x, scalarNames, objectNames);
+        mapped->y = rewriteFormula(point.y, scalarNames, objectNames);
+    }
+    auto candidate = *this;
+    if (!candidate.setParametricDraft(std::move(draft), error))
+        return false;
+    QStringList sizes{QString{}};
+    for (const auto& size : production_.sizes)
+        sizes.append(size.name);
+    for (const auto& size : sizes) {
+        const auto previous = gradedPattern(*this, size);
+        const auto updated = gradedPattern(candidate, size);
+        if (updated.entities().isEmpty())
+            return fail(QStringLiteral("The revision cannot be recalculated in size '%1'.").arg(size));
+        for (qsizetype piece = 0; piece < pieces_.size(); ++piece) {
+            const auto before = analyzePiece(previous, piece);
+            if (before.error != ContourError::None || before.allowanceFailed)
+                continue;
+            const auto after = analyzePiece(updated, piece);
+            if (after.error != ContourError::None || after.allowanceFailed)
+                return fail(QStringLiteral("The revision invalidates the cutting contour of '%1' in size '%2'.")
+                    .arg(pieces_[piece].name, size.isEmpty() ? QStringLiteral("Base pattern") : size));
+        }
+    }
+    for (const auto& rule : production_.rules) {
+        if (gradingPoints(*this, rule.piece).contains(rule.point)
+            && !gradingPoints(candidate, rule.piece).contains(rule.point))
+            return fail(QStringLiteral("The revision moves a point used by a manual grading rule."));
+    }
+
+    auto& record = candidate.libraryInstances_[index];
+    record.installedFormulas = formulaDigest(candidate.draft_, instance);
+    record.revision = sourceFormulaRevision(source.draft_, instance);
+    *this = std::move(candidate);
+    return true;
+}
+
+bool PatternDocument::refreshLibraryDependencies(const QString& projectPath, QString* error) {
+    if (libraryInstances_.isEmpty())
+        return true;
+
+    const auto fail = [&](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    const auto root = QFileInfo(projectPath).canonicalFilePath();
+    if (root.isEmpty() || !QFileInfo(root).isFile())
+        return fail(QStringLiteral("Save the project before refreshing its library dependencies."));
+
+    const QDir directory = QFileInfo(root).absoluteDir();
+    QStringList active;
+    QHash<QString, PatternDocument> resolved;
+    const auto refresh = [&](auto&& visit, const QString& path, PatternDocument& document) -> bool {
+        active.append(path);
+        for (qsizetype i = 0; i < document.libraryInstances_.size(); ++i) {
+            const auto& instance = document.libraryInstances_[i];
+            const auto& name = instance.sourceName;
+            if (name.contains(u'/') || name.contains(u'\\') || name.contains(u':')
+                || !name.endsWith(QStringLiteral(".sofit"), Qt::CaseInsensitive))
+                return fail(QStringLiteral("Invalid library filename in '%1': %2").arg(path, name));
+            const QFileInfo file(directory.filePath(name));
+            const auto dependency = file.canonicalFilePath();
+            if (!file.isFile() || QFileInfo(dependency).absolutePath() != directory.absolutePath())
+                return fail(QStringLiteral("Library file '%1' must be in '%2'.").arg(name, directory.absolutePath()));
+            if (active.contains(dependency)) {
+                auto chain = active;
+                chain.append(dependency);
+                return fail(QStringLiteral("Cyclic library dependencies: %1").arg(chain.join(QStringLiteral(" → "))));
+            }
+            if (!resolved.contains(dependency)) {
+                if (active.size() >= 64 || active.size() + resolved.size() >= 512)
+                    return fail(QStringLiteral("The library dependency graph is too large."));
+                PatternDocument source;
+                QString detail;
+                if (!source.load(dependency, &detail))
+                    return fail(QStringLiteral("%1: %2").arg(dependency, detail));
+                if (!visit(visit, dependency, source))
+                    return false;
+                resolved.insert(dependency, std::move(source));
+            }
+            const auto& source = resolved.constFind(dependency).value();
+            QString detail;
+            if (!document.updateLibraryConstruction(i, source, &detail))
+                return fail(QStringLiteral("%1 ← %2: %3").arg(path, dependency, detail));
+        }
+        active.removeLast();
+        return true;
+    };
+
+    auto candidate = *this;
+    if (!refresh(refresh, root, candidate))
+        return false;
     *this = std::move(candidate);
     return true;
 }

@@ -13,6 +13,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLineF>
 #include <QTemporaryDir>
 #include <cstdlib>
 #include <iostream>
@@ -39,6 +40,40 @@ void writeProject(const QString& path, const QJsonObject& data) {
     const auto bytes = QJsonDocument(data).toJson();
     check(file.write(bytes) == bytes.size(), "Write complete project fixture");
 }
+void checkEndpointTangents() {
+    using namespace opc;
+    ParametricDraft draft;
+    draft.measurements = {{"width", 100}, {"angle", 270}};
+    draft.points = {{"A", "0", "0"}, {"B", "width", "60"},
+                    {"C", "tangentx(A.x,A.y,0,B.x,B.y,angle)",
+                          "tangenty(A.x,A.y,0,B.x,B.y,angle)"}};
+    draft.edges = {{"curve", "A", "B", "C"}};
+    PatternDocument document;
+    QString error;
+    const bool built = document.setParametricDraft(draft, &error);
+    check(built, qPrintable(error));
+    check(QLineF(document.entities().back().control, QPointF(100, 0)).length() < 1e-8,
+          "Find the control point at the intersection of the endpoint tangents");
+    document.production().sizes.append({"L", {{"width", 150}, {"angle", 225}}});
+    const auto graded = gradedPattern(document, "L");
+    check(!graded.entities().isEmpty()
+          && QLineF(graded.entities().back().control, QPointF(90, 0)).length() < 1e-8,
+          "Re-evaluate the tangent intersection using graded angles and endpoints");
+
+    auto invalid = draft;
+    for (double angle : {0., 90.}) {
+        invalid.measurements[1].mm = angle;
+        check(!document.setParametricDraft(invalid, &error) && document.parametricDraft() == draft,
+              "Reject parallel or backward tangents without modifying the project");
+    }
+
+    QTemporaryDir directory;
+    const auto path = directory.filePath("tangents.sofit");
+    PatternDocument reopened;
+    check(directory.isValid() && document.save(path, &error) && reopened.load(path, &error)
+          && reopened.parametricDraft() == draft, "Save and reopen the tangent formulas");
+}
+
 void checkModelingHistory() {
     using namespace opc;
     ParametricDraft draft;
@@ -203,6 +238,7 @@ void checkLowerBlocks() {
 }
 
 int main() {
+    checkEndpointTangents();
     checkModelingHistory();
     checkBodiceAndSleeve();
     checkLowerBlocks();
@@ -228,6 +264,15 @@ int main() {
     numeric.points[0].x = "sqrt(-1)";
     check(!calculated.setParametricDraft(numeric, &error) && error.contains("non-negative")
           && calculated.entities().front().a.x() == 10, "Reject an invalid square root transactionally");
+    numeric.points[0].x = "iflt(height, 60, iflt(height, 50, 1/0, 12), sqrt(-1))";
+    check(calculated.setParametricDraft(numeric, &error) && calculated.entities().front().a.x() == 12,
+          "Evaluate nested conditionals and use the fourth argument at equality");
+    numeric.measurements[0].mm = 65;
+    check(!calculated.setParametricDraft(numeric, &error) && error.contains("non-negative")
+          && calculated.entities().front().a.x() == 12, "Reject an invalid selected branch transactionally");
+    numeric.points[0].x = "iflt(height, 60, 2+, 12)";
+    check(!calculated.setParametricDraft(numeric, &error) && calculated.entities().front().a.x() == 12,
+          "Reject malformed syntax even in an unselected branch");
     error.clear();
     check(document.setParametricDraft(initial, &error) && error.isEmpty(), "Evaluate precedence, unary signs and forward references");
     check(document.entities().size() == 10 && document.entities()[2].a == QPointF(100, 0),

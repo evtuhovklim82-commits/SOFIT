@@ -453,6 +453,54 @@ int main(int argc, char** argv) {
           && arrangeFabric(compensated, invalidShrinkage).error == FabricLayoutError::InvalidShrinkage,
           "Reject a singular shrinkage factor");
 
+    compensated.pieces()[0].fabricShrinkageOverride = QPointF(0, -20);
+    shrinkage.sizes = {{"M", {}}};
+    shrinkage.placements[0].size = "M";
+    const auto overridden = cuttingReport(compensated, shrinkage);
+    check(qAbs(overridden.usage.length - 80 / 1.2) < 1e-7
+          && arrangeFabric(compensated, shrinkage).error == FabricLayoutError::None,
+          "Use the piece override for the graded layout and automatic placement");
+    check(compensated.save(compensatedFile) && reopenedMarker.load(compensatedFile)
+          && reopenedMarker.pieces()[0].fabricShrinkageOverride == QPointF(0, -20),
+          "Round-trip the per-piece compensation in a native project");
+    check(exportFabricDxf(shrinkDxf, reopenedMarker, reopenedMarker.production(), dxfError)
+          && exportFabricPdf(temp.filePath("piece-compensation.pdf"), reopenedMarker,
+                             reopenedMarker.production(), {}, dxfError),
+          qPrintable(dxfError));
+    compensated.pieces()[0].fabricShrinkageOverride = QPointF(100, 0);
+    check(!compensated.save(compensatedFile)
+          && !cuttingReport(compensated, shrinkage).canExport(shrinkage.fabricWidth),
+          "Reject invalid per-piece compensation");
+
+    const auto planned = planSizeLays({{"S", 0}, {"M", 7}, {"XL", 2}}, 3);
+    check(planned.size() == 4 && planned[0].size == "M" && planned[0].layers == 3
+          && planned[1].size == "M" && planned[1].layers == 3 && planned[2].size == "M" && planned[2].layers == 1
+          && planned[3].size == "XL" && planned[3].layers == 2,
+          "Split the exact demand by size into bounded lays");
+    check(planSizeLays({{"M", 1}}, 0).isEmpty() && planSizeLays({{"M", -1}}, 3).isEmpty()
+          && planSizeLays({{"M", 10000}}, 1).isEmpty(), "Reject invalid and oversized plans");
+
+    const QMap<QString, int> demand{{QString{}, 7}, {"M", 5}, {"XL", 1}};
+    const auto mixedLays = planKitLays(demand, 3, 4);
+    QMap<QString, int> produced;
+    bool hasMixedSizes = false;
+    bool hasMultipleCopies = false;
+    for (const auto& lay : mixedLays) {
+        check(lay.layers >= 1 && lay.layers <= 3, "Honor the layer limit for mixed lays");
+        hasMixedSizes |= lay.kitsPerSize.size() > 1;
+        int kitsOnLayer = 0;
+        for (auto size = lay.kitsPerSize.cbegin(); size != lay.kitsPerSize.cend(); ++size) {
+            produced[size.key()] += size.value() * lay.layers;
+            kitsOnLayer += size.value();
+            hasMultipleCopies |= size.value() > 1;
+        }
+        check(kitsOnLayer >= 1 && kitsOnLayer <= 4, "Honor the marker kit limit");
+    }
+    check(produced == demand && hasMixedSizes && hasMultipleCopies,
+          "Deliver exact demand using multiple sizes and repeated kits");
+    check(planKitLays({{"M", 1}}, 3, 0).isEmpty()
+          && planKitLays({{"M", -1}}, 3, 2).isEmpty(), "Reject an invalid kit plan");
+
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());
     check(!loadProduction(saveProduction(duplicate), 2, loaded.production())

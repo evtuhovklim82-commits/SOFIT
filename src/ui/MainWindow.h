@@ -71,6 +71,7 @@ private:
     void createPiece();
     void assignPiece();
     void managePiece();
+    bool preparePieceForCutting(qsizetype piece, QWidget* parent);
     void managePieceAt(qsizetype piece, QWidget* parent);
     void measureSelection();
     void matchSeams(const QVector<qsizetype>& indices, bool reverseSecond = false);

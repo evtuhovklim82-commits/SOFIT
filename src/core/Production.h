@@ -9,6 +9,8 @@
 
 namespace opc {
 
+bool validShrinkage(QPointF percent);
+
 QVector<QPointF> gradingPoints(const PatternDocument& document, qsizetype piece);
 PatternDocument gradedPattern(const PatternDocument& document, const QString& size,
                               QVector<qsizetype>* sourceIndices = nullptr,
@@ -84,6 +86,20 @@ struct CuttingReport {
 QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const CuttingReport& report);
 
 CuttingReport cuttingReport(const PatternDocument& document, const ProductionData& data);
+
+struct SizeLay {
+    QString size;
+    int layers;
+};
+
+QVector<SizeLay> planSizeLays(const QMap<QString, int>& demand, int maximumLayers);
+
+struct KitLay {
+    QMap<QString, int> kitsPerSize;
+    int layers;
+};
+
+QVector<KitLay> planKitLays(const QMap<QString, int>& demand, int maximumLayers, int maximumKitsPerLayer);
 
 inline constexpr qsizetype maxAutomaticCopies = 200;
 enum class FabricLayoutError { None, InvalidShrinkage, InvalidWidth, InvalidClearance, InvalidRepeat, InvalidFlaws, TooManyCopies, InvalidContour, TooWide, VerificationFailed };

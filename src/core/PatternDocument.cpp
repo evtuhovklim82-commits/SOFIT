@@ -20,7 +20,10 @@ constexpr int legacyEnvelopeVersion = 14;
 constexpr int productEnvelopeVersion = 15;
 constexpr int repeatEnvelopeVersion = 16;
 constexpr int flawEnvelopeVersion = 17;
-constexpr int projectVersion = 18;
+constexpr int shrinkageEnvelopeVersion = 18;
+constexpr int pieceShrinkageEnvelopeVersion = 19;
+constexpr int bevelEnvelopeVersion = 20;
+constexpr int projectVersion = 21;
 constexpr qint64 maxProjectBytes = 64 * 1024 * 1024;
 
 QString payloadDigest(const QByteArray& bytes) {
@@ -116,12 +119,19 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         error->clear();
     QJsonArray objects;
     bool hasSeamData = false;
+    bool hasAnchoredEdgeData = false;
     for (const auto& entity : entities_) {
         if (entity.layer != Layer::Main && entity.layer != Layer::Construction) {
             if (error) *error = QStringLiteral("Invalid object layer");
             return false;
         }
-        if ((entity.seamAllowanceMm || !entity.seamNotches.isEmpty())
+        const bool cornerOverride = entity.bevelAtStart.has_value() || entity.bevelAtEnd.has_value();
+        const bool anchoredEdgeData = cornerOverride || !entity.seamSymbols.isEmpty();
+        if (anchoredEdgeData && (entity.layer != Layer::Main || entity.piece < 0)) {
+            if (error) *error = QStringLiteral("Anchored edge metadata requires a piece boundary");
+            return false;
+        }
+        if ((entity.seamAllowanceMm || !entity.seamNotches.isEmpty() || anchoredEdgeData)
             && entity.shape != Shape::Line && entity.shape != Shape::Curve) {
             if (error) *error = QStringLiteral("Edge metadata requires a line or curve");
             return false;
@@ -150,10 +160,26 @@ bool PatternDocument::save(const QString& path, QString* error) const {
             }
             object.insert("edgeNotches", positions);
         }
-        hasSeamData |= entity.seamAllowanceMm.has_value() || !entity.seamNotches.isEmpty();
+        if (entity.bevelAtStart)
+            object.insert("bevelAtStart", *entity.bevelAtStart);
+        if (entity.bevelAtEnd)
+            object.insert("bevelAtEnd", *entity.bevelAtEnd);
+        if (!entity.seamSymbols.isEmpty()) {
+            if (entity.seamSymbols.size() > 100 || !std::ranges::all_of(entity.seamSymbols, validEdgeSymbol)) {
+                if (error) *error = QStringLiteral("Invalid edge symbols");
+                return false;
+            }
+            QJsonArray symbols;
+            for (const auto& mark : entity.seamSymbols)
+                symbols.append(QJsonArray{int(mark.type), mark.fraction, mark.sizeMm, mark.insetMm, mark.fromCutOutline});
+            object.insert("edgeSymbols", symbols);
+        }
+        hasAnchoredEdgeData |= anchoredEdgeData;
+        hasSeamData |= entity.seamAllowanceMm.has_value() || !entity.seamNotches.isEmpty() || anchoredEdgeData;
         objects.append(object);
     }
     QJsonArray pieces;
+    bool hasPieceShrinkage = false;
     for (const auto& piece : pieces_) {
         QJsonArray notches;
         for (double position : piece.notches)
@@ -163,6 +189,17 @@ bool PatternDocument::save(const QString& path, QString* error) const {
                            {"showLabel", piece.showLabel}, {"notches", notches}};
         if (piece.grainAngle)
             record.insert("grainAngle", *piece.grainAngle);
+        if (piece.bevelAllowanceCorners)
+            record.insert("bevelAllowanceCorners", true);
+        if (piece.fabricShrinkageOverride) {
+            const auto percent = *piece.fabricShrinkageOverride;
+            if (!validShrinkage(percent)) {
+                if (error) *error = QStringLiteral("Invalid piece fabric compensation");
+                return false;
+            }
+            record.insert("fabricShrinkageOverride", QJsonArray{percent.x(), percent.y()});
+            hasPieceShrinkage = true;
+        }
         pieces.append(record);
     }
     QJsonArray layerVisibility;
@@ -222,6 +259,12 @@ bool PatternDocument::save(const QString& path, QString* error) const {
                     record.insert("width", step.spreadMm);
                 else
                     record.insert("width", step.spreadFormula);
+                if (!step.outletWeights.isEmpty()) {
+                    QJsonArray weights;
+                    for (const double weight : step.outletWeights)
+                        weights.append(weight);
+                    record.insert("outletWeights", weights);
+                }
                 record.insert("topology", names(step.topology));
                 if (step.followingGuides)
                     record.insert("followingGuides", names(*step.followingGuides));
@@ -246,6 +289,22 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         }
         root.insert("modelingSources", sources);
     }
+    if (!libraryInstances_.isEmpty()) {
+        const auto mappedNames = [](const QMap<QString, QString>& map) {
+            QJsonObject object;
+            for (auto it = map.cbegin(); it != map.cend(); ++it)
+                object.insert(it.key(), it.value());
+            return object;
+        };
+        QJsonArray instances;
+        for (const auto& instance : libraryInstances_) {
+            instances.append(QJsonObject{{"sourceName", instance.sourceName}, {"revision", instance.revision},
+                {"structure", instance.sourceStructure}, {"formulas", instance.installedFormulas},
+                {"measurements", mappedNames(instance.measurements)}, {"parameters", mappedNames(instance.parameters)},
+                {"points", mappedNames(instance.points)}, {"edges", mappedNames(instance.edges)}});
+        }
+        root.insert("libraryInstances", instances);
+    }
     root.insert("useDraftMeasurements", production_.useDraftMeasurements);
     const auto& info = productInformation_;
     const bool hasProductInformation = info != ProductInformation{};
@@ -267,7 +326,20 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     const bool hasSeamRepeatPoints = std::ranges::any_of(production_.placements,
         [](const auto& placement) { return !placement.repeatEdge.isEmpty(); });
     const bool transportsGuides = std::ranges::any_of(history_, [](const auto& step) { return step.followingGuides.has_value(); });
-    const int envelopeVersion = transportsGuides || !production_.fabricShrinkagePercent.isNull() ? projectVersion
+    const bool hasMultipleDartOutlets = std::ranges::any_of(history_, [](const auto& step) {
+        return step.contour == ContourOperation::SplitDart && step.guides.size() > 4;
+    });
+    const bool hasDartWeights = std::ranges::any_of(history_, [](const auto& step) {
+        return !step.outletWeights.isEmpty();
+    });
+    const bool hasBeveledCorners = std::ranges::any_of(pieces_, &Piece::bevelAllowanceCorners);
+    const bool hasPleatTabs = std::ranges::any_of(history_, [](const auto& step) {
+        return step.contour == ContourOperation::PleatWithTabs;
+    });
+    const int envelopeVersion = hasAnchoredEdgeData || hasPleatTabs || !libraryInstances_.isEmpty() ? projectVersion
+        : hasDartWeights || hasBeveledCorners ? bevelEnvelopeVersion
+        : hasPieceShrinkage || hasMultipleDartOutlets ? pieceShrinkageEnvelopeVersion
+        : transportsGuides || !production_.fabricShrinkagePercent.isNull() ? shrinkageEnvelopeVersion
         : hasSeamRepeatPoints || !production_.fabricFlaws.isEmpty()
         || !info.finishedMeasurements.isEmpty() ? flawEnvelopeVersion
         : info.usesTechPackOptions() || !production_.fabricRepeatMm.isNull() ? repeatEnvelopeVersion
@@ -325,7 +397,10 @@ bool PatternDocument::load(const QString& path, QString* error) {
         return fail(QStringLiteral("This project requires a newer version of SOFIT"));
     const auto envelopeVersion = root.value("version").toDouble();
     if (root.value("format") != QStringLiteral("SOFIT")
-        || (envelopeVersion != projectVersion && envelopeVersion != flawEnvelopeVersion
+        || (envelopeVersion != projectVersion && envelopeVersion != bevelEnvelopeVersion
+            && envelopeVersion != pieceShrinkageEnvelopeVersion
+            && envelopeVersion != shrinkageEnvelopeVersion
+            && envelopeVersion != flawEnvelopeVersion
             && envelopeVersion != repeatEnvelopeVersion
             && envelopeVersion != productEnvelopeVersion
             && envelopeVersion != legacyEnvelopeVersion))
@@ -406,6 +481,18 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
                     parsedPiece.grainAngle = angle;
                 }
             }
+            if (piece.contains("bevelAllowanceCorners") && !piece.value("bevelAllowanceCorners").isBool())
+                return fail(QStringLiteral("Invalid allowance corner setting"));
+            parsedPiece.bevelAllowanceCorners = piece.value("bevelAllowanceCorners").toBool();
+            if (piece.contains("fabricShrinkageOverride")) {
+                const auto axes = piece.value("fabricShrinkageOverride").toArray();
+                if (axes.size() != 2 || !axes[0].isDouble() || !axes[1].isDouble())
+                    return fail(QStringLiteral("Invalid piece fabric compensation"));
+                const QPointF percent(axes[0].toDouble(), axes[1].toDouble());
+                if (!validShrinkage(percent))
+                    return fail(QStringLiteral("Invalid piece fabric compensation"));
+                parsedPiece.fabricShrinkageOverride = percent;
+            }
             pieces.append(std::move(parsedPiece));
         }
     }
@@ -480,6 +567,33 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
                         return fail(QStringLiteral("Invalid edge notch position"));
                     entity.seamNotches.append(position);
                 }
+            }
+        }
+        if (fields.contains("bevelAtStart") || fields.contains("bevelAtEnd")) {
+            if (!native || !seamFormat || entity.layer != Layer::Main
+                || entity.piece < 0 || (shape != Shape::Line && shape != Shape::Curve)
+                || (fields.contains("bevelAtStart") && !fields.value("bevelAtStart").isBool())
+                || (fields.contains("bevelAtEnd") && !fields.value("bevelAtEnd").isBool()))
+                return fail(QStringLiteral("Invalid corner override"));
+            if (fields.contains("bevelAtStart"))
+                entity.bevelAtStart = fields.value("bevelAtStart").toBool();
+            if (fields.contains("bevelAtEnd"))
+                entity.bevelAtEnd = fields.value("bevelAtEnd").toBool();
+        }
+        if (fields.contains("edgeSymbols")) {
+            const auto symbols = fields.value("edgeSymbols");
+            if (!native || !seamFormat || entity.layer != Layer::Main || entity.piece < 0
+                || (shape != Shape::Line && shape != Shape::Curve) || !symbols.isArray() || symbols.toArray().size() > 100)
+                return fail(QStringLiteral("Invalid edge symbols"));
+            for (const auto& entry : symbols.toArray()) {
+                const auto values = entry.toArray();
+                if (values.size() != 5 || !values[4].isBool())
+                    return fail(QStringLiteral("Invalid edge symbol record"));
+                const EdgeSymbol symbol{PieceSymbol(values[0].toInt(-1)), values[1].toDouble(-1),
+                    values[2].toDouble(-1), values[3].toDouble(-1), values[4].toBool()};
+                if (!validEdgeSymbol(symbol))
+                    return fail(QStringLiteral("Invalid edge symbol position or type"));
+                entity.seamSymbols.append(symbol);
             }
         }
         parsed.append(entity);
@@ -592,6 +706,17 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
                         return fail(QStringLiteral("Invalid following guides"));
                     if (!step.followingGuides)
                         step.followingGuides.emplace();
+                }
+                if (entry.contains("outletWeights")) {
+                    const auto weights = entry.value("outletWeights").toArray();
+                    if (*step.contour != ContourOperation::SplitDart
+                        || !validDartOutletCount(step.guides.size()) || weights.size() != step.guides.size() - 2)
+                        return fail(QStringLiteral("Invalid dart outlet weights"));
+                    for (const auto& weight : weights) {
+                        if (!weight.isDouble() || !std::isfinite(weight.toDouble()) || weight.toDouble() <= 0)
+                            return fail(QStringLiteral("Invalid dart outlet weight"));
+                        step.outletWeights.append(weight.toDouble());
+                    }
                 }
                 step.spreadMm = widthValue.isDouble() ? width : 0;
                 step.spreadFormula = formula;
@@ -706,6 +831,46 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
             }
             if (!loaded.addSeamLink(std::move(link), error))
                 return false;
+        }
+    }
+    if (root.contains("libraryInstances")) {
+        const auto instances = root.value("libraryInstances");
+        if (!native || version < 8 || !instances.isArray())
+            return fail(QStringLiteral("Invalid library instance list"));
+        const auto readBindings = [](const QJsonValue& value, QMap<QString, QString>& bindings) {
+            static const QRegularExpression identifier(QStringLiteral("\\A[A-Za-z_][A-Za-z_0-9]{0,63}\\z"));
+            if (!value.isObject())
+                return false;
+            QSet<QString> destinations;
+            const auto object = value.toObject();
+            for (auto it = object.constBegin(); it != object.constEnd(); ++it) {
+                const auto target = it.value().toString();
+                if (!identifier.match(it.key()).hasMatch() || !identifier.match(target).hasMatch()
+                    || destinations.contains(target))
+                    return false;
+                destinations.insert(target);
+                bindings.insert(it.key(), target);
+            }
+            return true;
+        };
+        static const QRegularExpression digestPattern(QStringLiteral("\\A[0-9a-f]{64}\\z"));
+        for (const auto& value : instances.toArray()) {
+            const auto record = value.toObject();
+            LibraryInstance instance;
+            instance.sourceName = record.value("sourceName").toString();
+            instance.revision = record.value("revision").toString();
+            instance.sourceStructure = record.value("structure").toString();
+            instance.installedFormulas = record.value("formulas").toString();
+            if (instance.sourceName.trimmed().isEmpty() || instance.sourceName.size() > 255
+                || !digestPattern.match(instance.revision).hasMatch()
+                || !digestPattern.match(instance.sourceStructure).hasMatch()
+                || !digestPattern.match(instance.installedFormulas).hasMatch()
+                || !readBindings(record.value("measurements"), instance.measurements)
+                || !readBindings(record.value("parameters"), instance.parameters)
+                || !readBindings(record.value("points"), instance.points) || instance.points.isEmpty()
+                || !readBindings(record.value("edges"), instance.edges))
+                return fail(QStringLiteral("Invalid library instance record"));
+            loaded.libraryInstances_.append(std::move(instance));
         }
     }
     *this = std::move(loaded);

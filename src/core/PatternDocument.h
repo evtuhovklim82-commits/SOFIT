@@ -21,7 +21,7 @@ enum class Shape { Point, Line, Rectangle, Circle, Curve };
 enum class Layer { Main, Construction, Allowance };
 
 enum class ContourOperation {
-    Cut, Spread, TransferDart, TransferDartToOutlet, MoveOpenDart, Pleat, Gather, Relief, Yoke, SplitDart, MergeDarts
+    Cut, Spread, TransferDart, TransferDartToOutlet, MoveOpenDart, Pleat, Gather, Relief, Yoke, SplitDart, MergeDarts, PleatWithTabs
 };
 
 QString contourOperationKey(ContourOperation operation);
@@ -35,8 +35,26 @@ struct Piece {
     bool showLabel = false;
     std::optional<double> grainAngle;
     QVector<double> notches;
+    std::optional<QPointF> fabricShrinkageOverride;
+    bool bevelAllowanceCorners = false;
     bool operator==(const Piece&) const = default;
 };
+
+enum class PieceSymbol {
+    Cross, Circle, Buttonhole, WarpRepeat, WeftRepeat,
+    NotchStroke, VNotch, UNotch, Arrow, ReverseArrow, GrainArrow, Tip,
+    CenterFront, CenterBack, Scissors
+};
+struct EdgeSymbol {
+    PieceSymbol type = PieceSymbol::Cross;
+    double fraction = 0.5;
+    double sizeMm = 10;
+    double insetMm = 10;
+    bool fromCutOutline = false;
+    bool operator==(const EdgeSymbol&) const = default;
+};
+
+bool validEdgeSymbol(const EdgeSymbol& symbol);
 
 struct Entity {
     Shape shape;
@@ -48,6 +66,9 @@ struct Entity {
     std::optional<double> seamAllowanceMm;
     QVector<double> seamNotches; // Arc-length fractions measured from a.
     QString dxfLayer;
+    std::optional<bool> bevelAtStart;
+    std::optional<bool> bevelAtEnd;
+    QVector<EdgeSymbol> seamSymbols;
 };
 
 // A step addresses its inputs by persistent formula object names.
@@ -65,6 +86,7 @@ struct ModelingStep {
     QString rotationPivot;
     double rotationDegrees = 0;
     QString spreadFormula;
+    QVector<double> outletWeights;
     std::optional<QVector<QString>> followingGuides;
     bool operator==(const ModelingStep&) const = default;
 };
@@ -93,6 +115,15 @@ struct SeamLinkReport {
     QSet<qsizetype> pieces;
 };
 
+struct LibraryInstance {
+    QString sourceName;
+    QString revision;
+    QString sourceStructure;
+    QString installedFormulas;
+    QMap<QString, QString> measurements, parameters, points, edges;
+    bool operator==(const LibraryInstance&) const = default;
+};
+
 class PatternDocument {
 public:
     void insert(qsizetype index, const Entity& entity) { entities_.insert(index, entity); }
@@ -109,9 +140,16 @@ public:
     void setLayerVisible(Layer layer, bool visible) { layerVisibility_[static_cast<int>(layer)] = visible; }
     const ParametricDraft& parametricDraft() const { return draft_; }
     // Create a production contour that shares the source's draft points.
-    bool deriveParametricPiece(qsizetype source, const QString& name, QString* error = nullptr);
+    bool deriveParametricPiece(qsizetype source, const QString& name, QString* error = nullptr,
+                               bool includeConstruction = false);
     bool insertConstruction(const PatternDocument& source, QString* error = nullptr,
-                            const QMap<QString, QString>& measurementBindings = {});
+                            const QMap<QString, QString>& measurementBindings = {},
+                            const QString& libraryName = {});
+    const QVector<LibraryInstance>& libraryInstances() const { return libraryInstances_; }
+    bool updateLibraryConstruction(qsizetype instance, const PatternDocument& source, QString* error = nullptr);
+    bool refreshLibraryDependencies(const QString& projectPath, QString* error = nullptr);
+    bool smoothCurveChain(const QVector<qsizetype>& edges, double startDegrees, double endDegrees,
+                          QString* error = nullptr);
     bool moveDraftPoint(const QString& name, QPointF offset, QString* error = nullptr);
     bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
     bool validateParametricSizes(const ProductionData& production, QString* error = nullptr) const;
@@ -125,7 +163,8 @@ public:
     bool editModelingStep(qsizetype index, const ModelingStep& settings, QString* error = nullptr);
     bool appendContour(qsizetype piece, ContourOperation operation,
                        const QVector<qsizetype>& guides, double spreadMm, QString* error = nullptr, const QString& spreadFormula = {},
-                       const std::optional<QVector<QString>>& followingGuides = {});
+                       const std::optional<QVector<QString>>& followingGuides = {},
+                       const QVector<double>& outletWeights = {});
     // Apply consecutive named guides atomically.
     bool appendDrape(qsizetype piece, const QVector<QString>& guides, const QVector<double>& widths,
                      ContourOperation finish = ContourOperation::Spread, QString* error = nullptr);
@@ -149,6 +188,7 @@ private:
     bool loadPayload(const QJsonObject& root, bool native, QString* error);
     friend PatternDocument gradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*, GradeEdgeNames);
     QVector<SeamLink> seamLinks_;
+    QVector<LibraryInstance> libraryInstances_;
     bool captureContourTopology(ModelingStep& step, QString* error) const;
     QVector<Entity> bindDraftGeometry(QVector<Entity> generated) const;
     static std::optional<double> evaluateModelingWidth(const ParametricDraft& draft,

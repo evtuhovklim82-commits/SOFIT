@@ -2,16 +2,31 @@
 
 SOFIT 4.0 opens older SOFIT projects and writes schema 14 with default production and product options. Product information and piece clearance use schema 15. A configured repeat or customized tech pack uses schema 16. Named seam repeat points, fabric flaws and finished pattern measurements use schema 17. A project contains the editable pattern and its production data. DXF carries exchange geometry and PDF carries print output. GRAFIS MDL support requires a separate analysis of actual MDL files.
 
-## Schemas 14–18
+## Schemas 14–21
 
 The file is a UTF-8 JSON object with these fields.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `format` | string | `SOFIT` |
-| `version` | integer | `14`, `15`, `16`, `17` or `18` |
+| `version` | integer | `14`, `15`, `16`, `17`, `18`, `19`, `20` or `21` |
 | `payload` | string | A serialized UTF-8 JSON project object, escaped as a JSON string |
 | `sha256` | string | Lowercase hexadecimal SHA-256 of the UTF-8 bytes of the decoded payload string |
+
+Envelope 20 is used for beveled allowance corners or independent dart outlet weights.
+A piece may store the boolean `bevelAllowanceCorners`. The default is mitered.
+A split-dart history step may store `outletWeights`, one positive numeric weight
+per outlet, in guide order after the two source legs. Replay normalizes the
+weights to distribute the original angular intake. Earlier split steps without
+weights still use the first-outlet percentage stored in `width`.
+
+Envelope 21 adds optional `bevelAtStart` and `bevelAtEnd` booleans on main-layer piece lines and curves. Each field addresses the corresponding endpoint of the stored edge. Omission inherits the piece setting. At a shared endpoint one explicit setting is sufficient. Conflicting overrides make the allowance invalid.
+
+A main-layer line or curve can store up to 100 `edgeSymbols` records, each an array of symbol type, edge arc-length fraction, symbol size in millimetres, inset in millimetres and a boolean selecting the cutting outline. The direction and position are evaluated on the graded edge. The symbol must fit inside its reference contour.
+
+The `pleat-with-tabs` modeling operation stores a straight fold guide and uses the existing width or width formula. Replay reflects each straight crossing seam into the unfolded insert and generates the three fold lines. It validates the resulting outline and allowance in every size.
+
+The optional `libraryInstances` array stores each tracked source name, source formula revision, source structure signature and installed formula signature. The `measurements`, `parameters`, `points` and `edges` objects map source identifiers to project identifiers. An explicit refresh keeps the project's bound measurements and applies formula changes to a compatible source structure. Changed local formulas, missing bindings and incompatible source structures produce an error before the document is changed.
 
 Validate the digest before parsing the payload. Hash the decoded string verbatim, including any whitespace, without reserializing its JSON object. The digest detects accidental corruption. It does not authenticate the author. Readers limit the outer file to 64 MiB. Saving validates the serialized payload by replaying it through the same reader, then uses an atomic replacement in the destination directory. Direct-write fallback is disabled.
 
@@ -24,6 +39,10 @@ Schema 17 adds optional `production.fabricFlaws` rectangles as arrays `[x, y, wi
 Schema 18 adds two optional records. `production.fabricShrinkagePercent` is `[across width, along length]` in percent, from −99 through 99 per axis. Positive values represent shrinkage and negative values represent expected stretch. Earlier builds that only accepted non-negative values cannot open layouts with negative compensation. The cutting transform applies `100 / (100 − percentage)` to each axis after aligning the grain to the fabric. Fabric dimensions, placements, clearance, defects and repeat lengths refer to unprocessed fabric in millimetres. Changing compensation can require positioning pieces again. The finished draft remains in its original dimensions.
 
 A spread, pleat or gather history step can store a `followingGuides` array of names. Its presence enables transport of the listed guides and earlier fold marks when the moving panel shifts. An empty array can be used on the final slash to preserve its earlier fold marks. Steps without the field retain their previous replay rules. Transport requires the guide to stay on one side of the active cut.
+
+Schema 19 supports split-dart history with more than two outlets. It also adds the optional `pieces[].fabricShrinkageOverride` array `[across width, along length]` using the same signed range and transform as the layout setting. If absent, the piece inherits the layout's values. Explicit `[0, 0]` disables compensation for that piece. The setting applies to all graded sizes and copies of the piece, including the marks and repeat anchor used in a marker.
+
+The version 1 material-order manifest can also carry optional `equipment` (profile name) and `fixedSizePlan` (boolean) fields. The exact equipment limits are recorded separately in the existing fields. When the size plan is fixed, all materials with the same lay number share its layer count.
 
 | Payload record | Contents |
 | --- | --- |
@@ -38,6 +57,10 @@ A spread, pleat or gather history step can store a `followingGuides` array of na
 New sleeve drafts can use `capcontrol(width, rise, target)` in point formulas. The function returns the horizontal distance from the sleeve crown to the Bézier control in millimetres. It keeps the specified cap rise and bicep width and limits the control to 20–95% of the half-width. The draft measurement `sleeve_cap_ease` supplies the target ease per section and can be overridden by size. Existing formulas retain their original meaning. Older SOFIT builds may reject formulas that call this function.
 
 Formula expressions also accept `abs(x)`, `sqrt(x)`, `min(a,b)`, `max(a,b)` and `hypot(dx,dy)`. The last function gives a segment length from its coordinate differences. The square root requires a non-negative argument, and overflow is rejected. These functions work in point and parameter formulas and in modeling widths. Older builds may reject projects using the new functions.
+
+`iflt(a,b,whenLess,otherwise)` selects the third argument when `a < b` and the fourth argument otherwise, including at equality. Both branches must have valid syntax. Only the selected branch resolves references and performs numeric operations. Older builds may reject a project that uses `iflt`.
+
+A saved production size may have a `source` string with up to 512 characters and no tabs or line breaks. Its optional fourth TSV column is headed `Source / edition`. Older three-column tables remain valid. Source labels record attribution. Interpolated sizes start with an empty source.
 
 Projects that record dart redistribution use the modeling operation keys `split-dart` and `merge-darts`. Each source dart is represented by two named construction legs, followed by two outlet guides for a split or one outlet guide for a merge. For `split-dart`, the history field `width` records the first outlet's angular share as a percentage strictly between 0 and 100. Earlier readers that lack these operation keys cannot replay such records.
 
@@ -80,3 +103,5 @@ On import, review DXF units, selected layers, approximations and skipped entitie
 A manually placed drill is stored as a piece-assigned construction point using the existing `dxfLayer` value `SOFIT_DRILL`. Pattern DXF retains the point and its layer. Marker DXF writes the placed center as a point on the same layer. Marker PDF draws a circle of 1 mm diameter at the placed center. The project format version is unchanged.
 
 A `spread`, `pleat` or `gather` modeling step can store `width` as a formula string in millimetres. A JSON number retains its earlier meaning. The formula uses the draft's measurements, parameters and point coordinates and is checked in the base and every measurement-graded size. The ordered list `guides` can contain up to 32 end-to-end named straight or quadratic segments for one cut. Earlier builds may reject projects using either extension.
+
+Linked sleeves and shaped stands can call `capwidth(rise, target)` to solve the horizontal span of a quadratic half-profile with a horizontal crown tangent. Curve chains use `atan2deg(y, x)` to derive tangent angles in degrees from their current geometry.

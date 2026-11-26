@@ -1,6 +1,10 @@
 #include "BodiceDraft.h"
 #include "PieceGeometry.h"
 #include "NeckFinish.h"
+#include "Production.h"
+
+#include <QHash>
+#include <QSet>
 
 #include <algorithm>
 #include <array>
@@ -375,6 +379,144 @@ std::optional<BodiceSeams> measureBodiceSeams(const PatternDocument& document) {
     if (!front || !back || !frontCap || !backCap)
         return std::nullopt;
     return BodiceSeams{*front, *back, *frontCap, *backCap};
+}
+
+bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
+                     const QVector<qsizetype>& back, const LinkedSleeveMeasurements& measurements,
+                     bool reverseFront, bool reverseBack, QString* error) {
+    const auto fail = [&](const QString& message) {
+        if (error)
+            *error = message;
+        return false;
+    };
+    const auto& m = measurements;
+    if (!(m.lengthMm > m.capRiseMm && m.lengthMm <= 3000 && m.capRiseMm >= 1
+          && m.hemWidthMm >= 1 && m.hemWidthMm <= 1000 && m.frontEaseMm >= 0 && m.frontEaseMm <= 200
+          && m.backEaseMm >= 0 && m.backEaseMm <= 200 && m.notchPairs >= 0 && m.notchPairs <= 20))
+        return fail(QStringLiteral("Check the sleeve length, cap height, hem width, ease and notch count."));
+    if (front.size() > 16 || back.size() > 16)
+        return fail(QStringLiteral("Select up to 16 formula edges for each armhole."));
+    auto frontSeam = measureSeamSection(document, front);
+    auto backSeam = measureSeamSection(document, back);
+    if (!frontSeam || !backSeam || std::ranges::any_of(front, [&](qsizetype index) { return back.contains(index); }))
+        return fail(QStringLiteral("Select distinct open formula chains for the front and back armholes."));
+
+    auto draft = document.parametricDraft();
+    QSet<QString> occupied;
+    QHash<QString, DraftEdge> definitions;
+    for (const auto& edge : draft.edges) {
+        definitions.insert(edge.name, edge);
+        occupied.insert(edge.name);
+    }
+    for (const auto& point : draft.points)
+        occupied.insert(point.name);
+    for (const auto& parameter : draft.parameters)
+        occupied.insert(parameter.name);
+    for (const auto& measurement : draft.measurements)
+        occupied.insert(measurement.name);
+
+    QString prefix;
+    int sequence = 0;
+    do {
+        prefix = QStringLiteral("linked_sleeve_%1_").arg(++sequence);
+    } while (std::ranges::any_of(occupied, [&](const auto& name) { return name.startsWith(prefix); }));
+
+    draft.measurements += {{prefix + "length", m.lengthMm}, {prefix + "rise", m.capRiseMm},
+                          {prefix + "hem", m.hemWidthMm}};
+    QVector<SeamLink> links;
+    for (auto [section, reverse, side, ease] : {std::tuple{*frontSeam, reverseFront, QString("front"), m.frontEaseMm},
+                                              {*backSeam, reverseBack, QString("back"), m.backEaseMm}}) {
+        if (reverse) {
+            std::ranges::reverse(section.edges);
+            for (auto& edge : section.edges)
+                edge.reversed = !edge.reversed;
+        }
+        const auto piece = document.entities()[section.edges.front().index].piece;
+        if (piece < 0 || analyzePiece(document, piece).error != ContourError::None
+            || std::ranges::any_of(document.production().rules, [piece](const auto& rule) { return rule.piece == piece; }))
+            return fail(QStringLiteral("Each armhole must belong to a closed piece with measurement-based grading."));
+        SeamLink link;
+        link.reverseFirst = section.edges.front().reversed;
+        link.targetEaseMm = ease;
+        link.toleranceMm = 0.01;
+        link.notchPairs = m.notchPairs;
+        link.second = {prefix + side + "_cap"};
+        QStringList terms;
+        for (const auto& entry : section.edges) {
+            const auto& entity = document.entities()[entry.index];
+            const auto definition = definitions.constFind(entity.draftName);
+            if (definition == definitions.cend())
+                return fail(QStringLiteral("Every armhole edge must have an original formula definition."));
+            const auto& a = definition->start;
+            const auto& b = definition->end;
+            const auto& c = definition->control;
+            const auto term = prefix + side + QStringLiteral("_edge_%1").arg(terms.size() + 1);
+            draft.parameters.append({term, c.isEmpty()
+                ? QStringLiteral("hypot(%2.x - %1.x, %2.y - %1.y)").arg(a, b)
+                : QStringLiteral("quadlen(%1.x, %1.y, %2.x, %2.y, %3.x, %3.y)").arg(a, c, b)});
+            terms.append(term);
+            link.first.append(entity.draftName);
+        }
+        draft.parameters.append({prefix + side + "_width", QStringLiteral("capwidth(%1rise, %2 + %3)")
+            .arg(prefix, terms.join(QStringLiteral(" + ")), QString::number(ease, 'g', 17))});
+        links.append(std::move(link));
+    }
+
+    double right = 0;
+    for (const auto& entity : document.entities())
+        right = std::max({right, entity.a.x(), entity.b.x(), entity.control.x()});
+    const auto frontWidth = prefix + "front_width";
+    const auto backWidth = prefix + "back_width";
+    const auto centre = prefix + "centre";
+    const auto taper = prefix + "taper";
+    const auto length = prefix + "length";
+    const auto rise = prefix + "rise";
+    draft.parameters += {{centre, QString::number(right + 40 + m.hemWidthMm / 2, 'g', 17) + " + " + frontWidth},
+                         {taper, QStringLiteral("(%1 + %2 - positive(%3hem)) / 2").arg(frontWidth, backWidth, prefix)}};
+    const auto point = [&](const QString& name, const QString& x, const QString& y) {
+        draft.points.append({prefix + name, x, y});
+    };
+    point("Crown", centre, "0");
+    point("Front", centre + " - " + frontWidth, rise);
+    point("Back", centre + " + " + backWidth, rise);
+    point("FrontControl", centre + " - " + frontWidth + " / 2", "0");
+    point("BackControl", centre + " + " + backWidth + " / 2", "0");
+    const auto hemY = QStringLiteral("%1 + positive(%2 - %1)").arg(rise, length);
+    point("FrontHem", centre + " - " + frontWidth + " + " + taper, hemY);
+    point("BackHem", centre + " + " + backWidth + " - " + taper, hemY);
+    const QVector<DraftEdge> sleeve{
+        {prefix + "front_cap", prefix + "Crown", prefix + "Front", prefix + "FrontControl"},
+        {prefix + "back_cap", prefix + "Crown", prefix + "Back", prefix + "BackControl"},
+        {prefix + "front_seam", prefix + "Front", prefix + "FrontHem", {}},
+        {prefix + "hem_edge", prefix + "FrontHem", prefix + "BackHem", {}},
+        {prefix + "back_seam", prefix + "BackHem", prefix + "Back", {}}
+    };
+    draft.edges += sleeve;
+    auto candidate = document;
+    const auto piece = candidate.pieces().size();
+    candidate.pieces().append({QStringLiteral("Sleeve · %1").arg(sequence), 10, 2, {}, true, 90});
+    for (const auto& edge : sleeve)
+        candidate.insert(candidate.entities().size(), {edge.control.isEmpty() ? Shape::Line : Shape::Curve,
+            {}, {}, {}, piece, Layer::Main, edge.name});
+    if (!candidate.setParametricDraft(std::move(draft), error))
+        return false;
+    for (const auto& link : links) {
+        if (!candidate.addSeamLink(link, error))
+            return false;
+    }
+
+    QStringList sizes{QString{}};
+    for (const auto& size : candidate.production().sizes)
+        sizes.append(size.name);
+    for (const auto& size : sizes) {
+        const auto report = gradedPattern(candidate, size).inspectSeamLinks();
+        if (report.checks.size() < 2 || !report.checks.back().withinTolerance
+            || !report.checks[report.checks.size() - 2].withinTolerance)
+            return fail(QStringLiteral("The sleeve cap does not match the armholes in %1.")
+                .arg(size.isEmpty() ? QStringLiteral("the base size") : size));
+    }
+    document = std::move(candidate);
+    return true;
 }
 
 }
