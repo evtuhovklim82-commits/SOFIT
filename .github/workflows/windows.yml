@@ -23,7 +23,22 @@ jobs:
         run: cmake --build build --config Release
       - name: Run all SOFIT tests
         id: ctest
-        run: ctest --test-dir build -C Release --output-on-failure --no-tests=error --output-junit ctest-release.xml
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD 'ctest-release.xml'
+          ctest --test-dir build -C Release --output-on-failure --no-tests=error --output-junit $report
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0 -and (Test-Path $report)) {
+            [xml]$junit = Get-Content -LiteralPath $report -Raw
+            foreach ($test in $junit.SelectNodes('//testcase[failure or error]')) {
+              $detail = [string]$test.'system-out'
+              if ($detail.Length -gt 2000) { $detail = $detail.Substring($detail.Length - 2000) }
+              $message = "$($test.name): $($test.failure.message)`n$detail"
+              $message = $message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error title=Windows CTest::$message"
+            }
+          }
+          exit $testExit
       - name: Upload CTest diagnostics after failure
         if: ${{ failure() && steps.ctest.outcome == 'failure' }}
         uses: actions/upload-artifact@v4
@@ -31,7 +46,6 @@ jobs:
           name: SOFIT-Windows-CTest
           path: |
             ctest-release.xml
-            build/ctest-release.xml
             build/Testing/Temporary/LastTest.log
             build/Testing/Temporary/LastTestsFailed.log
           if-no-files-found: error
