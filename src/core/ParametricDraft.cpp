@@ -827,7 +827,7 @@ bool canTrackLibrarySource(const PatternDocument& source) {
 
 bool PatternDocument::insertConstruction(const PatternDocument& source, QString* error,
                                          const QMap<QString, QString>& measurementBindings,
-                                         const QString& libraryName) {
+                                         const QString& libraryName, const QString& sourcePath) {
     if (source.draft_.points.isEmpty()) {
         if (error)
             *error = QStringLiteral("The selected project has no parametric draft.");
@@ -838,6 +838,13 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
                                    || !canTrackLibrarySource(source))) {
         if (error)
             *error = QStringLiteral("A tracked library source requires formula objects without manual grading, seam links or modeling history.");
+        return false;
+    }
+
+    if (!sourcePath.isEmpty() && (libraryName.isEmpty() || !QFileInfo(sourcePath).isAbsolute()
+        || QFileInfo(sourcePath).fileName() != libraryName)) {
+        if (error)
+            *error = QStringLiteral("A tracked library path must identify the selected SOFIT file.");
         return false;
     }
 
@@ -983,6 +990,7 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
     if (!libraryName.isEmpty()) {
         LibraryInstance instance;
         instance.sourceName = libraryName;
+        instance.sourcePath = sourcePath;
         instance.sourceStructure = structureDigest(source);
         for (const auto& measurement : source.draft_.measurements)
             instance.measurements.insert(measurement.name, scalarNames.value(measurement.name));
@@ -1183,20 +1191,23 @@ bool PatternDocument::refreshLibraryDependencies(const QString& projectPath, QSt
     if (root.isEmpty() || !QFileInfo(root).isFile())
         return fail(QStringLiteral("Save the project before refreshing its library dependencies."));
 
-    const QDir directory = QFileInfo(root).absoluteDir();
     QStringList active;
     QHash<QString, PatternDocument> resolved;
     const auto refresh = [&](auto&& visit, const QString& path, PatternDocument& document) -> bool {
         active.append(path);
+        const auto directory = QFileInfo(path).absoluteDir();
         for (qsizetype i = 0; i < document.libraryInstances_.size(); ++i) {
             const auto& instance = document.libraryInstances_[i];
             const auto& name = instance.sourceName;
             if (name.contains(u'/') || name.contains(u'\\') || name.contains(u':')
                 || !name.endsWith(QStringLiteral(".sofit"), Qt::CaseInsensitive))
                 return fail(QStringLiteral("Invalid library filename in '%1': %2").arg(path, name));
-            const QFileInfo file(directory.filePath(name));
+            const bool explicitPath = !instance.sourcePath.isEmpty();
+            const QFileInfo file(explicitPath ? instance.sourcePath : directory.filePath(name));
             const auto dependency = file.canonicalFilePath();
-            if (!file.isFile() || QFileInfo(dependency).absolutePath() != directory.absolutePath())
+            if (!file.isFile() || dependency.isEmpty())
+                return fail(QStringLiteral("Library file '%1' was not found.").arg(file.absoluteFilePath()));
+            if (!explicitPath && QFileInfo(dependency).absolutePath() != directory.absolutePath())
                 return fail(QStringLiteral("Library file '%1' must be in '%2'.").arg(name, directory.absolutePath()));
             if (active.contains(dependency)) {
                 auto chain = active;

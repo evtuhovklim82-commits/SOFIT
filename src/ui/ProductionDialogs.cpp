@@ -1,4 +1,5 @@
 #include "ProductionDialogs.h"
+#include "ChildSizeTables.h"
 #include "PatternPdf.h"
 #include "Production.h"
 #include "PatternDxf.h"
@@ -55,6 +56,7 @@
 #include <algorithm>
 #include <array>
 #include <set>
+#include <span>
 #include <tuple>
 #include <cmath>
 #include <functional>
@@ -386,19 +388,49 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
     });
     QObject::connect(standard, &QPushButton::clicked, &dialog, [=, &dialog] {
         QDialog reference(&dialog);
-        reference.setWindowTitle(QStringLiteral("ГОСТ 31396-2009 — женские фигуры"));
         QFormLayout form(&reference);
-        QLabel source(QStringLiteral("Таблица 3 · 356 фигур в шести полнотных группах.<br>"
-                                    "<a href='https://protect.gost.ru/gost/details/7d9919ad-6695-41c5-93e1-8224eaf3117d'>"
-                                    "Карточка Росстандарта</a> · "
-                                    "<a href='https://ohranatruda.ru/upload/iblock/caf/4293808596.pdf#page=16'>"
-                                    "Таблица 3, с. 14–17</a>"));
+        struct Standard {
+            QString title;
+            QString id;
+            QString description;
+            QString card;
+            QString tableUrl;
+            int groups;
+        };
+        const std::array<Standard, 4> standards{{
+            {QStringLiteral("Женские фигуры"), QStringLiteral("ГОСТ 31396-2009"),
+             QStringLiteral("Таблица 3 · 356 фигур"),
+             QStringLiteral("https://protect.gost.ru/gost/details/7d9919ad-6695-41c5-93e1-8224eaf3117d"),
+             QStringLiteral("https://ohranatruda.ru/upload/iblock/caf/4293808596.pdf#page=16"), 6},
+            {QStringLiteral("Мужские фигуры"), QStringLiteral("ГОСТ 31399-2009"),
+             QStringLiteral("Таблица 3 · 301 фигура"),
+             QStringLiteral("https://protect.gost.ru/gost/details/20dd2bb7-b98c-4f14-b1c4-7786b8a484cb"),
+             QStringLiteral("https://rosgosts.ru/file/gost/61/020/gost_31399-2009.pdf#page=17"), 5},
+            {QStringLiteral("Фигуры девочек"), QStringLiteral("ГОСТ 17916-86"),
+             QStringLiteral("Таблица 1 · 446 фигур · изменения № 1, 2"),
+             QStringLiteral("https://protect.gost.ru/gost/details/06788891-adac-49c3-b3e1-168ab7c4fb06"),
+             QStringLiteral("https://base.garant.ru/5904019/"), 9},
+            {QStringLiteral("Фигуры мальчиков"), QStringLiteral("ГОСТ 17917-86"),
+             QStringLiteral("Таблица 1 · 459 фигур · изменения № 1, 2"),
+             QStringLiteral("https://protect.gost.ru/gost/details/f9c14536-dd81-443d-af49-cffd76c2b032"),
+             QStringLiteral("https://base.garant.ru/5904020/"), 8},
+        }};
+        enum StandardIndex { Women, Men, Girls, Boys };
+        const QStringList childGroups{QStringLiteral("I"), QStringLiteral("II"), QStringLiteral("III"),
+            QStringLiteral("IV"), QStringLiteral("V"), QStringLiteral("VI"), QStringLiteral("VII"),
+            QStringLiteral("VIII"), QStringLiteral("IX")};
+        QComboBox type, group, height, bust;
+        type.setObjectName(QStringLiteral("figureStandard"));
+        for (const auto& item : standards)
+            type.addItem(item.title + QStringLiteral(" · ") + item.id);
+        QLabel source;
         source.setWordWrap(true);
         source.setOpenExternalLinks(true);
+        form.addRow(QStringLiteral("Стандарт"), &type);
         form.addRow(&source);
         // Each row is one printed range of bust values, in 4 cm increments.
         struct FigureRange { int stature, firstBust, lastBust; };
-        const QVector<QVector<FigureRange>> figures{
+        const QVector<QVector<FigureRange>> womenFigures{
             {{152, 84, 112}, {158, 84, 124}, {164, 84, 124}, {170, 84, 124}, {176, 108, 124}},
             {{152, 84, 120}, {158, 80, 124}, {164, 80, 124}, {170, 80, 124}, {176, 84, 124},
              {182, 96, 124}},
@@ -410,17 +442,22 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
              {182, 88, 124}},
             {{158, 96, 124}, {164, 88, 124}, {170, 88, 116}, {176, 88, 112}},
         };
-        QComboBox group, height, bust;
-        for (qsizetype i = 0; i < figures.size(); ++i)
-            group.addItem(QString::number(i), i);
+        const QVector<QVector<FigureRange>> menFigures{
+            {{164, 88, 116}, {170, 88, 116}, {176, 88, 124}, {182, 88, 124}, {188, 92, 124}, {194, 96, 104}},
+            {{158, 84, 100}, {164, 84, 116}, {170, 84, 132}, {176, 84, 132}, {182, 84, 132}, {188, 84, 132}, {194, 92, 112}, {200, 100, 108}},
+            {{158, 88, 112}, {164, 84, 120}, {170, 84, 132}, {176, 84, 132}, {182, 84, 132}, {188, 88, 132}, {194, 88, 116}, {200, 100, 112}},
+            {{158, 92, 112}, {164, 92, 112}, {170, 88, 124}, {176, 88, 124}, {182, 96, 124}, {188, 96, 124}, {194, 100, 108}},
+            {{158, 100, 120}, {164, 88, 120}, {170, 88, 124}, {176, 88, 124}, {182, 96, 124}, {188, 108, 120}},
+        };
+        QMap<int, QMap<int, int>> figures;
         const auto updateBust = [&] {
             const auto previous = bust.currentData();
             bust.clear();
-            if (height.currentIndex() < 0)
+            const auto found = figures.constFind(height.currentData().toInt());
+            if (found == figures.cend())
                 return;
-            const auto& row = figures[group.currentIndex()][height.currentIndex()];
-            for (int cm = row.firstBust; cm <= row.lastBust; cm += 4)
-                bust.addItem(QString::number(cm), cm);
+            for (auto entry = found->cbegin(); entry != found->cend(); ++entry)
+                bust.addItem(QString::number(entry.key()), entry.key());
             if (const auto index = bust.findData(previous); index >= 0)
                 bust.setCurrentIndex(index);
         };
@@ -428,16 +465,48 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
             const auto previous = height.currentData();
             const QSignalBlocker blocker(&height);
             height.clear();
-            for (const auto& row : figures[group.currentIndex()])
-                height.addItem(QString::number(row.stature), row.stature);
+            figures.clear();
+            const int fullness = group.currentIndex();
+            if (type.currentIndex() == Girls || type.currentIndex() == Boys) {
+                const auto rows = type.currentIndex() == Girls
+                    ? std::span<const sofit::ChildSizeRow>(sofit::girlsSizeRows)
+                    : std::span<const sofit::ChildSizeRow>(sofit::boysSizeRows);
+                for (const auto& row : rows) {
+                    if (const int waist = row.waists[fullness]; waist > 0)
+                        figures[row.height].insert(row.bust, waist);
+                }
+            } else {
+                const bool men = type.currentIndex() == Men;
+                const auto& ranges = men ? menFigures : womenFigures;
+                const int offset = men ? -22 + 6 * fullness : -2 + 4 * fullness;
+                for (const auto& row : ranges[fullness]) {
+                    for (int cm = row.firstBust; cm <= row.lastBust; cm += 4)
+                        figures[row.stature].insert(cm, cm + offset);
+                }
+            }
+            for (auto entry = figures.cbegin(); entry != figures.cend(); ++entry)
+                height.addItem(QString::number(entry.key()), entry.key());
             if (const auto index = height.findData(previous); index >= 0)
                 height.setCurrentIndex(index);
             updateBust();
         };
+        const auto updateStandard = [&] {
+            const int index = type.currentIndex();
+            const auto& item = standards[index];
+            reference.setWindowTitle(item.id + QStringLiteral(" — ") + item.title);
+            source.setText(QStringLiteral("%1<br><a href='%2'>Карточка Росстандарта</a> · <a href='%3'>Таблица</a>")
+                               .arg(item.description, item.card, item.tableUrl));
+            const QSignalBlocker blocker(&group);
+            group.clear();
+            for (int i = 0; i < item.groups; ++i)
+                group.addItem(index >= Girls ? childGroups[i] : QString::number(i + (index == Men)));
+            updateHeight();
+        };
+        QObject::connect(&type, &QComboBox::currentIndexChanged, &reference, updateStandard);
         QObject::connect(&group, &QComboBox::currentIndexChanged, &reference, updateHeight);
         QObject::connect(&height, &QComboBox::currentIndexChanged, &reference, updateBust);
-        updateHeight();
-        form.addRow(QStringLiteral("Полнотная группа"), &group);
+        updateStandard();
+        form.addRow(QStringLiteral("Полнотная группа / ряд"), &group);
         form.addRow(QStringLiteral("Рост, см"), &height);
         form.addRow(QStringLiteral("Обхват груди, см"), &bust);
         QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
@@ -448,16 +517,19 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
             return;
         const int statureCm = height.currentData().toInt();
         const int bustCm = bust.currentData().toInt();
-        const int fullness = group.currentIndex();
-        const int hipCm = bustCm - 2 + 4 * fullness;
-        const auto size = QStringLiteral("ГОСТ 31396-2009 %1-%2-%3").arg(statureCm).arg(bustCm).arg(hipCm);
+        const int thirdCm = figures.value(statureCm).value(bustCm);
+        const int index = type.currentIndex();
+        const auto& standardId = standards[index].id;
+        const auto size = QStringLiteral("%1 %2-%3-%4").arg(standardId).arg(statureCm).arg(bustCm).arg(thirdCm);
         const auto row = [&](const QString& measurement, int cm) {
             return QStringLiteral("%1\t%2\t%3").arg(size, measurement).arg(cm * 10);
         };
-        const auto attribution = QStringLiteral("\tГОСТ 31396-2009, таблица 3, полнотная группа %1").arg(fullness);
+        const auto attribution = index < Girls
+            ? QStringLiteral("\t%1, таблица 3, полнотная группа %2").arg(standardId, group.currentText())
+            : QStringLiteral("\t%1, таблица 1, изменения № 1, 2, полнотный ряд %2").arg(standardId, group.currentText());
         appendMeasurements(QStringList{row(QStringLiteral("height"), statureCm) + attribution,
                                        row(QStringLiteral("bust"), bustCm),
-                                       row(QStringLiteral("hip"), hipCm)}.join(u'\n'));
+                                       row(index == Women ? QStringLiteral("hip") : QStringLiteral("waist"), thirdCm)}.join(u'\n'));
     });
     const auto readMeasurementFile = [&dialog](const QString& title, const QString& directory)
         -> std::optional<QString> {

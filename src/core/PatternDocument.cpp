@@ -1,6 +1,7 @@
 #include "PatternDocument.h"
 #include "ContourModeling.h"
 #include "Production.h"
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QCryptographicHash>
@@ -25,6 +26,23 @@ constexpr int pieceShrinkageEnvelopeVersion = 19;
 constexpr int bevelEnvelopeVersion = 20;
 constexpr int projectVersion = 21;
 constexpr qint64 maxProjectBytes = 64 * 1024 * 1024;
+
+QDir projectDirectory(const QString& path) {
+    QFileInfo project(path);
+    // QSaveFile follows symlinks, including a link to a new file.
+    for (int remaining = 127; remaining > 0 && project.isSymLink(); --remaining)
+        project.setFile(project.symLinkTarget());
+    const auto directory = project.absoluteDir();
+    const auto canonical = directory.canonicalPath();
+    return canonical.isEmpty() ? directory : QDir(canonical);
+}
+
+bool validLibraryPath(const QString& path, const QString& name) {
+    return !path.isEmpty() && path.size() <= 4096 && QDir::isRelativePath(path)
+        && !path.contains(u':') && !path.contains(u'\\') && !path.contains(QChar::Null)
+        && QDir::cleanPath(path) == path && QFileInfo(path).fileName() == name
+        && name.endsWith(QStringLiteral(".sofit"), Qt::CaseInsensitive);
+}
 
 QString payloadDigest(const QByteArray& bytes) {
     return QString::fromLatin1(QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex());
@@ -289,6 +307,7 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         }
         root.insert("modelingSources", sources);
     }
+    const auto directory = projectDirectory(path);
     if (!libraryInstances_.isEmpty()) {
         const auto mappedNames = [](const QMap<QString, QString>& map) {
             QJsonObject object;
@@ -298,10 +317,21 @@ bool PatternDocument::save(const QString& path, QString* error) const {
         };
         QJsonArray instances;
         for (const auto& instance : libraryInstances_) {
-            instances.append(QJsonObject{{"sourceName", instance.sourceName}, {"revision", instance.revision},
+            QJsonObject record{{"sourceName", instance.sourceName}, {"revision", instance.revision},
                 {"structure", instance.sourceStructure}, {"formulas", instance.installedFormulas},
                 {"measurements", mappedNames(instance.measurements)}, {"parameters", mappedNames(instance.parameters)},
-                {"points", mappedNames(instance.points)}, {"edges", mappedNames(instance.edges)}});
+                {"points", mappedNames(instance.points)}, {"edges", mappedNames(instance.edges)}};
+            if (!instance.sourcePath.isEmpty()) {
+                const auto relative = directory.relativeFilePath(instance.sourcePath);
+                if (!validLibraryPath(relative, instance.sourceName)) {
+                    if (error)
+                        *error = QStringLiteral("Save this project on the same volume as its library source '%1'.")
+                            .arg(instance.sourceName);
+                    return false;
+                }
+                record.insert("sourcePath", relative);
+            }
+            instances.append(record);
         }
         root.insert("libraryInstances", instances);
     }
@@ -354,7 +384,7 @@ bool PatternDocument::save(const QString& path, QString* error) const {
     }
     // Exercise the same structural validation and modeling replay used by Open.
     PatternDocument validated;
-    if (!validated.loadPayload(QJsonDocument::fromJson(payload).object(), true, error))
+    if (!validated.loadPayload(QJsonDocument::fromJson(payload).object(), true, directory, error))
         return false;
     QSaveFile file(path);
     file.setDirectWriteFallback(false);
@@ -395,6 +425,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto root = json.object();
     if (root.value("format") == QStringLiteral("SOFIT") && root.value("version").toDouble() > projectVersion)
         return fail(QStringLiteral("This project requires a newer version of SOFIT"));
+    const auto directory = projectDirectory(path);
     const auto envelopeVersion = root.value("version").toDouble();
     if (root.value("format") != QStringLiteral("SOFIT")
         || (envelopeVersion != projectVersion && envelopeVersion != bevelEnvelopeVersion
@@ -404,7 +435,7 @@ bool PatternDocument::load(const QString& path, QString* error) {
             && envelopeVersion != repeatEnvelopeVersion
             && envelopeVersion != productEnvelopeVersion
             && envelopeVersion != legacyEnvelopeVersion))
-        return loadPayload(root, false, error);
+        return loadPayload(root, false, directory, error);
 
     const auto payload = root.value("payload").toString().toUtf8();
     if (payload.isEmpty() || root.value("sha256").toString() != payloadDigest(payload))
@@ -412,10 +443,10 @@ bool PatternDocument::load(const QString& path, QString* error) {
     const auto decoded = QJsonDocument::fromJson(payload);
     if (!decoded.isObject())
         return fail(QStringLiteral("Invalid project payload"));
-    return loadPayload(decoded.object(), true, error);
+    return loadPayload(decoded.object(), true, directory, error);
 }
 
-bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString* error) {
+bool PatternDocument::loadPayload(const QJsonObject& root, bool native, const QDir& directory, QString* error) {
     auto fail = [error](const QString& message) {
         if (error) *error = message;
         return false;
@@ -870,6 +901,12 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, QString*
                 || !readBindings(record.value("points"), instance.points) || instance.points.isEmpty()
                 || !readBindings(record.value("edges"), instance.edges))
                 return fail(QStringLiteral("Invalid library instance record"));
+            if (record.contains("sourcePath")) {
+                const auto relative = record.value("sourcePath").toString();
+                if (!validLibraryPath(relative, instance.sourceName))
+                    return fail(QStringLiteral("Invalid relative library path"));
+                instance.sourcePath = QDir::cleanPath(directory.absoluteFilePath(relative));
+            }
             loaded.libraryInstances_.append(std::move(instance));
         }
     }

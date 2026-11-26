@@ -405,6 +405,25 @@ void testContourCutAndSpread() {
     }
     check(curvedEdges == 4, "Retain a curved seam along both sides of each quadratic segment");
 
+    curvedCuts.replace(across, {Shape::Curve, {30, 0}, {50, 80}, {60, 60}, -1, Layer::Construction});
+    const auto twoCurves = cutCrossingGuides(curvedCuts, 0, {curve, across});
+    check(twoCurves.edit.has_value(), qPrintable(twoCurves.error));
+    check(twoCurves.edit->document.pieces().size() == 4, "Cut four panels with two quadratic guides");
+    curvedEdges = 0;
+    for (const auto& edge : twoCurves.edit->document.entities()) {
+        if (edge.shape == Shape::Curve && edge.layer == Layer::Main) {
+            ++curvedEdges;
+            check(QLineF(edge.a, {50, 50}).length() < 1e-6 || QLineF(edge.b, {50, 50}).length() < 1e-6,
+                  "Anchor both quadratic seams to the same crossing");
+        }
+    }
+    check(curvedEdges == 8, "Keep four quadratic seam segments on both sides");
+
+    curvedCuts.replace(across, {Shape::Curve, {0, 45}, {100, 45}, {50, 35}, -1, Layer::Construction});
+    const auto twoCrossings = cutCrossingGuides(curvedCuts, 0, {curve, across});
+    check(twoCrossings.edit.has_value(), qPrintable(twoCrossings.error));
+    check(twoCrossings.edit->document.pieces().size() == 5, "Keep both crossings between the same guides");
+
     auto concave = polygon({{0, 0}, {100, 0}, {100, 100}, {70, 100}, {70, 30},
                             {30, 30}, {30, 100}, {0, 100}});
     const auto outside = guide(concave, {0, 70}, {100, 70});

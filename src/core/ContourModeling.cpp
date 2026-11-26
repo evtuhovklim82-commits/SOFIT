@@ -5,8 +5,12 @@
 #include <QMap>
 #include <QSet>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numbers>
+#include <numeric>
+#include <ranges>
+#include <span>
 #include <utility>
 
 namespace opc {
@@ -157,6 +161,49 @@ QVector<Entity> traceBoundary(QVector<Entity>& edges, QPointF start, QPointF end
         nextPoint.reset();
     }
     return result;
+}
+
+// Find simple roots by partitioning the interval at the derivative's roots.
+QVector<double> crossingRoots(std::span<const double> polynomial) {
+    const auto magnitude = std::ranges::max(polynomial | std::views::transform([](double value) {
+        return std::abs(value);
+    }));
+    while (polynomial.size() > 1 && std::abs(polynomial.back()) <= 1e-14 * magnitude)
+        polynomial = polynomial.first(polynomial.size() - 1);
+    if (polynomial.size() == 1)
+        return {};
+    if (polynomial.size() == 2) {
+        const double t = -polynomial[0] / polynomial[1];
+        return t > 0 && t < 1 ? QVector<double>{t} : QVector<double>{};
+    }
+    std::array<double, 4> derivative{};
+    for (size_t i = 1; i < polynomial.size(); ++i)
+        derivative[i - 1] = i * polynomial[i];
+    const auto evaluate = [&](double t) {
+        double value = 0;
+        for (const auto coefficient : polynomial | std::views::reverse)
+            value = std::fma(value, t, coefficient);
+        return value;
+    };
+    auto bounds = crossingRoots(std::span(derivative).first(polynomial.size() - 1));
+    bounds.prepend(0);
+    bounds.append(1);
+    QVector<double> roots;
+    for (qsizetype i = 1; i < bounds.size(); ++i) {
+        double low = bounds[i - 1], high = bounds[i];
+        const double lowValue = evaluate(low), highValue = evaluate(high);
+        if (lowValue == 0 || highValue == 0 || std::signbit(lowValue) == std::signbit(highValue))
+            continue;
+        for (int iteration = 0; iteration < 52; ++iteration) {
+            const double middle = std::midpoint(low, high);
+            if (std::signbit(evaluate(middle)) == std::signbit(lowValue))
+                low = middle;
+            else
+                high = middle;
+        }
+        roots.append(std::midpoint(low, high));
+    }
+    return roots;
 }
 
 void appendRing(PatternDocument& document, qsizetype piece, const QPolygonF& ring) {
@@ -800,7 +847,6 @@ ContourEditResult cutCrossingGuides(const PatternDocument& document, qsizetype p
     const auto& entities = document.entities();
     QSet<qsizetype> selected;
     QVector<Entity> guides;
-    bool hasCurve = false;
     for (const auto index : guideIndices) {
         if (index < 0 || index >= entities.size() || selected.contains(index))
             return failure("Select distinct construction guides.");
@@ -810,15 +856,22 @@ ContourEditResult cutCrossingGuides(const PatternDocument& document, qsizetype p
             || (guide.piece != -1 && guide.piece != piece)
             || !std::isfinite(length(guide.b - guide.a)) || near(guide.a, guide.b))
             return failure("Select manual construction guides assigned to this piece or unassigned.");
+        auto cutGuide = guide;
         if (guide.shape == Shape::Curve) {
-            if (hasCurve)
-                return failure("Use at most one quadratic guide in a crossing cut.");
-            if (!std::isfinite(length(guide.control - guide.a)))
+            const auto offset = guide.control - guide.a;
+            if (!std::isfinite(length(offset)))
                 return failure("Use a quadratic guide with a finite control point.");
-            hasCurve = true;
+            const auto chord = guide.b - guide.a;
+            const auto unit = chord / length(chord);
+            if (std::abs(cross(offset, unit)) <= tolerance) {
+                const double distance = QPointF::dotProduct(offset, unit);
+                if (distance < -tolerance || distance > length(chord) + tolerance)
+                    return failure("A straight quadratic guide must not double back on itself.");
+                cutGuide.shape = Shape::Line;
+            }
         }
         selected.insert(index);
-        guides.append(guide);
+        guides.append(cutGuide);
     }
     // Divide along straight guides first so the resulting curved seams can terminate on them.
     std::stable_partition(guides.begin(), guides.end(), [](const Entity& guide) { return guide.shape == Shape::Line; });
@@ -848,6 +901,42 @@ ContourEditResult cutCrossingGuides(const PatternDocument& document, qsizetype p
                 if (std::ranges::none_of(breaks, [&](double value) { return near(pointAt(guide, value), point); }))
                     breaks.append(t);
             };
+            if (previous.shape == Shape::Curve) {
+                const auto linear = 2 * (previous.control - previous.a);
+                const auto quadratic = previous.b - previous.a - linear;
+                const double scale = std::max(length(linear), length(quadratic));
+                const auto b = linear / scale;
+                const auto a = quadratic / scale;
+                const double determinant = cross(b, a);
+                // In the (b, a) basis the first curve is (s, s²).
+                const auto guideLinear = 2 * (guide.control - guide.a);
+                const auto guideQuadratic = guide.b - guide.a - guideLinear;
+                const std::array<QPointF, 3> coefficients{
+                    (guide.a - previous.a) / scale, guideLinear / scale, guideQuadratic / scale};
+                std::array<double, 5> polynomial{};
+                for (size_t k = 0; k < coefficients.size(); ++k) {
+                    for (size_t l = 0; l < coefficients.size(); ++l)
+                        polynomial[k + l] += cross(coefficients[k], a) * cross(coefficients[l], a);
+                    polynomial[k] -= determinant * cross(b, coefficients[k]);
+                }
+                const double projectionScale = std::max({
+                    length(coefficients[0]), length(coefficients[1]), length(coefficients[2]), 1.0});
+                if (std::ranges::all_of(polynomial, [&](double coefficient) {
+                    return std::abs(coefficient) <= 1e-14 * projectionScale * projectionScale;
+                }))
+                    return failure("The cut guides must not overlap on the same curve.");
+                for (const auto t : crossingRoots(polynomial)) {
+                    const auto point = pointAt(guide, t);
+                    const auto previousT = contourEdgeParameter(previous, point);
+                    if (!previousT)
+                        continue;
+                    const auto tangent = guideLinear + (2 * t) * guideQuadratic;
+                    const auto previousTangent = linear + (2 * *previousT) * quadratic;
+                    if (std::abs(cross(tangent / length(tangent), previousTangent / length(previousTangent))) > 1e-9)
+                        addCrossing(t, point);
+                }
+                continue;
+            }
             if (guide.shape == Shape::Curve) {
                 const auto c = cross(guide.a - previous.a, unit);
                 const auto b = 2 * cross(guide.control - guide.a, unit);

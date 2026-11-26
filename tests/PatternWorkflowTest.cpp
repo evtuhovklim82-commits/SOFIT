@@ -52,6 +52,7 @@
 #include <QMessageBox>
 #include <QTreeWidget>
 #include <QWizard>
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 
@@ -304,6 +305,41 @@ void testModelingWorkflow() {
     check(tree.topLevelItemCount() == 2, "Undo both dart legs at once");
     action(window, "Redo Draw Dart").trigger();
     check(tree.topLevelItemCount() == 4, "Redo both dart legs at once");
+}
+
+void testCrossingCurvesWorkflow() {
+    MainWindow window;
+    window.show();
+    auto& view = *window.findChild<PatternView*>();
+    auto& tree = *window.findChild<QTreeWidget*>();
+    view.entityDrawn({opc::Shape::Rectangle, {0, 0}, {100, 80}});
+    tree.topLevelItem(0)->setSelected(true);
+    runDialog<QInputDialog>(action(window, "Create Piece from Selection…"), [](QInputDialog& dialog) {
+        dialog.setTextValue("Front");
+        dialog.accept();
+    });
+    view.entityDrawn({opc::Shape::Curve, {0, 35}, {100, 35}, {50, 65}, -1, opc::Layer::Construction});
+    view.entityDrawn({opc::Shape::Curve, {30, 0}, {50, 80}, {60, 60}, -1, opc::Layer::Construction});
+    tree.clearSelection();
+    tree.topLevelItem(1)->setSelected(true);
+    tree.topLevelItem(2)->setSelected(true);
+    action(window, "Cut Along Crossing Guides…").trigger();
+    const auto panelEdges = tree.topLevelItemCount();
+    check(panelEdges > 3, "Cut along two selected quadratic guides");
+    action(window, "Undo Cut Along Crossing Guides").trigger();
+    check(tree.topLevelItemCount() == 3 && tree.topLevelItem(2)->text(3) == "Construction",
+          "Restore both quadratic guides and the original piece");
+    action(window, "Redo Cut Along Crossing Guides").trigger();
+    check(tree.topLevelItemCount() == panelEdges, "Restore the four panels from the crossing cut");
+
+    QTemporaryDir projects;
+    const auto path = projects.filePath("crossing-curves.sofit");
+    chooseFile(action(window, "&Save"), path);
+    opc::PatternDocument loaded;
+    check(loaded.load(path) && loaded.pieces().size() == 4, "Reopen the four panels");
+    check(std::ranges::count_if(loaded.entities(), [](const opc::Entity& edge) {
+        return edge.shape == opc::Shape::Curve && edge.layer == opc::Layer::Main;
+    }) == 8, "Preserve the quadratic seam edges after reopening");
 }
 
 void testContourModelingWorkflow() {
@@ -993,6 +1029,7 @@ int main(int argc, char** argv) {
     testGeometryEditing();
     testModelingWorkflow();
     testContourModelingWorkflow();
+    testCrossingCurvesWorkflow();
     testMarkerModelImport();
     testMaterialLay();
     testPlannedOrder();
@@ -1363,32 +1400,43 @@ int main(int argc, char** argv) {
         click(QStringLiteral("Группа размеров и ростов…"));
         check(measurements->rowCount() == 18 && rules->rowCount() == 8, "Reject the entire incompatible batch");
 
-        QTimer::singleShot(0, [] {
-            auto* reference = qobject_cast<QDialog*>(QApplication::activeModalWidget());
-            check(reference && reference->windowTitle().contains("31396-2009"), "Open the size standard");
-            const auto fields = reference->findChildren<QComboBox*>();
-            check(fields.size() == 3 && fields[0]->count() == 6, "Find all six fullness groups");
-            const QVector<int> expected{46, 65, 76, 75, 61, 33};
-            for (int group = 0; group < fields[0]->count(); ++group) {
-                fields[0]->setCurrentIndex(group);
-                int figures = 0;
-                for (int height = 0; height < fields[1]->count(); ++height) {
-                    fields[1]->setCurrentIndex(height);
-                    figures += fields[2]->count();
+        const auto addStandardFigure = [&](int standard, const QString& code, const QVector<int>& expected,
+                                          const QString& group, const QString& height, const QString& bust,
+                                          const QString& unavailable) {
+            QTimer::singleShot(0, [=] {
+                auto* reference = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+                check(reference, "Open the size standard");
+                auto fields = reference->findChildren<QComboBox*>();
+                auto* type = reference->findChild<QComboBox*>("figureStandard");
+                check(type && fields.removeOne(type) && fields.size() == 3 && type->count() == 4,
+                      "Find the standard and its figure fields");
+                type->setCurrentIndex(standard);
+                check(reference->windowTitle().contains(code) && fields[0]->count() == expected.size(),
+                      "Find the published fullness groups");
+                for (int groupIndex = 0; groupIndex < fields[0]->count(); ++groupIndex) {
+                    fields[0]->setCurrentIndex(groupIndex);
+                    int figures = 0;
+                    for (int heightIndex = 0; heightIndex < fields[1]->count(); ++heightIndex) {
+                        fields[1]->setCurrentIndex(heightIndex);
+                        figures += fields[2]->count();
+                    }
+                    check(figures == expected[groupIndex], "Match the printed fullness group");
                 }
-                check(figures == expected[group], "Match the number of figures in the printed fullness group");
-            }
-            fields[0]->setCurrentIndex(5);
-            fields[1]->setCurrentText("176");
-            check(fields[2]->findText("112") >= 0 && fields[2]->findText("116") < 0,
-                  "Exclude a combination absent from the fifth fullness group");
-            fields[0]->setCurrentIndex(0);
-            fields[1]->setCurrentText("164");
-            fields[2]->setCurrentText("92");
-            reference->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
-        });
-        click(QStringLiteral("Типовая фигура ГОСТ…"));
-        check(measurements->rowCount() == 21 && rules->rowCount() == 8, "Append three standard measurements");
+                fields[0]->setCurrentText(group);
+                fields[1]->setCurrentText(height);
+                check(fields[2]->findText(bust) >= 0 && fields[2]->findText(unavailable) < 0,
+                      "Offer listed combinations and exclude unlisted ones");
+                fields[2]->setCurrentText(bust);
+                reference->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            });
+            click(QStringLiteral("Типовая фигура ГОСТ…"));
+            check(measurements->rowCount() == 21 + 3 * standard && rules->rowCount() == 8,
+                  "Append three measurements from the selected standard");
+        };
+        addStandardFigure(0, "31396-2009", {46, 65, 76, 75, 61, 33}, "0", "164", "92", "128");
+        addStandardFigure(1, "31399-2009", {48, 75, 80, 51, 47}, "2", "200", "108", "112");
+        addStandardFigure(2, "17916-86", {3, 22, 33, 66, 89, 89, 77, 52, 15}, "VI", "86", "48", "52");
+        addStandardFigure(3, "17917-86", {15, 52, 80, 98, 95, 70, 39, 10}, "IV", "86", "48", "52");
 
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
@@ -1425,7 +1473,7 @@ int main(int argc, char** argv) {
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
     action(window, "&Save").trigger();
-    check(loaded.load(pattern) && loaded.production().sizes.size() == 9 && loaded.production().rules.size() == 8
+    check(loaded.load(pattern) && loaded.production().sizes.size() == 12 && loaded.production().rules.size() == 8
           && loaded.production().rules[4].offset == QPointF(30, 3)
           && loaded.production().rules[5].size == "49/173"
           && loaded.production().rules[5].offset == QPointF(50, 10)
@@ -1434,11 +1482,22 @@ int main(int argc, char** argv) {
           && loaded.production().sizes.front().measurements.value(QStringLiteral("Обхват бёдер")) == 980
           && loaded.production().sizes[5].name == "49/173"
           && loaded.production().sizes[7].name == "51/174"
-          && loaded.production().sizes.back().name == QStringLiteral("ГОСТ 31396-2009 164-92-90")
-          && loaded.production().sizes.back().source == QStringLiteral("ГОСТ 31396-2009, таблица 3, полнотная группа 0")
-          && loaded.production().sizes.back().measurements.value("height") == 1640
-          && loaded.production().sizes.back().measurements.value("bust") == 920
-          && loaded.production().sizes.back().measurements.value("hip") == 900
+          && loaded.production().sizes[8].name == QStringLiteral("ГОСТ 31396-2009 164-92-90")
+          && loaded.production().sizes[8].source == QStringLiteral("ГОСТ 31396-2009, таблица 3, полнотная группа 0")
+          && loaded.production().sizes[8].measurements.value("height") == 1640
+          && loaded.production().sizes[8].measurements.value("bust") == 920
+          && loaded.production().sizes[8].measurements.value("hip") == 900
+          && loaded.production().sizes[9].name == QStringLiteral("ГОСТ 31399-2009 200-108-92")
+          && loaded.production().sizes[9].source == QStringLiteral("ГОСТ 31399-2009, таблица 3, полнотная группа 2")
+          && loaded.production().sizes[9].measurements.value("height") == 2000
+          && loaded.production().sizes[9].measurements.value("bust") == 1080
+          && loaded.production().sizes[9].measurements.value("waist") == 920
+          && loaded.production().sizes[10].name == QStringLiteral("ГОСТ 17916-86 86-48-45")
+          && loaded.production().sizes[10].source == QStringLiteral("ГОСТ 17916-86, таблица 1, изменения № 1, 2, полнотный ряд VI")
+          && loaded.production().sizes[10].measurements.value("waist") == 450
+          && loaded.production().sizes[11].name == QStringLiteral("ГОСТ 17917-86 86-48-45")
+          && loaded.production().sizes[11].source == QStringLiteral("ГОСТ 17917-86, таблица 1, изменения № 1, 2, полнотный ряд IV")
+          && loaded.production().sizes[11].measurements.value("waist") == 450
           && loaded.production().sizes[5].measurements.value("Chest") == 1050
           && loaded.production().sizes[5].measurements.value("Sleeve") == 631
           && loaded.production().placements.size() == 1 && loaded.production().placements.front().size == "L"

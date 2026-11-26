@@ -11,6 +11,7 @@
 #include "ProductionData.h"
 #include "ParametricDraft.h"
 
+class QDir;
 class QJsonObject;
 
 namespace opc {
@@ -117,6 +118,7 @@ struct SeamLinkReport {
 
 struct LibraryInstance {
     QString sourceName;
+    QString sourcePath;
     QString revision;
     QString sourceStructure;
     QString installedFormulas;
@@ -144,7 +146,7 @@ public:
                                bool includeConstruction = false);
     bool insertConstruction(const PatternDocument& source, QString* error = nullptr,
                             const QMap<QString, QString>& measurementBindings = {},
-                            const QString& libraryName = {});
+                            const QString& libraryName = {}, const QString& sourcePath = {});
     const QVector<LibraryInstance>& libraryInstances() const { return libraryInstances_; }
     bool updateLibraryConstruction(qsizetype instance, const PatternDocument& source, QString* error = nullptr);
     bool refreshLibraryDependencies(const QString& projectPath, QString* error = nullptr);
@@ -185,7 +187,7 @@ public:
     bool load(const QString& path, QString* error = nullptr);
 
 private:
-    bool loadPayload(const QJsonObject& root, bool native, QString* error);
+    bool loadPayload(const QJsonObject& root, bool native, const QDir& directory, QString* error);
     friend PatternDocument gradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*, GradeEdgeNames);
     QVector<SeamLink> seamLinks_;
     QVector<LibraryInstance> libraryInstances_;

@@ -433,6 +433,7 @@ int main(int argc, char** argv) {
     QFile compensatedDxf(shrinkDxf);
     check(compensatedDxf.open(QIODevice::ReadOnly) && compensatedDxf.readAll().contains("20\n-100\n"),
           "Export the compensated physical length to DXF");
+    compensatedDxf.close();
     auto stretched = shrinkage;
     stretched.fabricShrinkagePercent.setX(-20);
     const auto contracted = fabricPiece(compensated, stretched.placements.front(), false,
@@ -463,10 +464,11 @@ int main(int argc, char** argv) {
     check(compensated.save(compensatedFile) && reopenedMarker.load(compensatedFile)
           && reopenedMarker.pieces()[0].fabricShrinkageOverride == QPointF(0, -20),
           "Round-trip the per-piece compensation in a native project");
-    check(exportFabricDxf(shrinkDxf, reopenedMarker, reopenedMarker.production(), dxfError)
-          && exportFabricPdf(temp.filePath("piece-compensation.pdf"), reopenedMarker,
-                             reopenedMarker.production(), {}, dxfError),
-          qPrintable(dxfError));
+    const bool dxfExported = exportFabricDxf(shrinkDxf, reopenedMarker, reopenedMarker.production(), dxfError);
+    check(dxfExported, qPrintable(dxfError));
+    const bool pdfExported = exportFabricPdf(temp.filePath("piece-compensation.pdf"), reopenedMarker,
+                                            reopenedMarker.production(), {}, dxfError);
+    check(pdfExported, qPrintable(dxfError));
     compensated.pieces()[0].fabricShrinkageOverride = QPointF(100, 0);
     check(!compensated.save(compensatedFile)
           && !cuttingReport(compensated, shrinkage).canExport(shrinkage.fabricWidth),

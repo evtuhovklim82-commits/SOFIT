@@ -649,7 +649,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         const auto title = tr("Cut Along Crossing Guides");
         const auto guides = selectedObjects();
         if (guides.size() < 2 || guides.size() > opc::maxCrossingGuides) {
-            QMessageBox::information(this, title, tr("Select two to eight crossing construction guides, including at most one quadratic curve."));
+            QMessageBox::information(this, title, tr("Select two to eight crossing construction lines or quadratic curves."));
             return;
         }
         const auto piece = choosePiece(title);
@@ -1073,8 +1073,10 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
                     bindings.insert(source.parametricDraft().measurements[i].name, target);
             }
             auto updated = doc_;
-            const auto libraryName = track->isChecked() ? QFileInfo(path).fileName() : QString{};
-            if (!updated.insertConstruction(source, &error, bindings, libraryName)) {
+            const QFileInfo sourceFile(path);
+            const auto libraryName = track->isChecked() ? sourceFile.fileName() : QString{};
+            const auto sourcePath = track->isChecked() ? sourceFile.absoluteFilePath() : QString{};
+            if (!updated.insertConstruction(source, &error, bindings, libraryName, sourcePath)) {
                 QMessageBox::warning(&dialog, title, error);
                 return;
             }

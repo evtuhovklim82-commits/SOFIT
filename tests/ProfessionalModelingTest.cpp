@@ -884,6 +884,36 @@ void checkTrackedConstruction() {
     check(intermediateOnDisk.libraryInstances().front().revision == oldRevision,
           "Refreshing a downstream project does not rewrite source files");
 
+    QDir libraryRoot(directory.path());
+    check(libraryRoot.mkpath("library/leaf") && libraryRoot.mkpath("assembly")
+          && libraryRoot.mkpath("deliverables/current") && libraryRoot.mkpath("archive"),
+          "Create separate directories for the leaf, assembly and project");
+    const auto leafPath = libraryRoot.filePath("library/leaf/source.sofit");
+    const auto assemblyPath = libraryRoot.filePath("assembly/assembly.sofit");
+    const auto outputPath = libraryRoot.filePath("deliverables/current/pattern.sofit");
+    const auto archivedPath = libraryRoot.filePath("archive/pattern.sofit");
+    check(source.save(leafPath, &error), error);
+    PatternDocument assembly, linkedProject, reloaded;
+    check(assembly.insertConstruction(source, &error, {}, "source.sofit", leafPath), error);
+    check(assembly.save(assemblyPath, &error), error);
+    check(linkedProject.insertConstruction(assembly, &error, {}, "assembly.sofit", assemblyPath), error);
+    check(linkedProject.save(outputPath, &error), error);
+    check(reloaded.load(outputPath, &error), error);
+    check(reloaded.save(archivedPath, &error), error);
+    check(reloaded.load(archivedPath, &error), error);
+    check(reloaded.libraryInstances().front().sourcePath == assemblyPath,
+          "Resolve the same source after saving the project at a new path");
+#ifdef Q_OS_UNIX
+    const auto linkPath = libraryRoot.filePath("link.sofit");
+    check(QFile::link(archivedPath, linkPath) && reloaded.save(linkPath, &error)
+          && reloaded.load(archivedPath, &error) && reloaded.libraryInstances().front().sourcePath == assemblyPath,
+          "Resolve the relative source from the target of a project symlink");
+#endif
+    check(revision.save(leafPath, &error), error);
+    check(reloaded.refreshLibraryDependencies(archivedPath, &error), error);
+    check(near(analyzePiece(reloaded, 0).bounds.height(), 75),
+          "Refresh a nested chain spanning three directories");
+
     auto cycle = source;
     check(cycle.insertConstruction(project, &error, {}, "instance.sofit"), error);
     check(cycle.save(panelPath, &error), error);
