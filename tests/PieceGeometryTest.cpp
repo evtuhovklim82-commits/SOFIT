@@ -78,7 +78,18 @@ void testSeamTools() {
     const auto curvedLength = seamLength({Shape::Curve, {0, 0}, {100, 0}, {50, 50}});
     const auto exact = 50 * (std::sqrt(2.0) + std::asinh(1.0));
     check(curvedLength && near(*curvedLength, exact, 0.001), "Quadratic length stays inside the error budget");
-    check(!splitEdge(first, 0.5), "Prevent duplicating automatic marks when splitting an edge");
+    check(!splitEdge(first, 0.5), "Reject a split exactly on an automatic mark");
+    first.seamSymbols = {{PieceSymbol::Cross, 0.2}};
+    first.bevelAtStart = true;
+    first.bevelAtEnd = true;
+    const auto markedSplit = splitEdge(first, 0.4);
+    check(markedSplit && (*markedSplit)[0].seamNotches.isEmpty()
+          && near((*markedSplit)[1].seamNotches.front(), 1.0 / 6)
+          && near((*markedSplit)[0].seamSymbols.front().fraction, 0.5)
+          && (*markedSplit)[0].seamAllowanceMm == 0 && (*markedSplit)[1].seamAllowanceMm == 0
+          && (*markedSplit)[0].bevelAtStart == true && !(*markedSplit)[0].bevelAtEnd
+          && !(*markedSplit)[1].bevelAtStart && (*markedSplit)[1].bevelAtEnd == true,
+          "Preserve manufacturing marks and allowances while splitting a marked edge");
 
     document.production().sizes.append({QStringLiteral("L")});
     document.production().rules.append({QStringLiteral("L"), 0, {50, 0}, {10, 0}});

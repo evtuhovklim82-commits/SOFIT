@@ -37,6 +37,7 @@ struct LinkedSleeveMeasurements {
     double frontEaseMm = 4;
     double backEaseMm = 4;
     int notchPairs = 1;
+    bool twoPiece = false;
 };
 
 bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,

@@ -1,4 +1,5 @@
 #include "Modeling.h"
+#include "PieceGeometry.h"
 
 #include <cmath>
 #include <limits>
@@ -47,7 +48,7 @@ bool freeEndpoint(const PatternDocument& document, qsizetype index, QPointF poin
 }
 
 std::optional<EdgePair> splitEdge(const Entity& edge, double t) {
-    if (!validEdge(edge) || !edge.seamNotches.isEmpty() || !(t > 0 && t < 1))
+    if (!validEdge(edge) || !(t > 0 && t < 1))
         return std::nullopt;
 
     EdgePair result{edge, edge};
@@ -60,6 +61,52 @@ std::optional<EdgePair> splitEdge(const Entity& edge, double t) {
     result[0].b = result[1].a = seam;
     if (!validEdge(result[0]) || !validEdge(result[1]))
         return std::nullopt;
+    const auto leftLength = seamLength(result[0]);
+    const auto rightLength = seamLength(result[1]);
+    if (!leftLength || !rightLength)
+        return std::nullopt;
+    const auto join = *leftLength / (*leftLength + *rightLength);
+    const auto distribute = [&](const EdgeMarks& marks, EdgeMarks& left, EdgeMarks& right) {
+        const auto place = [&](double fraction, auto add) {
+            if (std::abs(fraction - join) <= 1e-9)
+                return false;
+            if (fraction < join)
+                add(left, fraction / join);
+            else
+                add(right, (fraction - join) / (1 - join));
+            return true;
+        };
+        for (const auto fraction : marks.notches)
+            if (!place(fraction, [](EdgeMarks& part, double value) { part.notches.append(value); }))
+                return false;
+        for (auto symbol : marks.symbols) {
+            if (!place(symbol.fraction, [&](EdgeMarks& part, double value) {
+                    symbol.fraction = value;
+                    part.symbols.append(symbol);
+                }))
+                return false;
+        }
+        return true;
+    };
+    EdgeMarks left, right;
+    if (!distribute({edge.seamNotches, edge.seamSymbols}, left, right))
+        return std::nullopt;
+    result[0].seamNotches = std::move(left.notches);
+    result[0].seamSymbols = std::move(left.symbols);
+    result[1].seamNotches = std::move(right.notches);
+    result[1].seamSymbols = std::move(right.symbols);
+    result[0].bevelAtEnd.reset();
+    result[1].bevelAtStart.reset();
+    result[0].gradedMarks.clear();
+    result[1].gradedMarks.clear();
+    for (auto size = edge.gradedMarks.cbegin(); size != edge.gradedMarks.cend(); ++size) {
+        left = {};
+        right = {};
+        if (!distribute(size.value(), left, right))
+            return std::nullopt;
+        result[0].gradedMarks.insert(size.key(), std::move(left));
+        result[1].gradedMarks.insert(size.key(), std::move(right));
+    }
     return result;
 }
 

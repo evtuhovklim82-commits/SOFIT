@@ -309,7 +309,7 @@ std::optional<std::pair<qsizetype, double>> SeamSection::notchAt(double fraction
 }
 
 std::optional<SeamSection> measureSeamSection(const PatternDocument& document,
-                                              const QVector<qsizetype>& indices) {
+                                              const QVector<qsizetype>& indices, bool allowClosed) {
     if (indices.isEmpty() || indices.size() > maxEdges)
         return {};
     const auto& entities = document.entities();
@@ -352,9 +352,16 @@ std::optional<SeamSection> measureSeamSection(const PatternDocument& document,
             ++endCount;
         }
     }
-    if (endCount != 2)
+    section.closed = endCount == 0;
+    if (section.closed && allowClosed)
+        current = 0;
+    else if (endCount != 2)
         return {};
+    QSet<qsizetype> visited;
     while (current != -1 && section.edges.size() < indices.size()) {
+        if (visited.contains(current / 2))
+            return {};
+        visited.insert(current / 2);
         auto edge = unordered[current / 2];
         edge.reversed = current % 2;
         section.edges.append(edge);

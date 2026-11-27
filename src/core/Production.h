@@ -5,6 +5,7 @@
 #include <QLineF>
 #include <QPainterPath>
 #include <QPolygonF>
+#include <functional>
 #include <optional>
 
 namespace opc {
@@ -15,6 +16,8 @@ QVector<QPointF> gradingPoints(const PatternDocument& document, qsizetype piece)
 PatternDocument gradedPattern(const PatternDocument& document, const QString& size,
                               QVector<qsizetype>* sourceIndices = nullptr,
                               GradeEdgeNames edgeNames = GradeEdgeNames::ForSeamLinks);
+PatternDocument uncutGradedPattern(const PatternDocument& document, const QString& size,
+                                  QVector<qsizetype>* sourceIndices, GradeEdgeNames edgeNames);
 // Add an evaluated size as independent, cut-ready pieces without changing either project's grading.
 bool appendMarkerModel(PatternDocument& destination, const PatternDocument& source,
                        const QString& size, const QString& modelName, int kits, QString& error);
@@ -100,6 +103,75 @@ struct KitLay {
 };
 
 QVector<KitLay> planKitLays(const QMap<QString, int>& demand, int maximumLayers, int maximumKitsPerLayer);
+// Exact allocation for up to four sizes and 24 kits. Minimize the number of lays,
+// then total layers. This stage allocates quantities before geometric nesting.
+QVector<KitLay> minimumKitLays(const QMap<QString, int>& demand, int maximumLayers, int maximumKitsPerLayer);
+// Minimize total marker length times layer count across the whole order.
+// The evaluator returns no length for an infeasible marker composition.
+QVector<KitLay> minimumMaterialKitLays(const QMap<QString, int>& demand, int maximumLayers,
+                                     int maximumKitsPerLayer,
+                                     const std::function<std::optional<double>(const QMap<QString, int>&)>& markerLength);
+
+struct CuttingWindow {
+    int startMinute;
+    int endMinute;
+};
+
+struct CuttingMachine {
+    double tableLengthMm;
+    int maximumLayers;
+    double spreadingRateMmPerMinute;
+    QVector<CuttingWindow> availability;
+};
+
+struct FabricRoll {
+    QString material;
+    double availableLengthMm;
+};
+
+struct OrderMarker {
+    QString material;
+    QMap<QString, int> kitsPerLayer;
+    double lengthMm;
+    // Indices of rolls on which nesting has been verified for width and fabric constraints.
+    QVector<qsizetype> compatibleRolls;
+};
+
+struct ScheduledLay {
+    qsizetype marker;
+    qsizetype machine;
+    qsizetype roll;
+    int layers;
+    int startMinute;
+    int endMinute;
+    double rollStartMm;
+    double rollEndMm;
+    double layerLengthMm;
+};
+
+enum class CuttingScheduleStatus { Optimal, Infeasible, InvalidInput, SearchLimit };
+
+struct CuttingSchedule {
+    CuttingScheduleStatus status = CuttingScheduleStatus::InvalidInput;
+    QVector<ScheduledLay> lays;
+};
+
+// Measure a marker on the next portion of a roll with the given layer count.
+using RollMarkerMeasure = std::function<std::optional<double>(qsizetype marker, qsizetype roll,
+                                                              double startMm, int layers)>;
+
+// Cover every material and size exactly, minimizing fabric use then completion time.
+// A lay uses one roll and must fit in one machine availability window.
+CuttingSchedule scheduleCuttingOrder(const QMap<QString, QMap<QString, int>>& demand,
+                                     const QVector<OrderMarker>& markers,
+                                     const QVector<CuttingMachine>& machines,
+                                     const QVector<FabricRoll>& rolls,
+                                     const RollMarkerMeasure& measure = {});
+
+// Index each measured candidate by the bit mask of its indivisible assignments.
+// Missing or infeasible candidates have a non-finite length.
+inline constexpr int maxExactLayAssignments = 7;
+QVector<int> minimumMarkerPartition(const QVector<double>& lengths, double tableLength);
 
 inline constexpr qsizetype maxAutomaticCopies = 200;
 enum class FabricLayoutError { None, InvalidShrinkage, InvalidWidth, InvalidClearance, InvalidRepeat, InvalidFlaws, TooManyCopies, InvalidContour, TooWide, VerificationFailed };

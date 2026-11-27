@@ -13,6 +13,7 @@ add_library(sofit_core STATIC
     src/core/NeckFinish.cpp
     src/core/FittingBlocks.cpp
     src/core/ContourModeling.cpp
+    src/core/SizeCutHistory.cpp
     src/core/EntityPath.cpp
     src/core/Modeling.cpp
     src/core/ModelingHistory.cpp

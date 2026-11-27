@@ -12,6 +12,7 @@
 #include "ParametricDraft.h"
 
 class QDir;
+class QJsonArray;
 class QJsonObject;
 
 namespace opc {
@@ -57,6 +58,12 @@ struct EdgeSymbol {
 
 bool validEdgeSymbol(const EdgeSymbol& symbol);
 
+struct EdgeMarks {
+    QVector<double> notches;
+    QVector<EdgeSymbol> symbols;
+    bool operator==(const EdgeMarks&) const = default;
+};
+
 struct Entity {
     Shape shape;
     QPointF a, b;
@@ -70,6 +77,7 @@ struct Entity {
     std::optional<bool> bevelAtStart;
     std::optional<bool> bevelAtEnd;
     QVector<EdgeSymbol> seamSymbols;
+    QMap<QString, EdgeMarks> gradedMarks;
 };
 
 // A step addresses its inputs by persistent formula object names.
@@ -103,6 +111,23 @@ struct SeamLink {
     bool operator==(const SeamLink&) const = default;
 };
 
+struct PanelSilhouette {
+    double axisFraction;
+    double topScale;
+    double bottomScale;
+    double lengthScale;
+    bool operator==(const PanelSilhouette&) const = default;
+};
+
+struct SizeCutStep {
+    qsizetype piece = -1;
+    QVector<QString> guides;
+    QString countFormula;
+    QMap<QString, qsizetype> panels;
+    QMap<qsizetype, QVector<PanelSilhouette>> silhouettes;
+    bool operator==(const SizeCutStep&) const = default;
+};
+
 struct SeamLinkCheck {
     double firstMm = 0, secondMm = 0;
     bool withinTolerance = false;
@@ -129,7 +154,7 @@ struct LibraryInstance {
 class PatternDocument {
 public:
     void insert(qsizetype index, const Entity& entity) { entities_.insert(index, entity); }
-    void replace(qsizetype index, const Entity& entity) { entities_[index] = entity; }
+    void replace(qsizetype index, Entity entity);
     void remove(qsizetype index) { entities_.removeAt(index); }
     const QVector<Entity>& entities() const { return entities_; }
     QVector<Piece>& pieces() { return pieces_; }
@@ -148,15 +173,27 @@ public:
                             const QMap<QString, QString>& measurementBindings = {},
                             const QString& libraryName = {}, const QString& sourcePath = {});
     const QVector<LibraryInstance>& libraryInstances() const { return libraryInstances_; }
-    bool updateLibraryConstruction(qsizetype instance, const PatternDocument& source, QString* error = nullptr);
-    bool refreshLibraryDependencies(const QString& projectPath, QString* error = nullptr);
+    bool updateLibraryConstruction(qsizetype instance, const PatternDocument& source, QString* error = nullptr,
+                                   const QMap<QString, QString>& replacements = {},
+                                   const QMap<QString, QStringList>& edgeSplits = {},
+                                   const QMap<QString, QStringList>& edgeMerges = {});
+    bool refreshLibraryDependencies(const QString& projectPath, QString* error = nullptr,
+                                    QSet<QString>* sourceFiles = nullptr);
     bool smoothCurveChain(const QVector<qsizetype>& edges, double startDegrees, double endDegrees,
                           QString* error = nullptr);
     bool moveDraftPoint(const QString& name, QPointF offset, QString* error = nullptr);
     bool setParametricDraft(ParametricDraft draft, QString* error = nullptr);
     bool validateParametricSizes(const ProductionData& production, QString* error = nullptr) const;
     std::optional<QVector<Entity>> evaluateSizeDraft(const PatternSize& size) const;
+    std::optional<double> evaluateSizeFormula(const QString& size, const QString& formula,
+                                              QString* error = nullptr) const;
     const QVector<ModelingStep>& modelingHistory() const { return history_; }
+    const QVector<SizeCutStep>& sizeCutHistory() const { return sizeCuts_; }
+    bool appendSizeCut(qsizetype piece, QVector<QString> guides, QString formula, QString* error = nullptr);
+    bool editSizeCut(qsizetype step, QString formula, QString* error = nullptr);
+    bool refreshSizeCutPanels(QString* error = nullptr);
+    bool isSizeCutPiece(qsizetype piece) const;
+    bool appendPanelSilhouette(qsizetype piece, PanelSilhouette silhouette, QString* error = nullptr);
     bool appendSilhouette(qsizetype piece, double axisFraction, double topScale,
                           double bottomScale, QString* error = nullptr, double lengthScale = 1);
     bool appendRotation(const QVector<qsizetype>& selection, qsizetype pivot,
@@ -179,6 +216,7 @@ public:
     bool removeLastModelingStep(QString* error = nullptr);
     const QVector<SeamLink>& seamLinks() const { return seamLinks_; }
     bool addSeamLink(SeamLink link, QString* error = nullptr);
+    bool fitFormulaPieceToSeam(SeamLink link, QString* error = nullptr);
     bool editSeamLink(qsizetype index, SeamLink link, QString* error = nullptr);
     bool removeSeamLink(qsizetype index);
     SeamLinkReport inspectSeamLinks() const;
@@ -187,8 +225,12 @@ public:
     bool load(const QString& path, QString* error = nullptr);
 
 private:
+    static QJsonArray saveSeamLinks(const QVector<SeamLink>& seamLinks);
+    static QJsonArray saveModelingHistory(const QVector<ModelingStep>& history);
+    QString libraryStructureDigest() const;
     bool loadPayload(const QJsonObject& root, bool native, const QDir& directory, QString* error);
     friend PatternDocument gradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*, GradeEdgeNames);
+    friend PatternDocument uncutGradedPattern(const PatternDocument&, const QString&, QVector<qsizetype>*, GradeEdgeNames);
     QVector<SeamLink> seamLinks_;
     QVector<LibraryInstance> libraryInstances_;
     bool captureContourTopology(ModelingStep& step, QString* error) const;
@@ -206,6 +248,7 @@ private:
         Layer layer;
     };
     QVector<ModelingStep> history_;
+    QVector<SizeCutStep> sizeCuts_;
     QVector<SourceBinding> hiddenSources_;
     ProductionData production_;
     ProductInformation productInformation_;

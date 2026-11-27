@@ -8,6 +8,7 @@ on:
     branches: [main]
 jobs:
   windows:
+    # windows-latest uses Visual Studio 2026. Keep the release check on VS 2022.
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -52,8 +53,19 @@ jobs:
       - name: Run GUI workflow at 150% scaling
         shell: pwsh
         env:
+          QT_QPA_PLATFORM: windows
           QT_SCALE_FACTOR: '1.5'
-        run: ctest --test-dir build -C Release -R '^sofit_pattern_workflow$' --output-on-failure --no-tests=error
+        run: |
+          # CTest deliberately selects offscreen for the headless test suite.
+          $test = (Resolve-Path build/Release/sofit_ui_tests.exe).Path
+          $fixtures = (Resolve-Path tests/fixtures).Path
+          $process = Start-Process -FilePath $test -ArgumentList ('"' + $fixtures + '"') `
+            -NoNewWindow -PassThru
+          if (!$process.WaitForExit(120000)) {
+            $process.Kill()
+            throw 'Windows GUI workflow timed out'
+          }
+          exit $process.ExitCode
       - name: Bundle Qt runtime
         shell: pwsh
         run: |

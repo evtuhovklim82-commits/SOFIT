@@ -47,6 +47,7 @@ QTableWidget& addTable(QTabWidget& tabs, const QString& title, const QStringList
     QObject::connect(add, &QPushButton::clicked, table, [table] {
         appendRow(*table, {});
         auto* first = table->item(table->rowCount() - 1, 0);
+        table->setFocus();
         table->setCurrentItem(first);
         table->editItem(first);
     });

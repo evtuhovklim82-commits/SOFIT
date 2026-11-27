@@ -69,7 +69,7 @@ void roundTripAndExport(const PatternDocument& document, const QString& size = {
               && a.a == b.a && a.b == b.b && a.control == b.control
               && a.seamAllowanceMm == b.seamAllowanceMm && a.seamNotches == b.seamNotches
               && a.bevelAtStart == b.bevelAtStart && a.bevelAtEnd == b.bevelAtEnd
-              && a.seamSymbols == b.seamSymbols,
+              && a.seamSymbols == b.seamSymbols && a.gradedMarks == b.gradedMarks,
               "Round trip geometry, construction lines and edge marks");
     }
     const auto drawing = gradedPattern(loaded, size);
@@ -781,6 +781,82 @@ void checkLinkedPocket() {
     roundTripAndExport(pattern, "L");
 }
 
+void checkVariableSizeCutEvaluation() {
+    const ParametricDraft draft{
+        {{"width", 100}}, {},
+        {{"A", "0", "0"}, {"B", "width", "0"}, {"C", "width", "80"}, {"D", "0", "80"},
+         {"E", "0", "40"}, {"F", "width", "40"}, {"G", "width / 2", "0"}, {"H", "width / 2", "80"}},
+        {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}}, {"left", "D", "A", {}},
+         {"horizontal", "E", "F", {}}, {"vertical", "G", "H", {}}}
+    };
+    auto source = formulaPanel(draft, {"horizontal", "vertical"});
+    source.pieces()[0].allowanceMm = 5;
+    source.production().useDraftMeasurements = true;
+    source.production().sizes = {{"XS", {{"width", 80}}}, {"L", {{"width", 140}}}};
+    const QVector<QString> guides{"horizontal", "vertical"};
+    const QString countFormula = "iflt(width, 90, 0, iflt(width, 120, 1, 2))";
+    const auto checkSize = [&](const QString& size, qsizetype count, double area) {
+        auto cut = evaluateSizeCuts(source, 0, guides, countFormula, size);
+        check(cut.edit.has_value(), cut.error);
+        const auto& panels = cut.edit->document;
+        check(panels.pieces().size() == count && cut.edit->removedEntities.isEmpty(),
+              "Evaluate the number of active cuts without changing source object indices");
+        double total = 0;
+        for (qsizetype i = 0; i < count; ++i) {
+            const auto geometry = analyzePiece(panels, i);
+            check(geometry.error == ContourError::None && !geometry.allowanceFailed
+                  && panels.pieces()[i].allowanceMm == 5, "Keep each panel valid with its allowance");
+            total += geometry.bounds.width() * geometry.bounds.height();
+        }
+        check(near(total, area), "Preserve the area of the graded source piece across the cuts");
+        return std::move(cut.edit->document);
+    };
+    checkSize("XS", 1, 6400);
+    checkSize({}, 2, 8000);
+    roundTripAndExport(checkSize("L", 4, 11200));
+    check(!evaluateSizeCuts(source, 0, guides, "1.5", "L").edit
+          && !evaluateSizeCuts(source, 0, guides, "3", "L").edit
+          && !evaluateSizeCuts(source, 0, guides, countFormula, "missing").edit
+          && !evaluateSizeCuts(source, 0, {"horizontal", "missing"}, "0", "XS").edit
+          && source.pieces().size() == 1 && source.modelingHistory().isEmpty(),
+          "Reject invalid counts, sizes and names without changing the source");
+    source.production().sizes[1].measurements["width"] = 110;
+    checkSize("L", 2, 8800);
+    source.production().sizes[1].measurements["width"] = 140;
+
+    QString error;
+    check(source.appendSizeCut(0, guides, countFormula, &error), error);
+    const auto identities = source.sizeCutHistory().front().panels;
+    const auto second = identities.value("root/1.1", -1);
+    check(identities.size() == 4 && second > 0
+          && analyzePiece(gradedPattern(source, "XS"), second).error == ContourError::Empty
+          && analyzePiece(gradedPattern(source, "L"), second).error == ContourError::None,
+          "Use the same saved panel identities and activate them by size");
+    check(source.appendPanelSilhouette(second, {0.5, 1, 1, 1.2}, &error), error);
+    check(near(analyzePiece(gradedPattern(source, {}), second).bounds.height(), 48),
+          "Replay subsequent panel modeling in the base size");
+    QTemporaryDir directory;
+    const auto project = directory.filePath("size-cuts.sofit");
+    PatternDocument reopened;
+    check(source.save(project, &error) && reopened.load(project, &error)
+          && reopened.sizeCutHistory() == source.sizeCutHistory(), error);
+    reopened.production().sizes[1].measurements["width"] = 110;
+    check(reopened.refreshSizeCutPanels(&error) && reopened.sizeCutHistory().front().panels == identities, error);
+    check(near(analyzePiece(gradedPattern(reopened, "L"), second).bounds.height(), 48),
+          "Reuse the common panel and its silhouette after the count changes");
+    PatternDocument marker;
+    check(appendMarkerModel(marker, reopened, "XS", "XS cuts", 1, error)
+          && marker.pieces().size() == 1, error);
+    reopened.production().placements = {FabricPlacement{0, "XS", {}}, FabricPlacement{second, "L", {}}};
+    const auto arranged = arrangeFabric(reopened, reopened.production());
+    check(arranged.error == FabricLayoutError::None, "Arrange active panels from different sizes");
+    reopened.production().placements = arranged.placements;
+    check(!reopened.editSizeCut(0, "0", &error) && reopened.sizeCutHistory().front().countFormula == countFormula,
+          "Reject a formula that would strand a saved layout placement");
+    check(exportFabricDxf(directory.filePath("layout.dxf"), reopened, reopened.production(), error)
+          && exportFabricPdf(directory.filePath("layout.pdf"), reopened, reopened.production(), {}, error), error);
+}
+
 void checkSmoothCurveChain() {
     const ParametricDraft draft{
         {{"width", 100}}, {},
@@ -800,6 +876,16 @@ void checkSmoothCurveChain() {
         pattern.replace(index, edge);
     }
     QString error;
+    auto mixed = pattern;
+    const auto side = namedEdge(mixed, "left");
+    check(mixed.smoothCurveChain({side, selection.front()}, 0, 0, &error), error);
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto graded = gradedPattern(mixed, size, nullptr, GradeEdgeNames::Preserve);
+        const auto& line = graded.entities()[namedEdge(graded, "left")];
+        const auto& arc = graded.entities()[namedEdge(graded, "left_cap")];
+        check(line.shape == Shape::Line && std::abs(arc.control.x() - line.b.x()) < 1e-6
+              && arc.control.y() < line.b.y(), "Use the straight seam direction in the graded mixed chain");
+    }
     check(!pattern.smoothCurveChain(selection, 150, 50, &error) && pattern.parametricDraft() == draft,
           "Reject incompatible endpoint directions without editing the curve chain");
     check(pattern.smoothCurveChain(selection, -50, 50, &error), error);
@@ -813,6 +899,43 @@ void checkSmoothCurveChain() {
             check(std::abs(previous.x() * next.y() - previous.y() * next.x()) < 1e-6
                   && QPointF::dotProduct(previous, next) > 0,
                   "Share the tangent direction at both junctions after grading");
+        }
+    }
+    roundTripAndExport(pattern, "L");
+}
+
+void checkClosedCurveChain() {
+    const ParametricDraft draft{
+        {{"width", 100}}, {},
+        {{"A", "width / 2", "0"}, {"B", "width", "50"},
+         {"C", "width / 2", "100"}, {"D", "0", "50"},
+         {"U", "width * 0.9", "10"}, {"V", "width * 0.9", "90"},
+         {"W", "width * 0.1", "90"}, {"X", "width * 0.1", "10"}},
+        {{"upper_right", "A", "B", "U"}, {"lower_right", "B", "C", "V"},
+         {"lower_left", "C", "D", "W"}, {"upper_left", "D", "A", "X"}}
+    };
+    auto pattern = formulaPanel(draft, {});
+    pattern.production().sizes.append({"L", {{"width", 135}}});
+    QVector<qsizetype> selection;
+    for (const auto& definition : draft.edges) {
+        const auto index = namedEdge(pattern, definition.name);
+        auto edge = pattern.entities()[index];
+        edge.piece = 0;
+        pattern.replace(index, edge);
+        selection.append(index);
+    }
+    check(!measureSeamSection(pattern, selection), "Seam matching still requires an open section");
+    QString error;
+    check(pattern.smoothCurveChain(selection, 0, 0, &error), error);
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto graded = gradedPattern(pattern, size, nullptr, GradeEdgeNames::Preserve);
+        for (qsizetype i = 0; i < selection.size(); ++i) {
+            const auto& incoming = graded.entities()[selection[i]];
+            const auto& outgoing = graded.entities()[selection[(i + 1) % selection.size()]];
+            const auto a = incoming.b - incoming.control;
+            const auto b = outgoing.control - outgoing.a;
+            check(QLineF(incoming.b, outgoing.a).length() < 1e-6 && std::abs(a.x() * b.y() - a.y() * b.x()) < 1e-6
+                  && QPointF::dotProduct(a, b) > 0, "Share a tangent at every joint of the graded loop");
         }
     }
     roundTripAndExport(pattern, "L");
@@ -857,6 +980,380 @@ void checkTrackedConstruction() {
               "Replay the installed and dependent contours through the project size table");
     }
     roundTripAndExport(reopened, "L");
+
+    auto auxiliaryDraft = draft;
+    auxiliaryDraft.parameters.append(DraftParameter{"offset", "width / 8"});
+    auxiliaryDraft.points.append(DraftPoint{"spare", "offset", "20"});
+    auxiliaryDraft.edges.append(DraftEdge{"spare_axis", "A", "spare", {}});
+    auto auxiliarySource = formulaPanel(auxiliaryDraft, {"spare_axis"});
+    check(auxiliarySource.appendSilhouette(0, 0.5, 1, 1, &error, 1.25), error);
+    PatternDocument migration;
+    check(migration.setParametricDraft(targetDraft, &error), error);
+    migration.production().sizes.append({"L", {{"chest", 160}}});
+    check(migration.insertConstruction(auxiliarySource, &error, {{"width", "chest"}}, "migration.sofit"), error);
+    const auto topId = migration.libraryInstances().front().edges.value("top");
+    check(migration.deriveParametricPiece(0, "Downstream", &error), error);
+
+    auto renamedDraft = draft;
+    renamedDraft.edges[0].name = "upper";
+    auto renamed = formulaPanel(renamedDraft, {});
+    check(renamed.appendSilhouette(0, 0.5, 1, 1, &error, 1.25), error);
+    auto dependent = migration;
+    auto dependsOnRemoved = dependent.parametricDraft();
+    dependsOnRemoved.points.append(DraftPoint{"local_anchor", "spare.x", "spare.y"});
+    check(dependent.setParametricDraft(dependsOnRemoved, &error), error);
+    check(!dependent.updateLibraryConstruction(0, renamed, &error)
+          && dependent.parametricDraft() == dependsOnRemoved,
+          "Reject deletion when a local point still relies on the removed object");
+    check(dependent.updateLibraryConstruction(0, renamed, &error, {{"spare", "A"}}), error);
+    const auto& anchor = dependent.entities()[namedEdge(dependent, "local_anchor")];
+    check(anchor.a == QPointF{} && !dependent.libraryInstances().front().points.contains("spare"),
+          "Redirect a receiving formula to a surviving point before removing the old dependency");
+    check(migration.updateLibraryConstruction(0, renamed, &error), error);
+    check(migration.libraryInstances().front().edges.value("upper") == topId
+          && !migration.libraryInstances().front().edges.contains("spare_axis")
+          && !migration.libraryInstances().front().points.contains("spare")
+          && !migration.libraryInstances().front().parameters.contains("offset")
+          && migration.parametricDraft().measurements.front().mm == 120
+          && analyzePiece(gradedPattern(migration, "L"), 1).error == ContourError::None,
+          "Keep a renamed outline ID, stage and measurement while deleting unused auxiliaries");
+
+    auto replacedDraft = renamedDraft;
+    replacedDraft.edges[0].name = "replacement";
+    replacedDraft.points[1].name = "new_corner";
+    replacedDraft.points[1].x = "width * 0.98";
+    replacedDraft.edges[0].end = "new_corner";
+    replacedDraft.edges[1].start = "new_corner";
+    auto replacement = formulaPanel(replacedDraft, {});
+    check(replacement.appendSilhouette(0, 0.5, 1, 1, &error, 1.25), error);
+    check(migration.updateLibraryConstruction(0, replacement, &error,
+          {{"upper", "replacement"}, {"B", "new_corner"}}), error);
+    check(migration.libraryInstances().front().edges.value("replacement") == topId
+          && migration.libraryInstances().front().points.value("new_corner") == "B",
+          "Keep receiving identifiers for a declared non-equivalent replacement");
+    roundTripAndExport(migration, "L");
+
+    auto modeledSource = source;
+    check(modeledSource.appendSilhouette(0, 0.5, 1, 1, &error, 1.25), error);
+    auto modeledRevision = revision;
+    check(modeledRevision.appendSilhouette(0, 0.5, 1, 1, &error, 1.25), error);
+    PatternDocument modeledInstance;
+    check(modeledInstance.insertConstruction(modeledSource, &error, {}, "modeled.sofit"), error);
+    modeledInstance.production().useDraftMeasurements = true;
+    modeledInstance.production().sizes.append({"L", {{"width", 120}}});
+    const auto modeledPath = directory.filePath("modeled-instance.sofit");
+    check(modeledInstance.save(modeledPath, &error) && modeledInstance.load(modeledPath, &error), error);
+    check(modeledInstance.updateLibraryConstruction(0, modeledRevision, &error), error);
+    check(near(analyzePiece(modeledInstance, 0).bounds.height(), 93.75)
+          && near(analyzePiece(gradedPattern(modeledInstance, "L"), 0).bounds.height(), 112.5),
+          "Apply changed formulas and replay the linked construction's existing modeling history");
+    auto changedOperation = revision;
+    check(changedOperation.appendSilhouette(0, 0.5, 1, 1, &error, 1.5), error);
+    const auto updatedFormulas = modeledInstance.parametricDraft();
+    check(!modeledInstance.updateLibraryConstruction(0, changedOperation, &error)
+          && modeledInstance.parametricDraft() == updatedFormulas,
+          "Reject changed source operations without applying partial updates");
+
+    auto localDraft = modeledInstance.parametricDraft();
+    localDraft.parameters.append(DraftParameter{"height_factor", "2"});
+    localDraft.points.append({"reference", "10", "10"});
+    check(modeledInstance.setParametricDraft(localDraft, &error), error);
+    auto extendedDraft = modeledRevision.parametricDraft();
+    extendedDraft.parameters.append(DraftParameter{"height_factor", "0.8"});
+    extendedDraft.parameters.front().formula = "width * height_factor";
+    extendedDraft.points.append({"reference", "width / 2", "height"});
+    check(modeledRevision.setParametricDraft(extendedDraft, &error), error);
+    check(modeledInstance.updateLibraryConstruction(0, modeledRevision, &error), error);
+    const auto& mapped = modeledInstance.libraryInstances().front();
+    check(mapped.parameters.value("height_factor") == "height_factor_2"
+          && mapped.points.value("reference") == "reference_2"
+          && near(analyzePiece(modeledInstance, 0).bounds.height(), 100)
+          && near(analyzePiece(gradedPattern(modeledInstance, "L"), 0).bounds.height(), 120),
+          "Synchronize additive source structure, preserving collisions and procedural grading");
+    check(modeledInstance.save(modeledPath, &error) && modeledInstance.load(modeledPath, &error)
+          && modeledInstance.updateLibraryConstruction(0, modeledRevision, &error), error);
+    check(std::ranges::count(modeledInstance.parametricDraft().points, QStringLiteral("reference_2"), &DraftPoint::name) == 1,
+          "Persist bindings and avoid duplicate points on subsequent synchronization");
+
+    auto revisedConnections = modeledRevision.parametricDraft();
+    revisedConnections.points.append({"new_corner", "width * 0.9", "0"});
+    revisedConnections.edges[0].end = "new_corner";
+    revisedConnections.edges[1].start = "new_corner";
+    revisedConnections.edges.append(DraftEdge{"construction_axis", "A", "new_corner", {}});
+    check(modeledRevision.setParametricDraft(revisedConnections, &error), error);
+    const auto axisIndex = namedEdge(modeledRevision, "construction_axis");
+    auto newGuide = modeledRevision.entities()[axisIndex];
+    newGuide.layer = Layer::Construction;
+    modeledRevision.replace(axisIndex, newGuide);
+    check(modeledInstance.updateLibraryConstruction(0, modeledRevision, &error), error);
+    const auto& rewired = modeledInstance.libraryInstances().front();
+    const auto corner = rewired.points.value("new_corner");
+    const auto& receivingEdges = modeledInstance.parametricDraft().edges;
+    check(!corner.isEmpty()
+          && std::ranges::find(receivingEdges, rewired.edges.value("top"), &DraftEdge::name)->end == corner
+          && std::ranges::find(receivingEdges, rewired.edges.value("right"), &DraftEdge::name)->start == corner
+          && modeledInstance.entities()[namedEdge(modeledInstance, rewired.edges.value("construction_axis"))].layer
+             == Layer::Construction
+          && analyzePiece(gradedPattern(modeledInstance, "L"), 0).error == ContourError::None,
+          "Reconnect retained outline edges to a new source vertex and replay the graded procedure");
+    check(modeledInstance.save(modeledPath, &error) && modeledInstance.load(modeledPath, &error), error);
+
+    auto cutDraft = draft;
+    cutDraft.points += {{"E", "width / 2", "0"}, {"F", "width / 2", "height"}};
+    cutDraft.edges.append({"cut_axis", "E", "F", {}});
+    auto cutSource = formulaPanel(cutDraft, {"cut_axis"});
+    check(cutSource.appendContour(0, ContourOperation::Cut, {namedEdge(cutSource, "cut_axis")}, 0, &error), error);
+    PatternDocument cutInstance;
+    check(cutInstance.insertConstruction(cutSource, &error, {}, "split-model.sofit"), error);
+    cutInstance.production().useDraftMeasurements = true;
+    cutInstance.production().sizes.append({"L", {{"width", 140}}});
+    const auto cutSeam = namedEdge(cutInstance, "@1:seam-A");
+    auto finished = cutInstance.entities()[cutSeam];
+    finished.dxfLayer = "SEAM_JOIN";
+    finished.seamNotches = {0.25};
+    cutInstance.replace(cutSeam, finished);
+    cutDraft.parameters[0].formula = "width * 0.65";
+    cutDraft.edges[0].name = "upper";
+    auto cutRevision = formulaPanel(cutDraft, {"cut_axis"});
+    check(cutRevision.appendContour(0, ContourOperation::Cut, {namedEdge(cutRevision, "cut_axis")}, 0, &error), error);
+    check(cutInstance.updateLibraryConstruction(0, cutRevision, &error), error);
+    const auto compareCut = [&](const PatternDocument& pattern) {
+        const auto grade = gradedPattern(pattern, "L", nullptr, GradeEdgeNames::Preserve);
+        const auto& seam = grade.entities()[namedEdge(grade, "@1:seam-A")];
+        check(seam.dxfLayer == "SEAM_JOIN" && seam.seamNotches == QVector<double>{0.25}
+              && near(QLineF(seam.a, seam.b).length(), 91),
+              "Keep the manufactured edge ID, notch and DXF layer after a hidden source edge is renamed");
+    };
+    compareCut(cutInstance);
+    check(cutInstance.save(modeledPath, &error) && cutInstance.load(modeledPath, &error), error);
+    compareCut(cutInstance);
+
+    auto brokenSource = revision;
+    auto brokenDraft = brokenSource.parametricDraft();
+    brokenDraft.points.append({"new_corner", "width * 0.9", "0"});
+    brokenDraft.edges[0].end = "new_corner";
+    check(brokenSource.setParametricDraft(brokenDraft, &error), error);
+    const auto receivingDraft = reopened.parametricDraft();
+    check(!reopened.updateLibraryConstruction(0, brokenSource, &error) && reopened.parametricDraft() == receivingDraft,
+          "Reject a source connection change that opens a receiving contour");
+
+    auto sewingSource = source;
+    auto sewingRevision = revision;
+    const SeamLink seam{{"right"}, {"left"}, false, true, 0, 0.1, 1};
+    for (auto* sewing : {&sewingSource, &sewingRevision}) {
+        check(sewing->addSeamLink(seam, &error), error);
+        sewing->production().sizes.append(PatternSize{"M", {}});
+        sewing->production().rules.append({"M", 0, {0, 0}, {-2, 0}});
+    }
+    PatternDocument sewingInstance;
+    check(sewingInstance.insertConstruction(sewingSource, &error, {}, "sewing.sofit"), error);
+    check(sewingInstance.updateLibraryConstruction(0, sewingRevision, &error), error);
+    check(sewingInstance.seamLinks().size() == 1 && sewingInstance.production().rules.size() == 1
+          && near(analyzePiece(gradedPattern(sewingInstance, "M"), 0).bounds.left(), -2),
+          "Keep existing seam links and manual grading while applying a source formula revision");
+    auto splitInstance = sewingInstance;
+    const auto rightIndex = namedEdge(splitInstance, "right");
+    auto rightWithMarks = splitInstance.entities()[rightIndex];
+    rightWithMarks.seamAllowanceMm = 4;
+    rightWithMarks.seamNotches = {0.25, 0.75};
+    rightWithMarks.seamSymbols = {{PieceSymbol::Cross, 0.75, 3, 6, false}};
+    splitInstance.replace(rightIndex, rightWithMarks);
+    auto splitDraft = revisionDraft;
+    splitDraft.points.append(DraftPoint{"middle_right", "width", "height / 3"});
+    splitDraft.edges[1] = {"right_head", "B", "middle_right", {}};
+    splitDraft.edges.append(DraftEdge{"right_tail", "middle_right", "C", {}});
+    auto splitSource = formulaPanel(splitDraft, {});
+    auto splitLink = seam;
+    splitLink.first = {"right_head", "right_tail"};
+    splitSource.production() = sewingSource.production();
+    check(splitSource.addSeamLink(splitLink, &error), error);
+    const auto beforeSplit = splitInstance.parametricDraft();
+    check(!splitInstance.updateLibraryConstruction(0, splitSource, &error, {},
+          {{"right", {"right_tail", "right_head"}}}) && splitInstance.parametricDraft() == beforeSplit,
+          "Reject a disconnected split chain atomically");
+    check(splitInstance.updateLibraryConstruction(0, splitSource, &error, {},
+          {{"right", {"right_head", "right_tail"}}}), error);
+    const auto tailId = splitInstance.libraryInstances().front().edges.value("right_tail");
+    const auto& head = splitInstance.entities()[namedEdge(splitInstance, "right")];
+    const auto& tail = splitInstance.entities()[namedEdge(splitInstance, tailId)];
+    check(splitInstance.libraryInstances().front().edges.value("right_head") == "right"
+          && splitInstance.seamLinks().front().first == QVector<QString>{"right", tailId}
+          && head.seamAllowanceMm == 4 && tail.seamAllowanceMm == 4
+          && head.seamNotches.size() == 1 && near(head.seamNotches.front(), 0.75)
+          && tail.seamNotches.size() == 1 && near(tail.seamNotches.front(), 0.625)
+          && tail.seamSymbols.size() == 1 && near(tail.seamSymbols.front().fraction, 0.625),
+          "Split the linked edge while preserving its ID, seam, allowance and manufacturing marks");
+    roundTripAndExport(splitInstance, "M");
+    auto linkedOutline = source;
+    const SeamLink linkedCorner{{"right", "bottom"}, {"left", "top"}, false, false, 0, 0.1, 0};
+    check(linkedOutline.addSeamLink(linkedCorner, &error), error);
+    PatternDocument chainBatch;
+    check(chainBatch.insertConstruction(linkedOutline, &error, {}, "chains.sofit"), error);
+    chainBatch.production().sizes = {{"L", {{"width", 120}}}};
+    FabricPlacement registration{0, "L", {}};
+    registration.repeatEdge = "bottom";
+    registration.repeatParameter = 0.8;
+    chainBatch.production().placements.append(registration);
+    const auto bottomIndex = namedEdge(chainBatch, "bottom");
+    auto bottomWithMarks = chainBatch.entities()[bottomIndex];
+    bottomWithMarks.seamNotches = {0.7};
+    bottomWithMarks.seamSymbols = {{PieceSymbol::Cross, 0.7, 3, 6, false}};
+    chainBatch.replace(bottomIndex, bottomWithMarks);
+    auto batchDraft = draft;
+    batchDraft.points.append(DraftPoint{"right_joint", "width", "height / 3"});
+    batchDraft.points.append(DraftPoint{"bottom_joint", "iflt(width, 110, width / 4, width / 3)", "height"});
+    batchDraft.edges[1] = {"right_a", "B", "right_joint", {}};
+    batchDraft.edges[2] = {"bottom_a", "C", "bottom_joint", {}};
+    batchDraft.edges.append(DraftEdge{"right_b", "right_joint", "C", {}});
+    batchDraft.edges.append(DraftEdge{"bottom_b", "bottom_joint", "D", {}});
+    auto batchRevision = formulaPanel(batchDraft, {});
+    auto newCorner = linkedCorner;
+    newCorner.first = {"right_a", "right_b", "bottom_a", "bottom_b"};
+    check(batchRevision.addSeamLink(newCorner, &error), error);
+    const auto oldBatch = chainBatch.parametricDraft();
+    check(!chainBatch.updateLibraryConstruction(0, batchRevision, &error, {},
+          {{"right", {"right_a", "right_b"}}, {"bottom", {"bottom_b", "bottom_a"}}})
+          && chainBatch.parametricDraft() == oldBatch, "Rollback both replacements when one chain is invalid");
+    check(chainBatch.updateLibraryConstruction(0, batchRevision, &error, {},
+          {{"right", {"right_a", "right_b"}}, {"bottom", {"bottom_a", "bottom_b"}}}), error);
+    const auto& migratedIds = chainBatch.libraryInstances().front().edges;
+    check(chainBatch.seamLinks().front().first == QVector<QString>{"right", migratedIds.value("right_b"), "bottom", migratedIds.value("bottom_b")}
+          && chainBatch.production().placements.front().repeatEdge == migratedIds.value("bottom_b")
+          && near(chainBatch.production().placements.front().repeatParameter, 0.4),
+          "Migrate adjacent chains in one seam and position the repeat from the selected size");
+    const auto markedTail = migratedIds.value("bottom_b");
+    const auto checkGradedMarks = [&](const PatternDocument& project) {
+        const auto graded = gradedPattern(project, "L", nullptr, GradeEdgeNames::Preserve);
+        const auto& baseEdge = project.entities()[namedEdge(project, "bottom")];
+        const auto& gradedHead = graded.entities()[namedEdge(graded, "bottom")];
+        const auto& gradedTail = graded.entities()[namedEdge(graded, markedTail)];
+        check(baseEdge.seamNotches.size() == 1 && near(baseEdge.seamNotches.front(), 0.7 / 0.75)
+              && gradedHead.seamNotches.isEmpty() && gradedHead.seamSymbols.isEmpty()
+              && gradedTail.seamNotches.size() == 1 && near(gradedTail.seamNotches.front(), 0.1)
+              && gradedTail.seamSymbols.size() == 1 && near(gradedTail.seamSymbols.front().fraction, 0.1),
+              "Move marks across a join that crosses their position in size L");
+    };
+    checkGradedMarks(chainBatch);
+    QTemporaryDir marksDir;
+    const auto marksFile = marksDir.filePath("variable-join.sofit");
+    check(marksDir.isValid() && chainBatch.save(marksFile, &error), error);
+    PatternDocument reopenedMarks;
+    check(reopenedMarks.load(marksFile, &error), error);
+    checkGradedMarks(reopenedMarks);
+    roundTripAndExport(chainBatch, "L");
+    check(chainBatch.updateLibraryConstruction(0, linkedOutline, &error, {}, {},
+          {{"right", {"right_a", "right_b"}}, {"bottom", {"bottom_a", "bottom_b"}}}), error);
+    check(chainBatch.seamLinks().front() == linkedCorner
+          && chainBatch.production().placements.front().repeatEdge == "bottom"
+          && near(chainBatch.production().placements.front().repeatParameter, 0.8),
+          "Merge adjacent chains and round-trip a size-dependent repeat position");
+    const auto mergedGrade = gradedPattern(chainBatch, "L", nullptr, GradeEdgeNames::Preserve);
+    const auto& mergedBottom = mergedGrade.entities()[namedEdge(mergedGrade, "bottom")];
+    check(mergedBottom.seamNotches.size() == 1 && near(mergedBottom.seamNotches.front(), 0.7)
+          && mergedBottom.seamSymbols.size() == 1 && near(mergedBottom.seamSymbols.front().fraction, 0.7),
+          "Merge marks from their size-specific segment back to the original position");
+    auto curvedDraft = revisionDraft;
+    curvedDraft.points.append(DraftPoint{"control", "width + 16", "height / 2"});
+    curvedDraft.edges[1].control = "control";
+    const auto curvedPanel = [](const ParametricDraft& formulas) {
+        auto panel = formulaPanel(formulas, {});
+        for (qsizetype i = 0; i < panel.entities().size(); ++i) {
+            auto edge = panel.entities()[i];
+            if (edge.shape == Shape::Curve) {
+                edge.piece = 0;
+                panel.replace(i, edge);
+            }
+        }
+        return panel;
+    };
+    const auto curvedSource = curvedPanel(curvedDraft);
+    PatternDocument curvedInstance;
+    check(curvedInstance.insertConstruction(curvedSource, &error, {}, "curved.sofit"), error);
+    curvedInstance.production().sizes = {{"L", {{"width", 120}, {"height", 125}}}};
+    const ParametricDraft accessoryDraft{
+        {}, {},
+        {{"PocketA", "400", "0"}, {"PocketB", "470", "0"}, {"PocketC", "455", "50"},
+         {"PocketD", "400", "60"}, {"PocketControl", "430", "14"}},
+        {{"pocket_opening", "PocketA", "PocketB", "PocketControl"},
+         {"pocket_side", "PocketB", "PocketC", {}}, {"pocket_bottom", "PocketC", "PocketD", {}},
+         {"pocket_return", "PocketD", "PocketA", {}}}
+    };
+    auto accessory = curvedPanel(accessoryDraft);
+    accessory.pieces()[0].name = "Custom pocket";
+    accessory.pieces()[0].allowanceMm = 5;
+    check(curvedInstance.insertConstruction(accessory, &error), error);
+    SeamLink fitting;
+    fitting.first = {"right"};
+    fitting.second = {"pocket_opening"};
+    fitting.targetEaseMm = 2;
+    fitting.notchPairs = 2;
+    fitting.toleranceMm = 0.01;
+    check(curvedInstance.fitFormulaPieceToSeam(fitting, &error), error);
+    const auto verifyFit = [&](const PatternDocument& pattern) {
+        for (const auto& size : {QString{}, QStringLiteral("L")}) {
+            const auto graded = gradedPattern(pattern, size);
+            const auto report = graded.inspectSeamLinks();
+            const auto geometry = analyzePiece(graded, 1);
+            check(report.checks.size() == 1 && report.checks.front().withinTolerance
+                  && report.checks.front().error.isEmpty() && geometry.notchAnchors.size() == 2
+                  && !geometry.allowanceFailed,
+                  "Fit a user-defined curved pocket opening and recalculate its marks and allowance across sizes");
+        }
+    };
+    verifyFit(curvedInstance);
+    const auto originalLength = *curvedInstance.evaluateSizeFormula("L", "right.len", &error);
+    auto subdivided = curvedDraft;
+    subdivided.points.append(DraftPoint{"split", "width + 10", "height / 2"});
+    subdivided.points.append(DraftPoint{"control_a", "width + 10", "height / 4"});
+    subdivided.points.append(DraftPoint{"control_b", "width + 10", "3 * height / 4"});
+    subdivided.edges[1] = {"curve_head", "B", "split", "control_a"};
+    subdivided.edges.append(DraftEdge{"curve_tail", "split", "C", "control_b"});
+    const auto curvedRevision = curvedPanel(subdivided);
+    check(curvedInstance.updateLibraryConstruction(0, curvedRevision, &error, {},
+          {{"right", {"curve_head", "curve_tail"}}}), error);
+    verifyFit(curvedInstance);
+    const auto gradeAfterSplit = gradedPattern(curvedInstance, "L");
+    check(gradeAfterSplit.inspectSeamLinks().checks.front().firstMm > originalLength,
+          "The dependency follows the changed chain geometry, including its added segment");
+    roundTripAndExport(curvedInstance, "L");
+    check(curvedInstance.updateLibraryConstruction(0, curvedSource, &error, {}, {},
+          {{"right", {"curve_head", "curve_tail"}}}), error);
+    check(curvedInstance.entities()[namedEdge(curvedInstance, "right")].shape == Shape::Curve
+          && analyzePiece(gradedPattern(curvedInstance, "L"), 0).error == ContourError::None,
+          "Replay a tangent-continuous quadratic split and merge across sizes");
+    verifyFit(curvedInstance);
+    auto editedDraft = curvedInstance.parametricDraft();
+    const auto rawControl = std::ranges::find(editedDraft.points, QStringLiteral("PocketControl"), &DraftPoint::name);
+    check(rawControl != editedDraft.points.end(), "Keep the original design formulas editable");
+    rawControl->y = "23";
+    check(curvedInstance.setParametricDraft(std::move(editedDraft), &error), error);
+    verifyFit(curvedInstance);
+    roundTripAndExport(curvedInstance, "L");
+    check(splitInstance.updateLibraryConstruction(0, sewingRevision, &error, {}, {},
+          {{"right", {"right_head", "right_tail"}}}), error);
+    const auto& merged = splitInstance.entities()[namedEdge(splitInstance, "right")];
+    check(splitInstance.seamLinks().front() == seam && merged.seamAllowanceMm == 4
+          && merged.seamNotches.size() == 2 && near(merged.seamNotches[0], 0.25) && near(merged.seamNotches[1], 0.75)
+          && merged.seamSymbols.size() == 1 && near(merged.seamSymbols.front().fraction, 0.75)
+          && !splitInstance.libraryInstances().front().edges.values().contains(tailId),
+          "Merge the chain without changing the seam, surviving ID or manufacturing positions");
+    roundTripAndExport(splitInstance, "M");
+    sewingRevision.production().rules.front().offset = {-3, 0};
+    check(!sewingInstance.updateLibraryConstruction(0, sewingRevision, &error)
+          && sewingInstance.production().rules.front().offset == QPointF(-2, 0),
+          "Reject a source revision with changed manual rules");
+    auto seamDraft = revisionDraft;
+    seamDraft.edges[1].name = "side_seam";
+    auto renamedSeam = formulaPanel(seamDraft, {});
+    auto seamWithAlias = seam;
+    seamWithAlias.first = {"side_seam"};
+    check(renamedSeam.addSeamLink(seamWithAlias, &error), error);
+    renamedSeam.production() = sewingSource.production();
+    check(sewingInstance.updateLibraryConstruction(0, renamedSeam, &error)
+          && sewingInstance.seamLinks().front() == seam
+          && sewingInstance.libraryInstances().front().edges.value("side_seam") == "right"
+          && sewingInstance.production().rules.front().offset == QPointF(-2, 0),
+          "Keep the receiving seam reference and manual grade rule on replacing its source edge name");
 
     auto conflicted = reopened;
     check(conflicted.moveDraftPoint("B", {1, 0}, &error), error);
@@ -955,6 +1452,31 @@ void checkLinkedSleeve() {
               "Create a valid cutting contour and both cap notches");
     }
     roundTripAndExport(*document, "L");
+
+    auto panels = draftBodiceAndSleeve(measurements, &error);
+    check(panels.has_value(), error);
+    panels->production().sizes = document->production().sizes;
+    check(addLinkedSleeve(*panels, {namedEdge(*panels, "front_armhole")}, {namedEdge(*panels, "back_armhole")},
+                          {600, 110, 240, 5, 8, 1, true}, false, true, &error), error);
+    check(panels->pieces().size() == pieces + 2 && panels->seamLinks().size() == oldLinks + 4,
+          "Build two sleeve panels linked to both armholes and to each other at two seams");
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto graded = gradedPattern(*panels, size, nullptr, GradeEdgeNames::Preserve);
+        const auto checks = graded.inspectSeamLinks().checks.sliced(oldLinks);
+        check(std::ranges::all_of(checks, &SeamLinkCheck::withinTolerance)
+              && near(checks[0].secondMm - checks[0].firstMm, 5) && near(checks[1].secondMm - checks[1].firstMm, 8)
+              && near(checks[2].firstMm, checks[2].secondMm) && near(checks[3].firstMm, checks[3].secondMm),
+              "Keep both cap ease values and the two panel sewing lengths in every size");
+        for (auto piece = pieces; piece < graded.pieces().size(); ++piece) {
+            const auto geometry = analyzePiece(graded, piece);
+            check(geometry.error == ContourError::None && !geometry.allowanceFailed && geometry.notchAnchors.size() == 3,
+                  "Each sleeve panel has a valid cutting outline and three matching marks");
+        }
+        const auto& frontHem = graded.entities()[namedEdge(graded, "linked_sleeve_1_front_hem_edge")];
+        const auto& backHem = graded.entities()[namedEdge(graded, "linked_sleeve_1_back_hem_edge")];
+        check(near(*seamLength(frontHem) + *seamLength(backHem), 240), "Keep the requested finished hem circumference");
+    }
+    roundTripAndExport(*panels, "L");
 }
 
 void checkLinkedNeckStand() {
@@ -989,6 +1511,41 @@ void checkLinkedNeckStand() {
         }
         roundTripAndExport(pattern, "L");
     }
+    auto assembled = source;
+    check(assembled.deriveParametricPiece(0, "Second neckline piece", &error), error);
+    const auto second = std::ranges::find_if(assembled.entities(), [](const auto& entity) {
+        return entity.piece == 1 && entity.shape == Shape::Curve && entity.layer == Layer::Main;
+    });
+    check(second != assembled.entities().end(), "Find the formula neckline on the second piece");
+    const QVector<qsizetype> neckline{index, second - assembled.entities().begin()};
+    auto combinedDraft = assembled.parametricDraft();
+    const auto secondDefinition = std::ranges::find(combinedDraft.edges, second->draftName, &DraftEdge::name);
+    check(secondDefinition != combinedDraft.edges.end(), "Find the second neckline definition");
+    combinedDraft.points.append({"AsymmetricNeckControl", "width / 3", "width - 90"});
+    secondDefinition->control = "AsymmetricNeckControl";
+    check(assembled.setParametricDraft(std::move(combinedDraft), &error), error);
+    for (const auto rise : {0., 16.}) {
+        auto withStand = assembled;
+        check(addLinkedNeckStand(withStand, neckline, 28, 1, &error, rise), error);
+        for (const auto& size : {QString{}, QStringLiteral("L")}) {
+            const auto graded = gradedPattern(withStand, size, nullptr, GradeEdgeNames::Preserve);
+            const auto report = graded.inspectSeamLinks();
+            check(report.checks.size() == 2 && report.notches.size() == 4 && graded.pieces().size() == 3
+                  && std::ranges::all_of(report.checks, &SeamLinkCheck::withinTolerance),
+                  "Build one stand with separate grade-aware seam sections for unequal neckline lengths");
+            const auto& first = graded.entities()[namedEdge(graded, withStand.seamLinks()[0].second.front())];
+            const auto& next = graded.entities()[namedEdge(graded, withStand.seamLinks()[1].second.front())];
+            check(first.b == next.a, "The sewn sections share the same join");
+            if (rise > 0) {
+                const auto outgoing = first.b - first.control;
+                const auto incoming = next.control - next.a;
+                check(first.shape == Shape::Curve && next.shape == Shape::Curve
+                      && near(outgoing.x() * incoming.y(), outgoing.y() * incoming.x()),
+                      "The shaped stand has a continuous tangent at the grade-aware join");
+            }
+        }
+        roundTripAndExport(withStand, "L");
+    }
 }
 
 void checkPleatExtensions() {
@@ -1019,6 +1576,37 @@ void checkPleatExtensions() {
               "Reflect the inserted strip profile at the centre fold in each size");
     }
     roundTripAndExport(pattern, "L");
+
+    auto bowed = draft;
+    bowed.points.append({"Cap", "width / 2", "-20"});
+    bowed.points[4].y = "B.y / 4 - 10";
+    bowed.points[5].y = "B.y / 2 + 100";
+    bowed.edges[0].control = "Cap";
+    auto curved = formulaPanel(bowed, {"fold"});
+    const auto top = namedEdge(curved, "top");
+    auto curvedTop = curved.entities()[top];
+    curvedTop.piece = 0;
+    curved.replace(top, curvedTop);
+    curved.production().sizes.append({"L", {{"width", 140}}});
+    check(curved.appendContour(0, ContourOperation::PleatWithTabs, {namedEdge(curved, "fold")}, 0, &error,
+                               "width / 5"), error);
+    for (const auto& [size, width] : {std::pair{QString{}, 100.}, {QStringLiteral("L"), 140.}}) {
+        const auto grade = gradedPattern(curved, size);
+        const auto geometry = analyzePiece(grade, 0);
+        const auto main = std::ranges::count(grade.entities(), Layer::Main, &Entity::layer);
+        const auto curvedEdges = std::ranges::count(grade.entities(), Shape::Curve, &Entity::shape);
+        const auto& middleFold = grade.entities().last();
+        const auto topFold = middleFold.a.y() < middleFold.b.y() ? middleFold.a : middleFold.b;
+        const auto source = QPointF(width / 2, width * 0.05 - 10);
+        const auto tangentHeight = source.y() - 0.2 * (topFold.x() - source.x());
+        check(near(topFold.y() - tangentHeight, (width * 0.2 + 40) / 100),
+              "Reflect the local quadratic curvature into the tab crest");
+        check(geometry.error == ContourError::None && !geometry.allowanceFailed && main == 10 && curvedEdges == 4
+              && middleFold.layer == Layer::Construction && geometry.contour.contains(middleFold.a)
+              && geometry.contour.contains(middleFold.b),
+              "Keep the quadratic seam sections and reflected quadratic tab on the exact graded outline");
+    }
+    roundTripAndExport(curved, "L");
 }
 
 void checkTransportedPleatsAndDerivedContour() {
@@ -1761,7 +2349,9 @@ int main(int argc, char** argv) {
     checkTransportedPleatsAndDerivedContour();
     checkLinkedNeckStand();
     checkLinkedPocket();
+    checkVariableSizeCutEvaluation();
     checkSmoothCurveChain();
+    checkClosedCurveChain();
     checkTrackedConstruction();
     checkLinkedSleeve();
     checkPleatExtensions();

@@ -447,17 +447,10 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
             const auto definition = definitions.constFind(entity.draftName);
             if (definition == definitions.cend())
                 return fail(QStringLiteral("Every armhole edge must have an original formula definition."));
-            const auto& a = definition->start;
-            const auto& b = definition->end;
-            const auto& c = definition->control;
-            const auto term = prefix + side + QStringLiteral("_edge_%1").arg(terms.size() + 1);
-            draft.parameters.append({term, c.isEmpty()
-                ? QStringLiteral("hypot(%2.x - %1.x, %2.y - %1.y)").arg(a, b)
-                : QStringLiteral("quadlen(%1.x, %1.y, %2.x, %2.y, %3.x, %3.y)").arg(a, c, b)});
-            terms.append(term);
+            terms.append(entity.draftName + ".len");
             link.first.append(entity.draftName);
         }
-        draft.parameters.append({prefix + side + "_width", QStringLiteral("capwidth(%1rise, %2 + %3)")
+        draft.parameters.append({prefix + side + "_width", QStringLiteral("capwidth(%1rise, (%2) + %3)")
             .arg(prefix, terms.join(QStringLiteral(" + ")), QString::number(ease, 'g', 17))});
         links.append(std::move(link));
     }
@@ -476,28 +469,66 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
     const auto point = [&](const QString& name, const QString& x, const QString& y) {
         draft.points.append({prefix + name, x, y});
     };
-    point("Crown", centre, "0");
-    point("Front", centre + " - " + frontWidth, rise);
-    point("Back", centre + " + " + backWidth, rise);
-    point("FrontControl", centre + " - " + frontWidth + " / 2", "0");
-    point("BackControl", centre + " + " + backWidth + " / 2", "0");
-    const auto hemY = QStringLiteral("%1 + positive(%2 - %1)").arg(rise, length);
-    point("FrontHem", centre + " - " + frontWidth + " + " + taper, hemY);
-    point("BackHem", centre + " + " + backWidth + " - " + taper, hemY);
-    const QVector<DraftEdge> sleeve{
-        {prefix + "front_cap", prefix + "Crown", prefix + "Front", prefix + "FrontControl"},
-        {prefix + "back_cap", prefix + "Crown", prefix + "Back", prefix + "BackControl"},
-        {prefix + "front_seam", prefix + "Front", prefix + "FrontHem", {}},
-        {prefix + "hem_edge", prefix + "FrontHem", prefix + "BackHem", {}},
-        {prefix + "back_seam", prefix + "BackHem", prefix + "Back", {}}
-    };
-    draft.edges += sleeve;
     auto candidate = document;
-    const auto piece = candidate.pieces().size();
-    candidate.pieces().append({QStringLiteral("Sleeve · %1").arg(sequence), 10, 2, {}, true, 90});
-    for (const auto& edge : sleeve)
-        candidate.insert(candidate.entities().size(), {edge.control.isEmpty() ? Shape::Line : Shape::Curve,
-            {}, {}, {}, piece, Layer::Main, edge.name});
+    const auto firstPiece = candidate.pieces().size();
+    const auto installPiece = [&](const QString& name, const QVector<DraftEdge>& edges) {
+        const auto piece = candidate.pieces().size();
+        candidate.pieces().append({name.arg(sequence), 10, 2, {}, true, 90});
+        draft.edges += edges;
+        for (const auto& edge : edges)
+            candidate.insert(candidate.entities().size(), {edge.control.isEmpty() ? Shape::Line : Shape::Curve,
+                {}, {}, {}, piece, Layer::Main, edge.name});
+    };
+    const auto hemY = QStringLiteral("%1 + positive(%2 - %1)").arg(rise, length);
+    if (m.twoPiece) {
+        // Reflect the cap panels about their local axes. Equal hem setbacks
+        // give each pair of longitudinal sewing lines identical geometry.
+        for (const auto& side : {QStringLiteral("front"), QStringLiteral("back")}) {
+            const bool frontPanel = side == u"front";
+            const auto stem = side + "_";
+            const auto width = prefix + stem + "width";
+            const auto origin = frontPanel ? centre : centre + " + 80";
+            const auto direction = frontPanel ? QStringLiteral(" - ") : QStringLiteral(" + ");
+            const auto outboard = origin + direction + width;
+            const auto insideHem = origin + direction + taper + " / 2";
+            const auto outerHem = outboard + (frontPanel ? " + " : " - ") + taper + " / 2";
+            point(stem + "Crown", origin, "0");
+            point(stem + "Underarm", outboard, rise);
+            point(stem + "Control", origin + direction + width + " / 2", "0");
+            point(stem + "InnerHem", insideHem, hemY);
+            point(stem + "OuterHem", outerHem, hemY);
+            const auto id = prefix + stem;
+            installPiece(frontPanel ? QStringLiteral("Front sleeve panel · %1") : QStringLiteral("Back sleeve panel · %1"), {
+                {id + "cap", id + "Crown", id + "Underarm", id + "Control"},
+                {id + "underarm_seam", id + "Underarm", id + "OuterHem", {}},
+                {id + "hem_edge", id + "OuterHem", id + "InnerHem", {}},
+                {id + "upper_seam", id + "InnerHem", id + "Crown", {}}
+            });
+        }
+        for (const auto& name : {QStringLiteral("underarm_seam"), QStringLiteral("upper_seam")}) {
+            SeamLink link;
+            link.first = {prefix + "front_" + name};
+            link.second = {prefix + "back_" + name};
+            link.toleranceMm = 0.01;
+            link.notchPairs = m.notchPairs;
+            links.append(std::move(link));
+        }
+    } else {
+        point("Crown", centre, "0");
+        point("Front", centre + " - " + frontWidth, rise);
+        point("Back", centre + " + " + backWidth, rise);
+        point("FrontControl", centre + " - " + frontWidth + " / 2", "0");
+        point("BackControl", centre + " + " + backWidth + " / 2", "0");
+        point("FrontHem", centre + " - " + frontWidth + " + " + taper, hemY);
+        point("BackHem", centre + " + " + backWidth + " - " + taper, hemY);
+        installPiece(QStringLiteral("Sleeve · %1"), {
+            {prefix + "front_cap", prefix + "Crown", prefix + "Front", prefix + "FrontControl"},
+            {prefix + "back_cap", prefix + "Crown", prefix + "Back", prefix + "BackControl"},
+            {prefix + "front_seam", prefix + "Front", prefix + "FrontHem", {}},
+            {prefix + "hem_edge", prefix + "FrontHem", prefix + "BackHem", {}},
+            {prefix + "back_seam", prefix + "BackHem", prefix + "Back", {}}
+        });
+    }
     if (!candidate.setParametricDraft(std::move(draft), error))
         return false;
     for (const auto& link : links) {
@@ -509,11 +540,19 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
     for (const auto& size : candidate.production().sizes)
         sizes.append(size.name);
     for (const auto& size : sizes) {
-        const auto report = gradedPattern(candidate, size).inspectSeamLinks();
-        if (report.checks.size() < 2 || !report.checks.back().withinTolerance
-            || !report.checks[report.checks.size() - 2].withinTolerance)
-            return fail(QStringLiteral("The sleeve cap does not match the armholes in %1.")
-                .arg(size.isEmpty() ? QStringLiteral("the base size") : size));
+        const auto grade = gradedPattern(candidate, size);
+        const auto report = grade.inspectSeamLinks();
+        const auto sizeLabel = size.isEmpty() ? QStringLiteral("the base size") : size;
+        if (report.checks.size() < links.size()
+            || !std::ranges::all_of(report.checks.sliced(report.checks.size() - links.size()), &SeamLinkCheck::withinTolerance))
+            return fail(QStringLiteral("The sleeve sewing lines do not match in %1.").arg(sizeLabel));
+        if (m.twoPiece) {
+            for (auto piece = firstPiece; piece < candidate.pieces().size(); ++piece) {
+                const auto geometry = analyzePiece(grade, piece);
+                if (geometry.error != ContourError::None || geometry.allowanceFailed)
+                    return fail(QStringLiteral("The sleeve panels or their cutting allowances are invalid in %1.").arg(sizeLabel));
+            }
+        }
     }
     document = std::move(candidate);
     return true;
