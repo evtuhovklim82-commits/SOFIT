@@ -42,12 +42,13 @@ struct SeamEdge {
 struct SeamSection {
     QVector<SeamEdge> edges;
     double lengthMm = 0;
+    bool closed = false;
     // Locate an interior distance on a source edge, measured from its start.
     std::optional<std::pair<qsizetype, double>> notchAt(double fraction) const;
 };
 
 std::optional<SeamSection> measureSeamSection(const PatternDocument& document,
-                                              const QVector<qsizetype>& indices);
+                                              const QVector<qsizetype>& indices, bool allowClosed = false);
 PieceGeometry analyzePiece(const PatternDocument& document, qsizetype piece);
 
 }

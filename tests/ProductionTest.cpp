@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
     for (qsizetype i = 0; i < dimensions.size(); ++i) {
         markerComparison.pieces().append({QString::number(i), 0, 1, {}, true, 90});
         markerComparison.insert(i, {Shape::Rectangle, {}, dimensions[i], {}, i});
-        markerData.placements.append({i, {}, {}});
+        markerData.placements.append(FabricPlacement{i, {}, {}});
     }
     const auto improved = arrangeFabric(markerComparison, markerData);
     check(improved.error == FabricLayoutError::None && improved.baselineLengthMm && improved.optimizedLengthMm
@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
     check(directional.error == FabricLayoutError::None && !directional.placements[1].reversed
           && directional.placements[1].position.y() >= 80, "Stack when half-turns are disabled");
     triangle.pieces().append(Piece{"Open", 0});
-    triangleBatch.placements.append({1, {}, {}});
+    triangleBatch.placements.append(FabricPlacement{1, {}, {}});
     check(arrangeFabric(triangle, triangleBatch).error == FabricLayoutError::InvalidContour
           && arrangeFabric(triangle, triangleBatch).placements.isEmpty(), "Reject incomplete contours atomically");
 
@@ -502,6 +502,54 @@ int main(int argc, char** argv) {
           "Deliver exact demand using multiple sizes and repeated kits");
     check(planKitLays({{"M", 1}}, 3, 0).isEmpty()
           && planKitLays({{"M", -1}}, 3, 2).isEmpty(), "Reject an invalid kit plan");
+
+    QVector<double> lengths(16, 0);
+    for (int marker : {1, 2, 4, 8})
+        lengths[marker] = 45;
+    lengths[3] = lengths[12] = 75;
+    lengths[5] = lengths[10] = 54;
+    lengths[15] = 130;
+    check(minimumMarkerPartition(lengths, 80) == QVector<int>{5, 10},
+          "Find the least material across nonadjacent groups, not just the original midpoint");
+    check(minimumMarkerPartition(lengths, 50) == QVector<int>{1, 2, 4, 8}
+          && minimumMarkerPartition(lengths, 40).isEmpty(),
+          "Partition exactly under a tighter table limit and reject an impossible plan");
+
+    const QMap<QString, int> smallDemand{{"L", 1}, {"M", 2}, {"S", 2}};
+    const auto exact = minimumKitLays(smallDemand, 2, 2);
+    QMap<QString, int> plannedQuantities;
+    for (const auto& lay : exact) {
+        int onLayer = 0;
+        for (auto size = lay.kitsPerSize.cbegin(); size != lay.kitsPerSize.cend(); ++size) {
+            plannedQuantities[size.key()] += size.value() * lay.layers;
+            onLayer += size.value();
+        }
+        check(onLayer <= 2 && lay.layers <= 2, "Honor the marker and spreading limits");
+    }
+    check(planKitLays(smallDemand, 2, 2).size() == 3 && exact.size() == 2 && plannedQuantities == smallDemand
+          && minimumKitLays({{"L", 25}}, 2, 2).isEmpty(),
+          "Minimize the number of lays across all sizes in a small exact order");
+
+    const QMap<QString, int> materialDemand{{"L", 2}, {"M", 2}};
+    QMap<QString, int> materialQuantities;
+    const auto price = [](const QMap<QString, int>& marker) -> std::optional<double> {
+        if (marker.size() == 2)
+            return 95;
+        return marker.first() == 2 ? 50 : 42;
+    };
+    const auto materialPlan = minimumMaterialKitLays(materialDemand, 2, 2, price);
+    double consumption = 0;
+    for (const auto& lay : materialPlan) {
+        consumption += *price(lay.kitsPerSize) * lay.layers;
+        for (auto size = lay.kitsPerSize.cbegin(); size != lay.kitsPerSize.cend(); ++size)
+            materialQuantities[size.key()] += size.value() * lay.layers;
+    }
+    check(minimumKitLays(materialDemand, 2, 2).size() == 1 && materialPlan.size() == 2
+          && materialQuantities == materialDemand && consumption == 100,
+          "Optimize consumption over all lays even when the result needs more lays");
+    check(minimumMaterialKitLays(materialDemand, 2, 2, [](const auto& marker) -> std::optional<double> {
+        return marker.contains("M") ? std::nullopt : std::optional<double>{42};
+    }).isEmpty(), "Reject a demand containing a size with no feasible marker");
 
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());

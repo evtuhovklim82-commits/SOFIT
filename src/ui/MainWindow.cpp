@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include <QApplication>
 #include "Workflow.h"
 #include "PatternView.h"
 #include "ParametricDialog.h"
@@ -390,6 +391,11 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     autosaveTimer_.setInterval(30000);
     connect(&autosaveTimer_, &QTimer::timeout, this, &MainWindow::autosaveProject);
     autosaveTimer_.start();
+    librarySyncTimer_.setSingleShot(true);
+    librarySyncTimer_.setInterval(300);
+    connect(&librarySyncTimer_, &QTimer::timeout, this, &MainWindow::syncLibraryDependencies);
+    connect(&libraryWatcher_, &QFileSystemWatcher::fileChanged, this, [this] { librarySyncTimer_.start(); });
+    connect(&libraryWatcher_, &QFileSystemWatcher::directoryChanged, this, [this] { librarySyncTimer_.start(); });
 
     auto* file = menuBar()->addMenu(tr("&File"));
     auto* newAction = file->addAction(tr("&New"), QKeySequence::New, this, &MainWindow::newDocument);
@@ -662,6 +668,35 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         }
         undo_.push(new PatternCommand(doc_, std::move(*result.edit), title, *view_));
     });
+    modeling->addAction(tr("Cut by Size Formula…"), this, [this] {
+        const auto title = tr("Cut by Size Formula");
+        auto selected = selectedObjects();
+        std::ranges::sort(selected);
+        QVector<QString> guides;
+        for (const auto index : selected)
+            guides.append(doc_.entities()[index].draftName);
+        if (guides.isEmpty() || guides.size() > opc::maxCrossingGuides || guides.contains(QString{})) {
+            QMessageBox::information(this, title, tr("Select one to eight named construction guides."));
+            return;
+        }
+        const auto piece = choosePiece(title);
+        if (piece < 0)
+            return;
+        bool accepted = false;
+        const auto formula = QInputDialog::getText(this, title,
+            tr("Number of active guides, in object-list order: %1").arg(QStringList(guides).join(QStringLiteral(", "))),
+            QLineEdit::Normal, QString::number(guides.size()), &accepted);
+        if (!accepted)
+            return;
+        auto candidate = doc_;
+        QString error;
+        if (!candidate.appendSizeCut(piece, std::move(guides), formula.trimmed(), &error)) {
+            QMessageBox::warning(this, title, error);
+            return;
+        }
+        applyPatternEdit(std::move(candidate), title, true);
+        showModelingHistory();
+    });
     modeling->addAction(tr("Relief Seam…"), this, [this] {
         modelPiece(opc::ContourOperation::Relief, tr("Relief Seam"));
     });
@@ -688,10 +723,19 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
     modeling->addAction(tr("Smooth Formula Curve Chain…"), this, [this] {
         const auto title = tr("Smooth Formula Curve Chain");
         const auto edges = selectedObjects();
-        const auto chain = opc::measureSeamSection(doc_, edges);
+        const auto chain = opc::measureSeamSection(doc_, edges, true);
         if (!chain || edges.size() < 2 || edges.size() > 32
-            || !std::ranges::all_of(edges, [this](qsizetype index) { return doc_.entities()[index].shape == opc::Shape::Curve; })) {
-            QMessageBox::information(this, title, tr("Select two to 32 contiguous quadratic seam edges."));
+            || std::ranges::none_of(edges, [this](qsizetype index) { return doc_.entities()[index].shape == opc::Shape::Curve; })) {
+            QMessageBox::information(this, title, tr("Select two to 32 contiguous seam edges including a quadratic curve."));
+            return;
+        }
+        if (chain->closed) {
+            auto candidate = doc_;
+            QString error;
+            if (candidate.smoothCurveChain(edges, 0, 0, &error))
+                applyPatternEdit(std::move(candidate), title, true);
+            else
+                QMessageBox::warning(this, title, error);
             return;
         }
         const auto start = chain->edges.front();
@@ -712,8 +756,10 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             field->setDecimals(3);
             field->setSuffix(QStringLiteral("°"));
         }
-        from.setValue(direction(first.control - a));
-        to.setValue(direction(b - last.control));
+        from.setValue(direction((first.shape == opc::Shape::Curve ? first.control : start.reversed ? first.a : first.b) - a));
+        to.setValue(direction(b - (last.shape == opc::Shape::Curve ? last.control : end.reversed ? last.b : last.a)));
+        from.setEnabled(first.shape == opc::Shape::Curve);
+        to.setEnabled(last.shape == opc::Shape::Curve);
         fields.addRow(tr("Start at %1").arg(first.draftName), &from);
         fields.addRow(tr("End at %1").arg(last.draftName), &to);
         QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
@@ -1113,9 +1159,74 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         opc::PatternDocument source;
         QString error;
         auto candidate = doc_;
-        if (!source.load(path, &error) || !candidate.updateLibraryConstruction(choices.indexOf(selected), source, &error)) {
+        if (!source.load(path, &error)) {
             QMessageBox::warning(this, title, error);
             return;
+        }
+        const auto index = choices.indexOf(selected);
+        if (!candidate.updateLibraryConstruction(index, source, &error)) {
+            const auto& installed = instances[index];
+            const auto& draft = source.parametricDraft();
+            QStringList missing;
+            const auto collect = [&](const auto& bindings, const auto& definitions) {
+                for (const auto& name : bindings.keys()) {
+                    if (std::ranges::none_of(definitions, [&](const auto& item) { return item.name == name; }))
+                        missing.append(name);
+                }
+            };
+            collect(installed.parameters, draft.parameters);
+            collect(installed.points, draft.points);
+            collect(installed.edges, draft.edges);
+            const bool newOutline = std::ranges::any_of(source.entities(), [&](const auto& entity) {
+                return entity.piece >= 0 && entity.layer == opc::Layer::Main
+                    && !entity.draftName.startsWith(u'@') && !installed.edges.contains(entity.draftName);
+            });
+            if (missing.isEmpty() && !newOutline) {
+                QMessageBox::warning(this, title, error);
+                return;
+            }
+            const auto mapping = QInputDialog::getMultiLineText(this, title,
+                QStringLiteral("%1\nЗаменяемые имена: %2. Укажите «старое = новое». Для разделения или слияния перечислите рёбра по порядку через «+».")
+                    .arg(error, missing.join(QStringLiteral(", "))), {}, &accepted);
+            if (!accepted)
+                return;
+            QMap<QString, QString> replacements;
+            QMap<QString, QStringList> splits;
+            QMap<QString, QStringList> merges;
+            bool valid = true;
+            for (const auto& line : mapping.split(u'\n', Qt::SkipEmptyParts)) {
+                const auto fields = line.split(u'=');
+                if (fields.size() != 2 || fields[0].trimmed().isEmpty() || fields[1].trimmed().isEmpty()
+                    || replacements.contains(fields[0].trimmed()) || splits.contains(fields[0].trimmed())) {
+                    valid = false;
+                    break;
+                }
+                auto origins = fields[0].split(u'+');
+                for (auto& origin : origins)
+                    origin = origin.trimmed();
+                auto targets = fields[1].split(u'+');
+                for (auto& target : targets)
+                    target = target.trimmed();
+                if (targets.contains(QString{}) || origins.contains(QString{})
+                    || (origins.size() > 1 && (targets.size() != 1 || merges.contains(targets.front())))) {
+                    valid = false;
+                    break;
+                }
+                if (origins.size() > 1)
+                    merges.insert(targets.front(), origins);
+                else if (targets.size() == 1)
+                    replacements.insert(fields[0].trimmed(), targets.front());
+                else
+                    splits.insert(fields[0].trimmed(), targets);
+            }
+            if (!valid || (replacements.isEmpty() && splits.isEmpty() && merges.isEmpty())) {
+                QMessageBox::warning(this, title, QStringLiteral("Укажите каждую замену один раз в виде «старое = новое»."));
+                return;
+            }
+            if (!candidate.updateLibraryConstruction(index, source, &error, replacements, splits, merges)) {
+                QMessageBox::warning(this, title, error);
+                return;
+            }
         }
         settings.setValue(QStringLiteral("construction/libraryFolder"), QFileInfo(path).absolutePath());
         applyPatternEdit(std::move(candidate), title, true);
@@ -1138,6 +1249,9 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
             view_->fitDrawing();
         }
     });
+    autoSyncLibrary_ = library->addAction(QStringLiteral("Автоматически обновлять связанные конструкции"));
+    autoSyncLibrary_->setCheckable(true);
+    connect(autoSyncLibrary_, &QAction::toggled, this, [this] { syncLibraryDependencies(); });
     library->addAction(QStringLiteral("Применить операции из проекта…"), this, [this] {
         const auto title = QStringLiteral("Применение последовательности операций");
         const auto path = QFileDialog::getOpenFileName(this, title, {}, tr("SOFIT (*.sofit)"));
@@ -1525,20 +1639,25 @@ void MainWindow::refreshPieceDisplay() {
     view_->applyLayers(doc_, allowances, markings);
 
     QVector<QPair<QPainterPath, QColor>> overlays;
-    for (qsizetype i = 0; i < doc_.production().sizes.size(); ++i) {
-        const auto& size = doc_.production().sizes[i].name;
-        if (!overlaySizes_.contains(size))
-            continue;
+    const auto addOverlay = [&](const QString& size, QColor color, bool cutPiecesOnly) {
         QVector<qsizetype> sources;
         const auto graded = opc::gradedPattern(doc_, size, &sources);
         QPainterPath path;
         for (qsizetype j = 0; j < graded.entities().size(); ++j) {
             const auto& entity = graded.entities()[j];
-            if (entity.piece >= 0 && doc_.layerVisible(entity.layer) && view_->entityVisible(sources[j]))
+            if (entity.piece >= 0 && (!cutPiecesOnly || sources[j] < 0) && doc_.layerVisible(entity.layer)
+                && (sources[j] < 0 || view_->entityVisible(sources[j])))
                 path.addPath(opc::entityPath(entity));
         }
         if (!path.isEmpty())
-            overlays.append({std::move(path), sizeColor(i)});
+            overlays.append({std::move(path), color});
+    };
+    if (!doc_.sizeCutHistory().isEmpty())
+        addOverlay({}, QColor(20, 122, 110), true);
+    for (qsizetype i = 0; i < doc_.production().sizes.size(); ++i) {
+        const auto& size = doc_.production().sizes[i].name;
+        if (overlaySizes_.contains(size))
+            addOverlay(size, sizeColor(i), false);
     }
     view_->setSizeOverlays(overlays);
 }
@@ -1653,15 +1772,19 @@ qsizetype MainWindow::choosePiece(const QString& title) {
 
 void MainWindow::applyPatternEdit(opc::PatternDocument document, const QString& text, bool redraw) {
     QString error;
-    if ((!document.modelingHistory().isEmpty() || !document.seamLinks().isEmpty())
-        && !document.validateParametricSizes(document.production(), &error)) {
+    if (((!document.modelingHistory().isEmpty() || !document.seamLinks().isEmpty())
+        && !document.validateParametricSizes(document.production(), &error))
+        || !document.refreshSizeCutPanels(&error)) {
         setModelingError(error);
         QMessageBox::warning(this, text, error);
         return;
     }
+    const bool changedLibraryMembership = document.libraryInstances().size() != doc_.libraryInstances().size();
     const auto selected = selectedObjects();
     view_->cancelDrawing();
     undo_.push(new PatternCommand(doc_, std::move(document), text, redraw ? view_ : nullptr));
+    if (changedLibraryMembership && autoSyncLibrary_->isChecked())
+        librarySyncTimer_.start();
     for (const auto index : selected) {
         if (auto* item = objects_->topLevelItem(index))
             item->setSelected(true);
@@ -2089,6 +2212,8 @@ void MainWindow::diagnoseGradedPieces(const QVector<QAction*>& productionActions
         for (qsizetype i = 0; i < graded.pieces().size(); ++i) {
             const auto& piece = graded.pieces()[i];
             const auto geometry = opc::analyzePiece(graded, i);
+            if (doc_.isSizeCutPiece(i) && geometry.error == opc::ContourError::Empty)
+                continue;
             auto* row = new QTreeWidgetItem(group, {piece.name, describeContour(geometry.error)});
             row->setData(0, Qt::UserRole, QVariant::fromValue(i));
             const auto copies = counts == copyCounts.cend() ? 0 : counts->at(i);
@@ -2140,7 +2265,7 @@ void MainWindow::diagnoseGradedPieces(const QVector<QAction*>& productionActions
                 }
                 if (edge.layer != opc::Layer::Main)
                     continue;
-                if (editEdge && j < sourceIndices.size()) {
+                if (editEdge && j < sourceIndices.size() && sourceIndices[j] >= 0) {
                     const auto sourceIndex = sourceIndices[j];
                     const auto& source = doc_.entities()[sourceIndex];
                     const auto length = opc::seamLength(edge);
@@ -2763,7 +2888,7 @@ void MainWindow::managePieceAt(qsizetype piece, QWidget* parent) {
         return;
     auto updated = doc_;
     if (result == 2) {
-        if (doc_.hasContourHistory()) {
+        if (doc_.hasContourHistory() || !doc_.sizeCutHistory().isEmpty()) {
             QMessageBox::information(this, tr("Delete Piece"),
                 tr("Remove contour steps from the construction tree before deleting pieces."));
             return;
@@ -2983,7 +3108,7 @@ void MainWindow::shapeSilhouette() {
     if (piece < 0)
         return;
     const auto geometry = opc::analyzePiece(doc_, piece);
-    if (geometry.error != opc::ContourError::None) {
+    if (geometry.error != opc::ContourError::None && !doc_.isSizeCutPiece(piece)) {
         QMessageBox::warning(this, title, tr("The piece needs one closed, simple contour."));
         return;
     }
@@ -3010,6 +3135,18 @@ void MainWindow::shapeSilhouette() {
     form->addRow(buttons);
     if (dialog.exec() != QDialog::Accepted)
         return;
+    if (doc_.isSizeCutPiece(piece)) {
+        const double fractions[]{0.5, 0, 1};
+        auto updated = doc_;
+        QString error;
+        if (!updated.appendPanelSilhouette(piece, {fractions[axis->currentIndex()], top->value() / 100,
+                                                   bottom->value() / 100, length->value() / 100}, &error)) {
+            QMessageBox::warning(this, title, error);
+            return;
+        }
+        applyPatternEdit(std::move(updated), title, true);
+        return;
+    }
     const bool formulaPiece = std::ranges::any_of(doc_.entities(), [piece](const auto& entity) {
         return entity.piece == piece && !entity.draftName.isEmpty();
     });
@@ -3066,6 +3203,20 @@ void MainWindow::showModelingHistory() {
                 editModelingStep(step.toLongLong());
             else if (const auto relation = item->data(0, Qt::UserRole + 2); relation.isValid())
                 editSeamLink(relation.toLongLong());
+            else if (const auto cut = item->data(0, Qt::UserRole + 3); cut.isValid()) {
+                const auto index = static_cast<qsizetype>(cut.toLongLong());
+                bool accepted = false;
+                const auto formula = QInputDialog::getText(this, tr("Edit Size Cut"), tr("Active guide count"),
+                    QLineEdit::Normal, doc_.sizeCutHistory()[index].countFormula, &accepted);
+                if (accepted) {
+                    auto updated = doc_;
+                    QString error;
+                    if (updated.editSizeCut(index, formula.trimmed(), &error))
+                        applyPatternEdit(std::move(updated), tr("Edit Size Cut"), true);
+                    else
+                        QMessageBox::warning(this, tr("Edit Size Cut"), error);
+                }
+            }
         });
         connect(removeModelingStep_, &QPushButton::clicked, this, [this] {
             auto updated = doc_;
@@ -3305,6 +3456,18 @@ void MainWindow::refreshModelingHistory() {
     auto* root = new QTreeWidgetItem(modelingTree_, {tr("Parametric draft")});
     const auto& draft = doc_.parametricDraft();
     root->setText(1, tr("%1 measurements, %2 formula edges").arg(draft.measurements.size()).arg(draft.edges.size()));
+    for (qsizetype i = 0; i < doc_.sizeCutHistory().size(); ++i) {
+        const auto& cut = doc_.sizeCutHistory()[i];
+        auto* item = new QTreeWidgetItem(root, {tr("Cut by Size Formula"), cut.countFormula});
+        item->setData(0, Qt::UserRole + 3, QVariant::fromValue(i));
+        for (auto panel = cut.panels.cbegin(); panel != cut.panels.cend(); ++panel) {
+            auto* row = new QTreeWidgetItem(item, {doc_.pieces()[panel.value()].name, panel.key()});
+            for (const auto& shape : cut.silhouettes.value(panel.value())) {
+                new QTreeWidgetItem(row, {tr("Shape Silhouette"), tr("Width %L1% / %L2% · Length %L3%")
+                    .arg(shape.topScale * 100).arg(shape.bottomScale * 100).arg(shape.lengthScale * 100)});
+            }
+        }
+    }
     const auto& history = doc_.modelingHistory();
     QVector<QVector<qsizetype>> gradeSources(doc_.production().sizes.size());
     QVector<opc::PatternDocument> grades;
@@ -3887,6 +4050,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::replaceDocument(opc::PatternDocument document, const QString& path) {
+    autoSyncLibrary_->setChecked(false);
     view_->cancelDrawing();
     clearRecovery();
     recovered_ = false;
@@ -4009,6 +4173,7 @@ bool MainWindow::saveProject(const QString& path) {
         QMessageBox::warning(this, tr("Save failed"), error);
         return false;
     }
+    const bool locationChanged = currentPath_ != path;
     currentPath_ = path;
     setWindowFilePath(path);
     recovered_ = false;
@@ -4016,7 +4181,48 @@ bool MainWindow::saveProject(const QString& path) {
     undo_.setClean();
     setWindowModified(false);
     clearRecovery();
+    if (locationChanged && autoSyncLibrary_->isChecked())
+        librarySyncTimer_.start();
     return true;
+}
+
+void MainWindow::syncLibraryDependencies() {
+    if (autoSyncLibrary_->isChecked() && QApplication::activeModalWidget()) {
+        librarySyncTimer_.start();
+        return;
+    }
+    librarySyncTimer_.stop();
+    QSet<QString> watched;
+    auto candidate = doc_;
+    QString error;
+    const bool enabled = autoSyncLibrary_->isChecked();
+    const bool refreshed = enabled && candidate.refreshLibraryDependencies(currentPath_, &error, &watched);
+    QSet<QString> paths;
+    for (const auto& source : watched) {
+        QFileInfo info(source);
+        if (!info.isFile()) {
+            info = QFileInfo(info.absolutePath());
+            while (!info.isDir() && info.absolutePath() != info.absoluteFilePath())
+                info = QFileInfo(info.absolutePath());
+        }
+        if (info.exists())
+            paths.insert(info.absoluteFilePath());
+    }
+    const auto registered = libraryWatcher_.files() + libraryWatcher_.directories();
+    const QSet<QString> previous(registered.begin(), registered.end());
+    const auto removed = (previous - paths).values();
+    if (!removed.isEmpty())
+        libraryWatcher_.removePaths(removed);
+    const auto added = (paths - previous).values();
+    const auto failedPaths = added.isEmpty() ? QStringList{} : libraryWatcher_.addPaths(added);
+    if (refreshed && candidate.libraryInstances() != doc_.libraryInstances()) {
+        applyPatternEdit(std::move(candidate), autoSyncLibrary_->text(), true);
+        statusBar()->showMessage(QStringLiteral("Связанные конструкции обновлены."), 5000);
+    }
+    if (enabled && !refreshed)
+        statusBar()->showMessage(error, 10000);
+    else if (!failedPaths.isEmpty())
+        statusBar()->showMessage(QStringLiteral("Не удалось отслеживать: %1").arg(failedPaths.join(QStringLiteral(", "))), 10000);
 }
 
 opc::PatternDocument MainWindow::exportPattern(const QString& size, QVector<bool>& visibility,
@@ -4024,8 +4230,8 @@ opc::PatternDocument MainWindow::exportPattern(const QString& size, QVector<bool
     QVector<qsizetype> sourceIndices;
     auto pattern = opc::gradedPattern(doc_, size, &sourceIndices);
     for (const auto index : sourceIndices)
-        visibility.append(view_->entityVisible(index));
-    if (size.isEmpty())
+        visibility.append(index < 0 || view_->entityVisible(index));
+    if (size.isEmpty() && doc_.sizeCutHistory().isEmpty())
         geometry = pieces_;
     else {
         for (qsizetype i = 0; i < pattern.pieces().size(); ++i)

@@ -6,6 +6,7 @@
 #include <QMainWindow>
 #include <QUndoStack>
 #include <QTimer>
+#include <QFileSystemWatcher>
 #include "ProjectRecovery.h"
 #include "../core/PatternDocument.h"
 
@@ -30,6 +31,7 @@ protected:
 private:
     void recoverProject();
     void autosaveProject();
+    void syncLibraryDependencies();
     void clearRecovery();
     void newDocument();
     void openDocument();
@@ -95,6 +97,9 @@ private:
     QString currentPath_;
     std::unique_ptr<opc::ProjectRecovery> recovery_;
     QTimer autosaveTimer_;
+    QFileSystemWatcher libraryWatcher_;
+    QTimer librarySyncTimer_;
+    QAction* autoSyncLibrary_ = nullptr;
     bool recovered_ = false;
     bool autosavePending_ = false;
     std::array<QAction*, 3> layerActions_{};

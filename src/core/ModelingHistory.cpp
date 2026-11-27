@@ -635,8 +635,10 @@ bool PatternDocument::replayModeling(QVector<Entity>& entities, const Production
                 entity.seamAllowanceMm = metadata->seamAllowanceMm;
                 entity.seamNotches = metadata->seamNotches;
                 entity.seamSymbols = metadata->seamSymbols;
+                entity.gradedMarks = metadata->gradedMarks;
                 entity.bevelAtStart = metadata->bevelAtStart;
                 entity.bevelAtEnd = metadata->bevelAtEnd;
+                entity.dxfLayer = metadata->dxfLayer;
             }
             outputs.append(entity);
             entity.piece = localPiece;

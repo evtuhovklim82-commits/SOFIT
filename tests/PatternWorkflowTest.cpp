@@ -8,6 +8,7 @@
 #include "ProductionDialogs.h"
 
 #include <QApplication>
+#include <QEventLoop>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
@@ -340,6 +341,153 @@ void testCrossingCurvesWorkflow() {
     check(std::ranges::count_if(loaded.entities(), [](const opc::Entity& edge) {
         return edge.shape == opc::Shape::Curve && edge.layer == opc::Layer::Main;
     }) == 8, "Preserve the quadratic seam edges after reopening");
+}
+
+void testLibraryChainWorkflow() {
+    opc::ParametricDraft draft{
+        {{"w", 100}}, {},
+        {{"A", "0", "0"}, {"B", "w", "0"}, {"C", "w", "80"}, {"D", "0", "80"}},
+        {{"top", "A", "B", {}}, {"right", "B", "C", {}}, {"bottom", "C", "D", {}}, {"left", "D", "A", {}}}
+    };
+    const auto sourceWith = [](const auto& definitions) {
+        opc::PatternDocument document;
+        check(document.setParametricDraft(definitions), "Build the source outline");
+        document.pieces().append({"Front"});
+        for (qsizetype i = 0; i < document.entities().size(); ++i) {
+            auto entity = document.entities()[i];
+            if (entity.layer == opc::Layer::Main) {
+                entity.piece = 0;
+                document.replace(i, entity);
+            }
+        }
+        return document;
+    };
+    const auto source = sourceWith(draft);
+    opc::PatternDocument target;
+    check(target.insertConstruction(source, nullptr, {}, "outline.sofit"), "Install a tracked outline");
+    target.production().sizes = {{"L", {{"w", 120}}}};
+    const auto edge = std::ranges::find(target.entities(), "right", &opc::Entity::draftName);
+    auto marked = *edge;
+    marked.seamNotches = {0.4};
+    marked.seamSymbols = {{opc::PieceSymbol::Cross, 0.4, 3, 6, false}};
+    target.replace(edge - target.entities().begin(), marked);
+    draft.points.append(opc::DraftPoint{"middle", "w", "iflt(w, 110, 40, 15)"});
+    draft.edges[1] = {"head", "B", "middle", {}};
+    draft.edges.append(opc::DraftEdge{"tail", "middle", "C", {}});
+    const auto revised = sourceWith(draft);
+    QTemporaryDir projects;
+    const auto originalPath = projects.filePath("receiving.sofit");
+    const auto revisionPath = projects.filePath("outline.sofit");
+    check(target.save(originalPath) && revised.save(revisionPath), "Save the tracked project and its split revision");
+    MainWindow window;
+    window.show();
+    QString error;
+    check(window.openProject(originalPath, &error), qPrintable(error));
+    const auto update = QStringLiteral("Обновить экземпляр конструкции…");
+    const auto undoText = QStringLiteral("Undo Обновление экземпляра конструкции");
+    runDialog<QInputDialog>(action(window, update), [&](QInputDialog& instance) {
+        QTimer::singleShot(0, [&] {
+            auto* file = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+            check(file, "Open the revised source");
+            file->selectFile(revisionPath);
+            QTimer::singleShot(0, [] {
+                auto* mapping = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                check(mapping, "Request an explicit chain replacement");
+                auto* input = mapping->findChild<QPlainTextEdit*>();
+                check(input, "Offer a line for topology mapping");
+                input->setPlainText("right = head + tail");
+                mapping->accept();
+            });
+            static_cast<QDialog*>(file)->accept();
+        });
+        instance.accept();
+    });
+    action(window, "&Save").trigger();
+    opc::PatternDocument loaded;
+    check(loaded.load(originalPath) && loaded.libraryInstances().front().edges.value("head") == "right"
+          && loaded.libraryInstances().front().edges.contains("tail"), "Save the explicit split and preserve the original receiving ID");
+    const auto ids = loaded.libraryInstances().front().edges;
+    const auto splitMarks = [&](const opc::PatternDocument& project) {
+        const auto graded = opc::gradedPattern(project, "L", nullptr, opc::GradeEdgeNames::Preserve);
+        const auto tail = std::ranges::find(graded.entities(), ids.value("tail"), &opc::Entity::draftName);
+        return tail != graded.entities().end() && tail->seamNotches.size() == 1 && tail->seamSymbols.size() == 1;
+    };
+    check(splitMarks(loaded), "Save the marks on the other side of the graded split");
+    action(window, undoText).trigger();
+    action(window, "&Save").trigger();
+    check(loaded.load(originalPath) && loaded.libraryInstances().front().edges.contains("right") && !splitMarks(loaded),
+          "Undo restores the previous edge and source binding");
+    action(window, QStringLiteral("Redo Обновление экземпляра конструкции")).trigger();
+    action(window, "&Save").trigger();
+    check(loaded.load(originalPath) && loaded.libraryInstances().front().edges == ids && splitMarks(loaded)
+          && opc::analyzePiece(opc::gradedPattern(loaded, "L"), 0).error == opc::ContourError::None,
+          "Redo restores the same split identifiers and a closed graded contour");
+}
+
+void testSizeCutWorkflow() {
+    opc::PatternDocument source;
+    opc::ParametricDraft draft;
+    draft.measurements = {{"count", 0}};
+    draft.points = {{"A", "0", "40"}, {"B", "100", "40"}};
+    draft.edges = {{"slash", "A", "B", {}}};
+    check(source.setParametricDraft(draft), "Create a named cut guide");
+    auto guide = source.entities().back();
+    guide.layer = opc::Layer::Construction;
+    source.replace(source.entities().size() - 1, guide);
+    source.pieces().append({"Front"});
+    source.insert(source.entities().size(), {opc::Shape::Rectangle, {}, {100, 80}, {}, 0});
+    source.production().sizes = {{"L", {{"count", 1}}}};
+    QTemporaryDir projects;
+    const auto path = projects.filePath("size-cut.sofit");
+    check(source.save(path), "Save the source with a named guide and size");
+
+    MainWindow window;
+    window.show();
+    QString error;
+    check(window.openProject(path, &error), qPrintable(error));
+    auto* tree = window.findChild<QTreeWidget*>();
+    tree->topLevelItem(source.entities().size() - 2)->setSelected(true);
+    runDialog<QInputDialog>(action(window, "Cut by Size Formula…"), [](QInputDialog& dialog) {
+        dialog.setTextValue("count");
+        dialog.accept();
+    });
+    action(window, "&Save").trigger();
+    opc::PatternDocument loaded;
+    check(loaded.load(path) && loaded.sizeCutHistory().size() == 1 && loaded.pieces().size() == 2,
+          "Save and reopen the cut history and both panel slots");
+    const auto ids = loaded.sizeCutHistory().front().panels;
+    action(window, "Undo Cut by Size Formula").trigger();
+    action(window, "&Save").trigger();
+    check(loaded.load(path) && loaded.sizeCutHistory().isEmpty() && loaded.pieces().size() == 1,
+          "Undo the variable cut and its panel slots together");
+    action(window, "Redo Cut by Size Formula").trigger();
+    action(window, "&Save").trigger();
+    check(loaded.load(path) && loaded.sizeCutHistory().front().panels == ids,
+          "Redo with the original stable panel identifiers");
+    runDialog<QDialog>(action(window, "Fabric Layout…"), [](QDialog& dialog) {
+        QComboBox* sizes = nullptr;
+        QComboBox* pieces = nullptr;
+        for (auto* combo : dialog.findChildren<QComboBox*>()) {
+            if (combo->findText("Base pattern") >= 0)
+                sizes = combo;
+            if (combo->findText("Front") >= 0)
+                pieces = combo;
+        }
+        check(sizes && pieces && pieces->count() == 1, "Offer only active panels in the base size");
+        sizes->setCurrentIndex(sizes->findText("L"));
+        check(pieces->count() == 2, "Offer both cut panels in the named size");
+        pieces->setCurrentIndex(1);
+        for (auto* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == "Add copy")
+                button->click();
+        }
+        dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    action(window, "&Save").trigger();
+    check(loaded.load(path) && loaded.production().placements.size() == 1
+          && loaded.production().placements.front().piece == ids.value("root/1.1")
+          && loaded.production().placements.front().size == "L",
+          "Persist the generated panel's stable identifier in the size layout");
 }
 
 void testContourModelingWorkflow() {
@@ -902,21 +1050,39 @@ void testMaterialLay() {
 
 }
 
-void testPlannedOrder(bool mixed = false, bool splitToFit = false) {
+void testPlannedOrder(bool mixed = false, bool splitToFit = false, bool useCutModes = false, bool minimumMaterial = false,
+                      bool multipleMaterials = false) {
     QTemporaryDir directory;
     check(directory.isValid(), "Create a folder for a size-planned order");
     opc::PatternDocument source;
     source.pieces() = {{"Front"}};
     source.insert(0, {opc::Shape::Rectangle, {}, {70, 40}, {}, 0});
+    if (multipleMaterials) {
+        source.pieces().append({"Lining"});
+        source.insert(1, {opc::Shape::Rectangle, {}, {45, 20}, {}, 1});
+    }
     source.production().sizes = {{"M", {}}};
+    if (minimumMaterial)
+        source.production().fabricFlaws = {{0, 0, 1500, 10}};
+    if (useCutModes) {
+        source.pieces()[0].cutCount = 3;
+        opc::FabricPlacement left{0, {}, {}};
+        left.hand = opc::CutHand::Left;
+        auto right = left;
+        right.hand = opc::CutHand::Right;
+        opc::FabricPlacement fold{0, {}, {}};
+        fold.fold = opc::FoldEdge::Left;
+        source.production().placements = {left, right, fold};
+    }
     const QDir root(directory.path());
     const auto path = root.filePath("source.sofit");
     check(source.save(path), "Save the source for the planned order");
     MainWindow window;
     window.show();
     chooseFile(action(window, "&Open"), path);
-    const int layCount = splitToFit ? 6 : mixed ? 2 : 3;
+    const int layCount = multipleMaterials ? 2 : minimumMaterial ? 1 : splitToFit ? 6 : mixed ? 2 : 3;
     const int widthDialogs = splitToFit ? 2 : layCount;
+    const int setupSteps = multipleMaterials ? 5 : 0;
     const int destinationStep = 2 + widthDialogs + layCount;
     int step = 0;
     QTimer drive;
@@ -924,7 +1090,30 @@ void testPlannedOrder(bool mixed = false, bool splitToFit = false) {
         auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
         if (!modal)
             return;
-        const int current = step++;
+        if (multipleMaterials && step > 0 && modal->findChild<QComboBox*>("orderPlanningStrategy"))
+            return;
+        if (multipleMaterials && step > 0 && step <= setupSteps) {
+            const int setup = step++;
+            if (setup == 1) {
+                auto* materials = modal->findChild<QTableWidget*>("orderPlanningMaterials");
+                check(materials && materials->rowCount() == 2, "Assign a material to each part");
+                qobject_cast<QLineEdit*>(materials->cellWidget(1, 1))->setText("Lining");
+            } else if (setup % 2 == 0) {
+                auto* width = qobject_cast<QInputDialog*>(modal);
+                check(width, "Configure the fabric width per material");
+                width->setDoubleValue(setup == 2 ? 300 : 400);
+            } else {
+                check(modal->windowTitle() == "Fabric Flaws", "Configure separate fabric flaw maps");
+                if (setup == 3)
+                    modal->findChild<QTableWidget*>()->setRowCount(0);
+                modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+                return;
+            }
+            modal->accept();
+            return;
+        }
+        const int current = step == 0 ? 0 : step - setupSteps;
+        ++step;
         if (current == 0) {
             auto* table = modal->findChild<QTableWidget*>();
             check(table && table->rowCount() == 2, "Present base and named size quantities");
@@ -933,18 +1122,34 @@ void testPlannedOrder(bool mixed = false, bool splitToFit = false) {
             for (auto* field : modal->findChildren<QSpinBox*>()) {
                 if (field->maximum() == 10000)
                     field->setValue(2);
-                if (mixed && field->maximum() == opc::maxAutomaticCopies)
+                if ((mixed || minimumMaterial) && field->maximum() == opc::maxAutomaticCopies / source.pieces().size())
                     field->setValue(4);
             }
-            modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+            if (minimumMaterial)
+                modal->findChild<QComboBox*>("orderPlanningStrategy")->setCurrentIndex(multipleMaterials ? 3 : 2);
+            if (useCutModes) {
+                auto* modes = modal->findChild<QCheckBox*>("copyBaseKitCutModes");
+                check(modes && modes->isEnabled(), "Recognize a complete base kit with a pair and a fold");
+                modes->setChecked(true);
+            }
+            auto* confirm = modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
+            if (multipleMaterials)
+                QTimer::singleShot(0, confirm, &QPushButton::click);
+            else
+                confirm->click();
             return;
         }
         if (current == 1) {
             auto* table = modal->findChild<QTableWidget*>();
-            check(table && table->rowCount() == (mixed ? 6 : 3) && !table->cellWidget(0, 3)->isEnabled(),
+            check(table && table->rowCount() == (multipleMaterials ? 8 : minimumMaterial ? 4 : useCutModes || mixed ? 6 : 3)
+                  && !table->cellWidget(0, 3)->isEnabled(),
                   "Create fixed lays and preserve their size quantities");
             if (splitToFit)
                 modal->findChild<QDoubleSpinBox*>("layTableLength")->setValue(45);
+            if (minimumMaterial && !multipleMaterials) {
+                for (int row = 0; row < table->rowCount(); ++row)
+                    qobject_cast<QLineEdit*>(table->cellWidget(row, 2))->setText(QStringLiteral("Ткань"));
+            }
             modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
             return;
         }
@@ -972,28 +1177,49 @@ void testPlannedOrder(bool mixed = false, bool splitToFit = false) {
     drive.start(0);
     action(window, QStringLiteral("Спланировать заказ по размерам…")).trigger();
     const auto folders = root.entryList({"SOFIT-lay-*"}, QDir::Dirs);
-    check(step == destinationStep + 2 && folders.size() == 1 && !window.isWindowModified(),
+    check(step == destinationStep + setupSteps + 2 && folders.size() == 1 && !window.isWindowModified(),
           "Save a self-contained plan without modifying the active project");
     const QDir output(root.filePath(folders.front()));
     QFile usage(output.filePath("usage.tsv"));
     check(usage.open(QIODevice::ReadOnly), "Read order consumption");
     const auto report = usage.readAll();
-    if (!mixed)
+    if (!mixed && !useCutModes && !minimumMaterial)
         check(report.contains("material-1.sofit\t1500.00\t1\t40.00\t1")
           && report.contains("material-2.sofit\t1500.00\t1\t40.00\t2")
           && report.contains("material-3.sofit\t1500.00\t1\t40.00\t1"),
           "Persist exact size demand as one base layer and three M layers");
     QMap<QString, int> totals;
+    QMap<QString, int> liningTotals;
     for (int i = 1; i <= layCount; ++i) {
         const auto stem = QStringLiteral("material-%1").arg(i);
         opc::PatternDocument marker;
+        const auto copyCount = minimumMaterial ? 4 : useCutModes ? 3 : splitToFit || !mixed ? 1 : i == 1 ? 4 : 2;
         check(marker.load(output.filePath(stem + ".sofit"))
-              && marker.production().placements.size() == (splitToFit || !mixed ? 1 : (i == 1 ? 4 : 2))
+              && marker.production().placements.size() == copyCount
               && output.exists(stem + ".dxf") && output.exists(stem + ".pdf"),
               "Save and export every size marker");
-        const int layers = (splitToFit ? i <= 4 : mixed ? i == 1 : i == 2) ? 2 : 1;
-        for (const auto& placement : marker.production().placements)
-            totals[placement.size] += layers;
+        if (minimumMaterial) {
+            const auto cutting = opc::cuttingReport(marker, marker.production());
+            const auto expectedFlaws = multipleMaterials && marker.production().placements.front().piece == 1
+                ? QVector<QRectF>{} : source.production().fabricFlaws;
+            check(marker.production().fabricFlaws == expectedFlaws
+                  && (!multipleMaterials || marker.production().fabricWidth == (expectedFlaws.isEmpty() ? 300 : 400))
+                  && cutting.canExport(marker.production().fabricWidth)
+                  && cutting.usage.length >= (expectedFlaws.isEmpty() ? 20 : 50) - 1e-6,
+                  "Keep fabric flaws in the measured and exported marker");
+        }
+        const int layers = multipleMaterials ? 1 : (splitToFit ? i <= 4 : mixed ? i == 1 : i == 2) ? 2 : 1;
+        const auto& placements = marker.production().placements;
+        if (useCutModes) {
+            check(std::ranges::count(placements, opc::CutHand::Left, &opc::FabricPlacement::hand) == 1
+                  && std::ranges::count(placements, opc::CutHand::Right, &opc::FabricPlacement::hand) == 1
+                  && std::ranges::count(placements, opc::FoldEdge::Left, &opc::FabricPlacement::fold) == 1,
+                  "Retain the mirrored pair and left fold in each exported size");
+            totals[placements.front().size] += layers;
+        } else {
+            for (const auto& placement : placements)
+                (multipleMaterials && placement.piece == 1 ? liningTotals : totals)[placement.size] += layers;
+        }
         if (mixed) {
             const auto fields = report.split('\n')[i].split('\t');
             check(fields.size() >= 6 && fields[3].toInt() == marker.production().placements.size()
@@ -1003,7 +1229,8 @@ void testPlannedOrder(bool mixed = false, bool splitToFit = false) {
         }
     }
     const QMap<QString, int> expected{{QString{}, mixed ? 3 : 1}, {QStringLiteral("M"), mixed ? 7 : 3}};
-    check(totals == expected, "Export exactly the ordered number of kits for each size");
+    check(totals == expected && (!multipleMaterials || liningTotals == expected),
+          "Export exactly the ordered number of kits for each size and material");
 }
 
 int main(int argc, char** argv) {
@@ -1030,11 +1257,16 @@ int main(int argc, char** argv) {
     testModelingWorkflow();
     testContourModelingWorkflow();
     testCrossingCurvesWorkflow();
+    testLibraryChainWorkflow();
+    testSizeCutWorkflow();
     testMarkerModelImport();
     testMaterialLay();
     testPlannedOrder();
     testPlannedOrder(true);
     testPlannedOrder(true, true);
+    testPlannedOrder(false, false, true);
+    testPlannedOrder(false, false, false, true);
+    testPlannedOrder(false, false, false, true, true);
     MainWindow window;
     window.show();
 
@@ -1402,7 +1634,7 @@ int main(int argc, char** argv) {
 
         const auto addStandardFigure = [&](int standard, const QString& code, const QVector<int>& expected,
                                           const QString& group, const QString& height, const QString& bust,
-                                          const QString& unavailable) {
+                                          const QString& unavailable, bool addVerified = false, bool addNumbered = false) {
             QTimer::singleShot(0, [=] {
                 auto* reference = qobject_cast<QDialog*>(QApplication::activeModalWidget());
                 check(reference, "Open the size standard");
@@ -1427,16 +1659,28 @@ int main(int argc, char** argv) {
                 check(fields[2]->findText(bust) >= 0 && fields[2]->findText(unavailable) < 0,
                       "Offer listed combinations and exclude unlisted ones");
                 fields[2]->setCurrentText(bust);
+                if (addVerified) {
+                    auto* extra = reference->findChild<QCheckBox*>("verifiedAdditionalMeasures");
+                    check(extra && extra->isEnabled(), "Offer the cross-checked measures for the selected figure");
+                    extra->setChecked(true);
+                }
+                if (addNumbered) {
+                    auto* extra = reference->findChild<QCheckBox*>("verifiedNumberedTraits");
+                    check(extra && extra->isEnabled(), "Offer the additional numbered measurements");
+                    extra->setChecked(true);
+                }
                 reference->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
             });
+            const int rowsBefore = measurements->rowCount();
             click(QStringLiteral("Типовая фигура ГОСТ…"));
-            check(measurements->rowCount() == 21 + 3 * standard && rules->rowCount() == 8,
-                  "Append three measurements from the selected standard");
+            check(measurements->rowCount() == rowsBefore + (addVerified ? 6 : 3) + (addNumbered ? 82 : 0) && rules->rowCount() == 8,
+                  "Append the selected leading and optional measurements from the standard");
         };
         addStandardFigure(0, "31396-2009", {46, 65, 76, 75, 61, 33}, "0", "164", "92", "128");
         addStandardFigure(1, "31399-2009", {48, 75, 80, 51, 47}, "2", "200", "108", "112");
-        addStandardFigure(2, "17916-86", {3, 22, 33, 66, 89, 89, 77, 52, 15}, "VI", "86", "48", "52");
+        addStandardFigure(2, "17916-86", {3, 22, 33, 66, 89, 89, 77, 52, 15}, "VI", "86", "48", "52", true);
         addStandardFigure(3, "17917-86", {15, 52, 80, 98, 95, 70, 39, 10}, "IV", "86", "48", "52");
+        addStandardFigure(3, "17917-86", {15, 52, 80, 98, 95, 70, 39, 10}, "IV", "146", "72", "108", true, true);
 
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
@@ -1473,7 +1717,7 @@ int main(int argc, char** argv) {
         dialog.findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     });
     action(window, "&Save").trigger();
-    check(loaded.load(pattern) && loaded.production().sizes.size() == 12 && loaded.production().rules.size() == 8
+    check(loaded.load(pattern) && loaded.production().sizes.size() == 13 && loaded.production().rules.size() == 8
           && loaded.production().rules[4].offset == QPointF(30, 3)
           && loaded.production().rules[5].size == "49/173"
           && loaded.production().rules[5].offset == QPointF(50, 10)
@@ -1493,11 +1737,21 @@ int main(int argc, char** argv) {
           && loaded.production().sizes[9].measurements.value("bust") == 1080
           && loaded.production().sizes[9].measurements.value("waist") == 920
           && loaded.production().sizes[10].name == QStringLiteral("ГОСТ 17916-86 86-48-45")
-          && loaded.production().sizes[10].source == QStringLiteral("ГОСТ 17916-86, таблица 1, изменения № 1, 2, полнотный ряд VI")
+          && loaded.production().sizes[10].source == QStringLiteral("ГОСТ 17916-86, таблица 1, изменения № 1, 2, полнотный ряд VI; таблица 5, сверенные признаки 2, 4, 7")
           && loaded.production().sizes[10].measurements.value("waist") == 450
+          && loaded.production().sizes[10].measurements.value("sternal_height") == 656
+          && loaded.production().sizes[10].measurements.value("side_neck_height") == 682
+          && loaded.production().sizes[10].measurements.value("waist_height") == 482
           && loaded.production().sizes[11].name == QStringLiteral("ГОСТ 17917-86 86-48-45")
           && loaded.production().sizes[11].source == QStringLiteral("ГОСТ 17917-86, таблица 1, изменения № 1, 2, полнотный ряд IV")
           && loaded.production().sizes[11].measurements.value("waist") == 450
+          && !loaded.production().sizes[11].measurements.contains("waist_height")
+          && loaded.production().sizes[12].name == QStringLiteral("ГОСТ 17917-86 146-72-63")
+          && loaded.production().sizes[12].measurements.value("sternal_height") == 1182
+          && loaded.production().sizes[12].measurements.value("side_neck_height") == 1232
+          && loaded.production().sizes[12].measurements.value("waist_height") == 924
+          && loaded.production().sizes[12].measurements.value("gost_5") == 1180
+          && loaded.production().sizes[12].measurements.value("gost_13") == 320
           && loaded.production().sizes[5].measurements.value("Chest") == 1050
           && loaded.production().sizes[5].measurements.value("Sleeve") == 631
           && loaded.production().placements.size() == 1 && loaded.production().placements.front().size == "L"
@@ -2467,6 +2721,52 @@ int main(int argc, char** argv) {
     action(fromLibrary, "&Save").trigger();
     check(loaded.load(copied) && loaded.libraryInstances().front().revision == newRevision,
           "Redo the library revision as one change");
+
+    check(revised.save(libraryPath), "Align the tracked source with the installed revision");
+    const auto autoLabel = QStringLiteral("Автоматически обновлять связанные конструкции");
+    auto nextDraft = revised.parametricDraft();
+    const auto oldName = nextDraft.edges.front().name;
+    const auto newName = QStringLiteral("renamed_library_outline");
+    const auto stableId = loaded.libraryInstances().front().edges.value(oldName);
+    const auto edge = std::ranges::find(revised.entities(), oldName, &opc::Entity::draftName);
+    check(edge != revised.entities().end(), "Locate the renamed source edge");
+    auto revisedEdge = *edge;
+    revisedEdge.draftName = newName;
+    revised.replace(edge - revised.entities().begin(), revisedEdge);
+    nextDraft.edges.front().name = newName;
+    const QRegularExpression oldToken(QStringLiteral("\\b") + QRegularExpression::escape(oldName) + QStringLiteral("\\b"));
+    for (auto& parameter : nextDraft.parameters)
+        parameter.formula.replace(oldToken, newName);
+    for (auto& point : nextDraft.points) {
+        point.x.replace(oldToken, newName);
+        point.y.replace(oldToken, newName);
+    }
+    check(revised.setParametricDraft(nextDraft, &updateError), qPrintable(updateError));
+    action(fromLibrary, autoLabel).trigger();
+    check(revised.save(libraryPath),
+          "Replace the tracked source atomically while synchronization is enabled");
+    QEventLoop synchronization;
+    auto& undoSync = action(fromLibrary, QStringLiteral("Undo ") + updateLabel);
+    QObject::connect(&undoSync, &QAction::changed, &synchronization, [&] {
+        if (undoSync.text() == QStringLiteral("Undo ") + autoLabel)
+            synchronization.quit();
+    });
+    QTimer::singleShot(4000, &synchronization, &QEventLoop::quit);
+    synchronization.exec();
+    check(undoSync.text() == QStringLiteral("Undo ") + autoLabel,
+          "Synchronize a replacement source as one undoable change");
+    action(fromLibrary, autoLabel).trigger();
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.libraryInstances().front().edges.value(newName) == stableId,
+          "Save the automatically migrated edge with its original receiving identifier");
+    undoSync.trigger();
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.libraryInstances().front().edges.value(oldName) == stableId,
+          "Undo the renamed source object together with its saved binding");
+    action(fromLibrary, QStringLiteral("Redo ") + autoLabel).trigger();
+    action(fromLibrary, "&Save").trigger();
+    check(loaded.load(copied) && loaded.libraryInstances().front().edges.value(newName) == stableId,
+          "Redo and reopen the topology synchronization with the same object identifier");
 
     opc::PatternDocument groupGrade;
     groupGrade.pieces().append({"Panel", 5});

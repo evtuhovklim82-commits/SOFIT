@@ -1,5 +1,6 @@
 #include "ProductionDialogs.h"
 #include "ChildSizeTables.h"
+#include "VerifiedChildMeasures.h"
 #include "PatternPdf.h"
 #include "Production.h"
 #include "PatternDxf.h"
@@ -60,6 +61,8 @@
 #include <tuple>
 #include <cmath>
 #include <functional>
+#include <limits>
+#include <numeric>
 
 namespace {
 QString tr(const char* text) { return QCoreApplication::translate("ProductionDialogs", text); }
@@ -323,7 +326,10 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
     });
     QObject::connect(addSize, &QPushButton::clicked, &dialog, [=] {
         addMeasurement({}, {}, {});
-        sizes->editItem(sizes->item(sizes->rowCount() - 1, 0));
+        auto* first = sizes->item(sizes->rowCount() - 1, 0);
+        sizes->setFocus();
+        sizes->setCurrentItem(first);
+        sizes->editItem(first);
     });
 
     const auto readMeasurements = [sizes](QString& error, const QVector<QStringList>& appended = {},
@@ -509,6 +515,34 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         form.addRow(QStringLiteral("Полнотная группа / ряд"), &group);
         form.addRow(QStringLiteral("Рост, см"), &height);
         form.addRow(QStringLiteral("Обхват груди, см"), &bust);
+        QCheckBox additional(QStringLiteral("Добавить сверенные признаки 2, 4 и 7"));
+        additional.setObjectName(QStringLiteral("verifiedAdditionalMeasures"));
+        const auto extraRow = [&]() -> const sofit::ChildMeasureRow* {
+            if (type.currentIndex() < Girls)
+                return nullptr;
+            const auto rows = type.currentIndex() == Girls
+                ? std::span<const sofit::ChildMeasureRow>(sofit::verifiedGirlsMeasures)
+                : std::span<const sofit::ChildMeasureRow>(sofit::verifiedBoysMeasures);
+            const int h = height.currentData().toInt();
+            const int b = bust.currentData().toInt();
+            const int w = figures.value(h).value(b);
+            const auto found = std::ranges::find_if(rows, [&](const auto& row) {
+                return row.heightCm == h && row.bustCm == b && row.waistCm == w;
+            });
+            return found == rows.end() ? nullptr : &*found;
+        };
+        QCheckBox remainingTraits(QStringLiteral("Добавить остальные сверенные признаки по номерам ГОСТ"));
+        remainingTraits.setObjectName(QStringLiteral("verifiedNumberedTraits"));
+        const auto updateAdditional = [&] {
+            const bool available = extraRow() != nullptr;
+            additional.setEnabled(available);
+            remainingTraits.setEnabled(available);
+        };
+        QObject::connect(&bust, &QComboBox::currentIndexChanged, &reference, updateAdditional);
+        QObject::connect(&type, &QComboBox::currentIndexChanged, &reference, updateAdditional);
+        updateAdditional();
+        form.addRow(&additional);
+        form.addRow(&remainingTraits);
         QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
         form.addRow(&buttons);
         QObject::connect(&buttons, &QDialogButtonBox::accepted, &reference, &QDialog::accept);
@@ -527,9 +561,37 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
         const auto attribution = index < Girls
             ? QStringLiteral("\t%1, таблица 3, полнотная группа %2").arg(standardId, group.currentText())
             : QStringLiteral("\t%1, таблица 1, изменения № 1, 2, полнотный ряд %2").arg(standardId, group.currentText());
-        appendMeasurements(QStringList{row(QStringLiteral("height"), statureCm) + attribution,
-                                       row(QStringLiteral("bust"), bustCm),
-                                       row(index == Women ? QStringLiteral("hip") : QStringLiteral("waist"), thirdCm)}.join(u'\n'));
+        QStringList measurements{row(QStringLiteral("height"), statureCm) + attribution,
+                                 row(QStringLiteral("bust"), bustCm),
+                                 row(index == Women ? QStringLiteral("hip") : QStringLiteral("waist"), thirdCm)};
+        if (const auto* extra = extraRow(); extra && additional.isChecked()) {
+            measurements.front() += index == Girls
+                ? QStringLiteral("; таблица 5, сверенные признаки 2, 4, 7")
+                : QStringLiteral("; сверенные признаки 2, 4, 7");
+            const QStringList names{QStringLiteral("sternal_height"), QStringLiteral("side_neck_height"),
+                                    QStringLiteral("waist_height")};
+            for (qsizetype i = 0; i < names.size(); ++i) {
+                if (extra->heightsMm[i] > 0)
+                    measurements.append(QStringLiteral("%1\t%2\t%3").arg(size, names[i]).arg(extra->heightsMm[i]));
+            }
+        }
+        if (const auto* extra = extraRow(); extra && remainingTraits.isChecked()) {
+            measurements.front() += QStringLiteral(", дополнительные сверенные признаки по номерам ГОСТ");
+            const auto appendTraits = [&](auto&& codes, auto&& values) {
+                for (size_t i = 0; i < std::size(codes); ++i) {
+                    if (values[i] != 0)
+                        measurements.append(QStringLiteral("%1\tgost_%2\t%3").arg(size).arg(codes[i]).arg(values[i]));
+                }
+            };
+            if (index == Girls) {
+                const auto rowIndex = extra - sofit::verifiedGirlsMeasures;
+                appendTraits(sofit::verifiedGirlsTraitCodes, sofit::verifiedGirlsTraitsMm[rowIndex]);
+            } else {
+                const auto rowIndex = extra - sofit::verifiedBoysMeasures;
+                appendTraits(sofit::verifiedBoysTraitCodes, sofit::verifiedBoysTraitsMm[rowIndex]);
+            }
+        }
+        appendMeasurements(measurements.join(u'\n'));
     });
     const auto readMeasurementFile = [&dialog](const QString& title, const QString& directory)
         -> std::optional<QString> {
@@ -720,7 +782,10 @@ std::optional<opc::ProductionData> editGrading(QWidget* parent, const opc::Patte
     ruleButtons->insertWidget(0, addGrade);
     QObject::connect(addGrade, &QPushButton::clicked, &dialog, [&] {
         addRule({{}, 0, {}, {}}, false);
-        rules->editItem(rules->item(rules->rowCount() - 1, 0));
+        auto* first = rules->item(rules->rowCount() - 1, 0);
+        rules->setFocus();
+        rules->setCurrentItem(first);
+        rules->editItem(first);
     });
 
     const auto readRules = [rules](const QSet<QString>& sizeNames, QString& error) {
@@ -1147,8 +1212,8 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     controls->addWidget(new QLabel(tr("Piece clearance")));
     controls->addWidget(clearance);
     auto* piece = new QComboBox;
-    for (const auto& entry : document.pieces())
-        piece->addItem(entry.name);
+    for (qsizetype i = 0; i < document.pieces().size(); ++i)
+        piece->addItem(document.pieces()[i].name, QVariant::fromValue(i));
     controls->addWidget(piece, 1);
     auto* size = new QComboBox;
     size->addItem(tr("Base pattern"), QString{});
@@ -1265,7 +1330,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         registration->clear();
         registration->addItem(tr("Cutting outline corner"), QString{});
         for (const auto& edge : document.entities()) {
-            if (edge.piece == piece->currentIndex() && edge.layer == opc::Layer::Main
+            if (piece->currentIndex() >= 0 && edge.piece == piece->currentData().toLongLong() && edge.layer == opc::Layer::Main
                 && !edge.draftName.isEmpty() && (edge.shape == opc::Shape::Line || edge.shape == opc::Shape::Curve))
                 registration->addItem(edge.draftName, edge.draftName);
         }
@@ -1301,15 +1366,43 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
         "После авторасстановки сравните длину с исходным алгоритмом и проверьте отчёт раскроя. Печатайте PDF в масштабе 100 %."));
 
     QMap<QString, opc::PatternDocument> graded;
-    graded.insert(QString{}, document);
+    graded.insert(QString{}, opc::gradedPattern(document, {}, nullptr, opc::GradeEdgeNames::Preserve));
     QVector<PlacementItem*> items;
     QGraphicsRectItem* fabric = nullptr;
 
-    const auto cutFor = [&](const opc::FabricPlacement& placement) {
-        if (!graded.contains(placement.size))
-            graded.insert(placement.size, opc::gradedPattern(document, placement.size, nullptr, opc::GradeEdgeNames::Preserve));
-        return opc::fabricPiece(graded[placement.size], placement, false, data.fabricShrinkagePercent);
+    const auto gradeFor = [&](const QString& name) -> const opc::PatternDocument& {
+        auto entry = graded.constFind(name);
+        if (entry == graded.cend()) {
+            graded.insert(name, opc::gradedPattern(document, name, nullptr, opc::GradeEdgeNames::Preserve));
+            entry = graded.constFind(name);
+        }
+        return entry.value();
     };
+    const auto cutFor = [&](const opc::FabricPlacement& placement) {
+        return opc::fabricPiece(gradeFor(placement.size), placement, false, data.fabricShrinkagePercent);
+    };
+    if (!document.sizeCutHistory().isEmpty()) {
+        const auto updatePieces = [&, gradeFor] {
+            const auto previous = piece->currentData();
+            const auto& selectedSize = gradeFor(size->currentData().toString());
+            QSet<qsizetype> active;
+            for (const auto& entity : selectedSize.entities()) {
+                if (entity.layer == opc::Layer::Main)
+                    active.insert(entity.piece);
+            }
+            piece->clear();
+            for (qsizetype i = 0; i < document.pieces().size(); ++i) {
+                if (!document.isSizeCutPiece(i) || active.contains(i))
+                    piece->addItem(document.pieces()[i].name, QVariant::fromValue(i));
+            }
+            const auto restored = piece->findData(previous);
+            if (restored >= 0)
+                piece->setCurrentIndex(restored);
+            add->setEnabled(piece->count() > 0);
+        };
+        QObject::connect(size, &QComboBox::currentIndexChanged, &dialog, updatePieces);
+        updatePieces();
+    }
     const auto updateUsage = [&] {
         optimization->hide();
         QVector<QPolygonF> placed;
@@ -1428,7 +1521,8 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     };
     const auto updateRegistrationAction = [&] {
         const auto* item = selected();
-        setRegistration->setEnabled(item && data.placements[item->index].piece == piece->currentIndex());
+        setRegistration->setEnabled(item && piece->currentIndex() >= 0
+            && data.placements[item->index].piece == piece->currentData().toLongLong());
     };
     QObject::connect(piece, &QComboBox::currentIndexChanged, &dialog, [&](int) {
         fillRegistration();
@@ -1476,7 +1570,7 @@ std::optional<opc::ProductionData> editFabricLayout(QWidget* parent, const opc::
     QObject::connect(crossRepeat, &QDoubleSpinBox::valueChanged, &dialog, updateRepeat);
     QObject::connect(lengthRepeat, &QDoubleSpinBox::valueChanged, &dialog, updateRepeat);
     QObject::connect(add, &QPushButton::clicked, &dialog, [&] {
-        opc::FabricPlacement placement{piece->currentIndex(), size->currentData().toString(), {}};
+        opc::FabricPlacement placement{static_cast<qsizetype>(piece->currentData().toLongLong()), size->currentData().toString(), {}};
         placement.fixedOrientation = fixedOrientation->isChecked();
         assignRegistration(placement);
         const int mode = cutMode->currentIndex();
@@ -1754,7 +1848,8 @@ CutCopies cutCopies(const QVector<opc::FabricPlacement>& placements) {
     return keys;
 }
 
-void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, const MaterialOrder& saved) {
+void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, const MaterialOrder& saved,
+                       bool assignmentsPerCopy = false) {
     const auto title = QStringLiteral("Многоматериальный настил");
     const auto& original = document.production();
     if (original.placements.isEmpty()) {
@@ -1789,7 +1884,7 @@ void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, co
     }
 
     if (!saved.assignments.isEmpty()
-        && saved.assignments.size() != original.placements.size() - pairedLater.size()) {
+        && saved.assignments.size() != original.placements.size() - (assignmentsPerCopy ? 0 : pairedLater.size())) {
         QMessageBox::warning(parent, title, QStringLiteral("Число назначений не соответствует исходному проекту."));
         return;
     }
@@ -1803,6 +1898,7 @@ void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, co
         QVector<qsizetype> copies;
         QLineEdit* material;
         QSpinBox* lay;
+        LayKey previousKey;
     };
     QVector<Assignment> assignments;
     for (qsizetype i = 0; i < original.placements.size(); ++i) {
@@ -1831,14 +1927,21 @@ void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, co
         lay->setRange(1, 9999);
         lay->setEnabled(!saved.fixedSizePlan);
         table->setCellWidget(row, 3, lay);
+        LayKey previousKey;
         if (!saved.assignments.isEmpty()) {
-            material->setText(saved.assignments.at(row).first);
-            lay->setValue(saved.assignments.at(row).second);
+            const auto& planned = saved.assignments.at(assignmentsPerCopy ? i : row);
+            if (assignmentsPerCopy && pair != pairs.cend() && saved.assignments.at(*pair) != planned) {
+                QMessageBox::warning(parent, title, QStringLiteral("Парные копии должны относиться к одному настилу."));
+                return;
+            }
+            material->setText(planned.first);
+            lay->setValue(planned.second);
+            previousKey = planned;
         }
         QVector<qsizetype> copies{i};
         if (pair != pairs.cend())
             copies.append(*pair);
-        assignments.append({std::move(copies), material, lay});
+        assignments.append({std::move(copies), material, lay, previousKey});
     }
     auto* limits = new QFormLayout;
     QDoubleSpinBox tableLength;
@@ -1929,9 +2032,11 @@ void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, co
 
     QVector<LayKey> savedAssignments(assignments.size());
     QMap<LayKey, QVector<qsizetype>> groups;
+    QMap<LayKey, qsizetype> previousGroupSizes;
     int lastLayNumber = 0;
     for (qsizetype row = 0; row < assignments.size(); ++row) {
         const auto& assignment = assignments[row];
+        ++previousGroupSizes[assignment.previousKey];
         const auto name = assignment.material->text().trimmed();
         if (!validMaterial(name)) {
             QMessageBox::warning(parent, title, QStringLiteral("Укажите имя каждого материала без переносов и табуляции."));
@@ -1973,7 +2078,16 @@ void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, co
         auto& data = project.production();
         data.placements = copies;
         data.fabricFlaws.clear();
-        const auto previous = saved.lays.constFind(current.key);
+        auto previous = saved.lays.constFind(current.key);
+        if (previous == saved.lays.cend() && saved.fixedSizePlan && !current.splitSettings) {
+            const auto& previousKey = assignments[current.rows.front()].previousKey;
+            if (previousKey.second == lay && previousGroupSizes.value(previousKey) == current.rows.size()
+                && std::ranges::all_of(current.rows, [&](qsizetype row) {
+                    return assignments[row].previousKey == previousKey;
+                })) {
+                previous = saved.lays.constFind(previousKey);
+            }
+        }
         bool reuseLayout = false;
         int layers = current.layers;
         if (current.splitSettings) {
@@ -2010,9 +2124,6 @@ void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, co
                 || current.rows.size() < 2 || lastLayNumber >= 9999)
                 return false;
 
-            // Every assignment goes to one replacement marker with the same
-            // layer count. A left/right pair shares one assignment.
-            const auto middle = current.rows.size() / 2;
             using CopyKey = CutCopies::value_type;
             QMap<CopyKey, QVector<opc::FabricPlacement>> copiesByKey;
             const auto key = [](const opc::FabricPlacement& copy) {
@@ -2020,19 +2131,58 @@ void editMaterialOrder(QWidget* parent, const opc::PatternDocument& document, co
             };
             for (const auto& copy : data.placements)
                 copiesByKey[key(copy)].append(copy);
-            const auto partition = [&](qsizetype from, qsizetype to) {
+            QVector<QVector<opc::FabricPlacement>> units;
+            for (const auto row : current.rows) {
+                QVector<opc::FabricPlacement> members;
+                for (const auto index : assignments[row].copies)
+                    members.append(copiesByKey[key(original.placements[index])].takeFirst());
+                units.append(std::move(members));
+            }
+            const auto settingsFor = [&](const QVector<qsizetype>& members) {
                 auto settings = data;
                 settings.placements.clear();
-                for (auto row = from; row < to; ++row) {
-                    for (const auto index : assignments[current.rows[row]].copies)
-                        settings.placements.append(copiesByKey[key(original.placements[index])].takeFirst());
-                }
+                for (const auto member : members)
+                    settings.placements.append(units[member]);
                 return settings;
             };
-            auto first = partition(0, middle);
-            auto second = partition(middle, current.rows.size());
-            pending.prepend({{name, ++lastLayNumber}, current.rows.sliced(middle), std::move(second), layers});
-            pending.prepend({current.key, current.rows.first(middle), std::move(first), layers});
+            QVector<PendingLay> replacements;
+            if (units.size() <= opc::maxExactLayAssignments && copies.size() <= 8) {
+                const int maskCount = 1 << units.size();
+                QVector<double> lengths(maskCount, std::numeric_limits<double>::infinity());
+                const auto membersFor = [&](int mask) {
+                    QVector<qsizetype> members;
+                    for (qsizetype i = 0; i < units.size(); ++i) {
+                        if (mask & (1 << i))
+                            members.append(i);
+                    }
+                    return members;
+                };
+                for (int mask = 1; mask < maskCount - 1; ++mask) {
+                    auto settings = settingsFor(membersFor(mask));
+                    const auto arranged = opc::arrangeFabric(project, settings);
+                    if (arranged.error == opc::FabricLayoutError::None && arranged.optimizedLengthMm)
+                        lengths[mask] = *arranged.optimizedLengthMm;
+                }
+                const auto plan = opc::minimumMarkerPartition(lengths, tableLength.value());
+                if (plan.isEmpty() || lastLayNumber + plan.size() - 1 > 9999)
+                    return false;
+                for (const auto marker : plan) {
+                    const auto members = membersFor(marker);
+                    QVector<qsizetype> rows;
+                    for (const auto index : members)
+                        rows.append(current.rows[index]);
+                    const auto keyForLay = replacements.isEmpty() ? current.key : LayKey{name, ++lastLayNumber};
+                    replacements.append({keyForLay, std::move(rows), settingsFor(members), layers});
+                }
+            } else {
+                const auto middle = current.rows.size() / 2;
+                QVector<qsizetype> members(current.rows.size());
+                std::iota(members.begin(), members.end(), qsizetype{0});
+                replacements.append({current.key, current.rows.first(middle), settingsFor(members.first(middle)), layers});
+                replacements.append({{name, ++lastLayNumber}, current.rows.sliced(middle), settingsFor(members.sliced(middle)), layers});
+            }
+            for (auto replacement = replacements.rbegin(); replacement != replacements.rend(); ++replacement)
+                pending.prepend(std::move(*replacement));
             return true;
         };
         const bool needsLayout = !reuseLayout || previousWidth != data.fabricWidth;
@@ -2160,6 +2310,18 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
         QMessageBox::warning(parent, title, QStringLiteral("Нужны лекала с числом копий от 1 до 200 на комплект."));
         return;
     }
+    QVector<QVector<opc::FabricPlacement>> baseKit(document.pieces().size());
+    for (const auto& copy : document.production().placements) {
+        if (copy.size.isEmpty() && copy.piece >= 0 && copy.piece < baseKit.size())
+            baseKit[copy.piece].append(copy);
+    }
+    bool completeBaseKit = true;
+    for (qsizetype piece = 0; piece < baseKit.size(); ++piece) {
+        const auto& copies = baseKit[piece];
+        const auto left = std::ranges::count(copies, opc::CutHand::Left, &opc::FabricPlacement::hand);
+        const auto right = std::ranges::count(copies, opc::CutHand::Right, &opc::FabricPlacement::hand);
+        completeBaseKit &= copies.size() == document.pieces()[piece].cutCount && left == right;
+    }
 
     QDialog dialog(parent);
     dialog.setWindowTitle(title);
@@ -2191,16 +2353,234 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
     maximumKits.setRange(1, opc::maxAutomaticCopies / copiesPerKit);
     maximumKits.setValue(1);
     limits.addRow(QStringLiteral("Предельное число комплектов на слой"), &maximumKits);
+    QCheckBox copyCutModes(QStringLiteral("Копировать парность и сгибы из базовой раскладки"));
+    copyCutModes.setObjectName(QStringLiteral("copyBaseKitCutModes"));
+    copyCutModes.setEnabled(completeBaseKit);
+    copyCutModes.setToolTip(QStringLiteral("В базовой раскладке должен быть один полный комплект с совпадающими левой и правой парностями."));
+    limits.addRow(&copyCutModes);
+    QComboBox strategy;
+    strategy.setObjectName(QStringLiteral("orderPlanningStrategy"));
+    strategy.addItems({QStringLiteral("Быстрое распределение"), QStringLiteral("Минимум настилов"),
+                       QStringLiteral("Минимум расхода одного материала"),
+                       QStringLiteral("Минимум расхода по материалам")});
+    strategy.setToolTip(QStringLiteral("Точные режимы доступны до 24 комплектов и четырёх размеров. "
+        "Расход рассчитывается с настройками ткани исходного проекта по раскладкам до 6 деталей на слой."));
+    limits.addRow(QStringLiteral("Планирование"), &strategy);
+    QDoubleSpinBox planTableLength;
+    planTableLength.setRange(0, 1000000);
+    planTableLength.setSpecialValueText(QStringLiteral("Без ограничения"));
+    planTableLength.setEnabled(false);
+    auto* equipment = new QComboBox(&dialog);
+    equipment->setObjectName(QStringLiteral("orderPlanningEquipment"));
+    QSettings settings;
+    const auto profiles = settings.value(QStringLiteral("cuttingEquipment/profiles")).toMap();
+    equipment->addItem(QString());
+    equipment->addItems(profiles.keys());
+    equipment->setEnabled(false);
+    QObject::connect(equipment, &QComboBox::currentTextChanged, &dialog, [&](const QString& name) {
+        const auto profile = profiles.value(name).toMap();
+        if (!profile.isEmpty()) {
+            planTableLength.setValue(profile.value(QStringLiteral("tableLength")).toDouble());
+            maximumLayers.setValue(profile.value(QStringLiteral("maximumLayers")).toInt());
+        }
+    });
+    limits.addRow(QStringLiteral("Профиль оборудования"), equipment);
+    QObject::connect(&strategy, &QComboBox::currentIndexChanged, &dialog, [&](int selected) {
+        planTableLength.setEnabled(selected >= 2);
+        equipment->setEnabled(selected == 3);
+    });
+    limits.addRow(QStringLiteral("Длина стола для расчёта расхода, мм"), &planTableLength);
     layout.addLayout(&limits);
     QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     layout.addWidget(&buttons);
     QObject::connect(&buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     QVector<opc::KitLay> planned;
+    QMap<QString, QSet<qsizetype>> activePanels;
+    const auto copiesFor = [&](const QMap<QString, int>& kits) {
+        QVector<opc::FabricPlacement> copies;
+        for (auto size = kits.cbegin(); size != kits.cend(); ++size) {
+            for (qsizetype piece = 0; piece < document.pieces().size(); ++piece) {
+                if (document.isSizeCutPiece(piece) && !activePanels.value(size.key()).contains(piece))
+                    continue;
+                for (int copy = 0; copy < document.pieces()[piece].cutCount * size.value(); ++copy) {
+                    opc::FabricPlacement placement{piece, size.key(), {}};
+                    if (copyCutModes.isChecked()) {
+                        const auto& prototype = baseKit[piece][copy % baseKit[piece].size()];
+                        placement.hand = prototype.hand;
+                        placement.fold = prototype.fold;
+                        placement.fixedOrientation = prototype.fixedOrientation;
+                        if (strategy.currentIndex() >= 2) {
+                            placement.repeatEdge = prototype.repeatEdge;
+                            placement.repeatParameter = prototype.repeatParameter;
+                        }
+                    }
+                    copies.append(placement);
+                }
+            }
+        }
+        return copies;
+    };
+    struct MeasuredMarker {
+        QMap<QString, int> kits;
+        QVector<opc::FabricPlacement> placements;
+    };
+    QVector<MeasuredMarker> measuredMarkers;
+    auto plannedSource = document;
+    MaterialOrder optimizedOrder;
+    const auto optimizeMaterials = [&](const QMap<QString, int>& demand) {
+        QDialog materials(&dialog);
+        materials.setWindowTitle(QStringLiteral("Материалы заказа"));
+        QVBoxLayout materialLayout(&materials);
+        auto* parts = makeTable(&materialLayout, {QStringLiteral("Деталь"), QStringLiteral("Материал")});
+        parts->setObjectName(QStringLiteral("orderPlanningMaterials"));
+        QVector<QLineEdit*> names;
+        for (const auto& piece : document.pieces()) {
+            const int row = parts->rowCount();
+            parts->insertRow(row);
+            auto* label = new QTableWidgetItem(piece.name);
+            label->setFlags(label->flags() & ~Qt::ItemIsEditable);
+            parts->setItem(row, 0, label);
+            auto* name = new QLineEdit(QStringLiteral("Основной"));
+            name->setMaxLength(100);
+            parts->setCellWidget(row, 1, name);
+            names.append(name);
+        }
+        QDialogButtonBox materialButtons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        materialLayout.addWidget(&materialButtons);
+        QObject::connect(&materialButtons, &QDialogButtonBox::accepted, &materials, &QDialog::accept);
+        QObject::connect(&materialButtons, &QDialogButtonBox::rejected, &materials, &QDialog::reject);
+        if (materials.exec() != QDialog::Accepted)
+            return false;
+        QMap<QString, QSet<qsizetype>> partsByMaterial;
+        for (qsizetype i = 0; i < names.size(); ++i) {
+            const auto name = names[i]->text().trimmed();
+            if (!validMaterial(name)) {
+                QMessageBox::warning(&dialog, title, QStringLiteral("Укажите материал для каждой детали."));
+                return false;
+            }
+            partsByMaterial[name].insert(i);
+        }
+        auto candidate = document;
+        candidate.production().placements.clear();
+        MaterialOrder order;
+        order.equipmentName = equipment->currentText();
+        order.maximumLayers = maximumLayers.value();
+        order.tableLength = planTableLength.value();
+        order.fixedSizePlan = true;
+        // Fabric consumption is additive. With limits applied per lay each
+        // material can use its own optimal batch sequence for the same demand.
+        for (auto material = partsByMaterial.cbegin(); material != partsByMaterial.cend(); ++material) {
+            QMap<QString, int> materialDemand;
+            for (auto size = demand.cbegin(); size != demand.cend(); ++size) {
+                if (size.value() <= 0)
+                    continue;
+                const auto copies = copiesFor({{size.key(), 1}});
+                if (std::ranges::any_of(copies, [&](const auto& copy) { return material->contains(copy.piece); }))
+                    materialDemand.insert(size.key(), size.value());
+            }
+            if (materialDemand.isEmpty())
+                continue;
+            auto data = document.production();
+            bool accepted = false;
+            data.fabricWidth = QInputDialog::getDouble(&dialog, title,
+                QStringLiteral("Ширина материала «%1», мм").arg(material.key()), data.fabricWidth, 1, 1000000, 2, &accepted);
+            if (!accepted)
+                return false;
+            const auto flaws = editFabricFlaws(&dialog, data.fabricFlaws);
+            if (!flaws)
+                return false;
+            data.fabricFlaws = *flaws;
+            QVector<MeasuredMarker> evaluated;
+            const auto measure = [&](const QMap<QString, int>& kits) -> std::optional<double> {
+                data.placements = copiesFor(kits);
+                data.placements.removeIf([&](const auto& copy) { return !material->contains(copy.piece); });
+                if (data.placements.isEmpty() || data.placements.size() > 6)
+                    return std::nullopt;
+                const auto result = opc::arrangeFabric(document, data);
+                if (result.error != opc::FabricLayoutError::None || !result.optimizedLengthMm
+                    || (order.tableLength > 0 && *result.optimizedLengthMm > order.tableLength + 1e-6))
+                    return std::nullopt;
+                evaluated.append({kits, result.placements});
+                return result.optimizedLengthMm;
+            };
+            const auto lays = opc::minimumMaterialKitLays(materialDemand, order.maximumLayers,
+                                                         std::min(maximumKits.value(), 6), measure);
+            if (lays.isEmpty()) {
+                QMessageBox::warning(&dialog, title,
+                    QStringLiteral("Для материала «%1» не найден подходящий план. Проверьте параметры ткани и оборудования.")
+                        .arg(material.key()));
+                return false;
+            }
+            for (const auto& lay : lays) {
+                const int number = int(order.plannedLayers.size() + 1);
+                const auto marker = std::ranges::find(evaluated, lay.kitsPerSize, &MeasuredMarker::kits);
+                if (marker == evaluated.end() || number > 9999
+                    || order.assignments.size() + marker->placements.size() > 5000) {
+                    QMessageBox::warning(&dialog, title, QStringLiteral("Превышен предел назначений деталей."));
+                    return false;
+                }
+                const LayKey key{material.key(), number};
+                auto project = document;
+                project.production() = data;
+                project.production().placements = marker->placements;
+                order.plannedLayers.insert(number, lay.layers);
+                order.lays.insert(key, {std::move(project), lay.layers});
+                candidate.production().placements.append(marker->placements);
+                for (qsizetype i = 0; i < marker->placements.size(); ++i)
+                    order.assignments.append(key);
+            }
+        }
+        if (order.lays.isEmpty()) {
+            QMessageBox::warning(&dialog, title, QStringLiteral("Укажите тираж и материалы деталей."));
+            return false;
+        }
+        plannedSource = std::move(candidate);
+        optimizedOrder = std::move(order);
+        return true;
+    };
     QObject::connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&] {
         QMap<QString, int> demand;
         for (auto input = inputs.cbegin(); input != inputs.cend(); ++input)
             demand.insert(input.key(), input.value()->value());
-        planned = opc::planKitLays(demand, maximumLayers.value(), maximumKits.value());
+        activePanels.clear();
+        if (!document.sizeCutHistory().isEmpty()) {
+            for (auto size = demand.cbegin(); size != demand.cend(); ++size) {
+                if (!size.value())
+                    continue;
+                auto& active = activePanels[size.key()];
+                const auto graded = opc::gradedPattern(document, size.key());
+                for (const auto& entity : graded.entities()) {
+                    if (entity.layer == opc::Layer::Main && entity.piece >= 0)
+                        active.insert(entity.piece);
+                }
+            }
+        }
+        const int method = strategy.currentIndex();
+        measuredMarkers.clear();
+        if (method == 3) {
+            if (optimizeMaterials(demand))
+                dialog.accept();
+            return;
+        }
+        if (method == 2) {
+            const auto measure = [&](const QMap<QString, int>& kits) -> std::optional<double> {
+                auto settings = document.production();
+                settings.placements = copiesFor(kits);
+                if (settings.placements.isEmpty() || settings.placements.size() > 6)
+                    return std::nullopt;
+                const auto layout = opc::arrangeFabric(document, settings);
+                if (layout.error != opc::FabricLayoutError::None || !layout.optimizedLengthMm
+                    || (planTableLength.value() > 0 && *layout.optimizedLengthMm > planTableLength.value() + 1e-6))
+                    return std::nullopt;
+                measuredMarkers.append({kits, layout.placements});
+                return layout.optimizedLengthMm;
+            };
+            planned = opc::minimumMaterialKitLays(demand, maximumLayers.value(), std::min(maximumKits.value(), 6), measure);
+        } else if (method == 1) {
+            planned = opc::minimumKitLays(demand, maximumLayers.value(), maximumKits.value());
+        } else {
+            planned = opc::planKitLays(demand, maximumLayers.value(), maximumKits.value());
+        }
         qsizetype assignments = 0;
         for (const auto& lay : planned) {
             for (const auto kits : lay.kitsPerSize)
@@ -2208,7 +2588,11 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
         }
         if (planned.isEmpty() || assignments > 5000) {
             QMessageBox::warning(&dialog, title,
-                QStringLiteral("Укажите тираж. План должен содержать не более 5000 назначений деталей."));
+                method == 2
+                    ? QStringLiteral("Подходящего плана нет. Проверьте тираж, ширину и дефекты ткани, длину стола и предел в 6 деталей на слой.")
+                    : method == 1
+                    ? QStringLiteral("Для точного плана укажите от 1 до 24 комплектов и не более 4 размеров.")
+                    : QStringLiteral("Укажите тираж. План должен содержать не более 5000 назначений деталей."));
             return;
         }
         dialog.accept();
@@ -2217,26 +2601,34 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
     if (dialog.exec() != QDialog::Accepted)
         return;
 
+    if (strategy.currentIndex() == 3) {
+        editMaterialOrder(parent, plannedSource, optimizedOrder, true);
+        return;
+    }
     auto source = document;
     auto& placements = source.production().placements;
     placements.clear();
     MaterialOrder order;
     order.maximumLayers = maximumLayers.value();
+    order.tableLength = strategy.currentIndex() == 2 ? planTableLength.value() : 0;
     order.fixedSizePlan = true;
     for (qsizetype index = 0; index < planned.size(); ++index) {
         const auto& lay = planned[index];
         const int number = int(index + 1);
         order.plannedLayers.insert(number, lay.layers);
-        for (auto size = lay.kitsPerSize.cbegin(); size != lay.kitsPerSize.cend(); ++size) {
-            for (qsizetype piece = 0; piece < source.pieces().size(); ++piece) {
-                for (int copy = 0; copy < source.pieces()[piece].cutCount * size.value(); ++copy) {
-                    placements.append({piece, size.key(), {}});
-                    order.assignments.append({QStringLiteral("Основной"), number});
-                }
-            }
+        const LayKey key{QStringLiteral("Основной"), number};
+        const auto measured = std::ranges::find(measuredMarkers, lay.kitsPerSize, &MeasuredMarker::kits);
+        const auto copies = measured == measuredMarkers.end() ? copiesFor(lay.kitsPerSize) : measured->placements;
+        placements.append(copies);
+        for (qsizetype i = 0; i < copies.size(); ++i)
+            order.assignments.append(key);
+        if (measured != measuredMarkers.end()) {
+            auto marker = document;
+            marker.production().placements = copies;
+            order.lays.insert(key, {std::move(marker), lay.layers});
         }
     }
-    editMaterialOrder(parent, source, order);
+    editMaterialOrder(parent, source, order, true);
 }
 
 void reopenMaterialOrder(QWidget* parent) {

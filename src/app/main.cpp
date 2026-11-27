@@ -29,6 +29,8 @@ int productionReport(const opc::PatternDocument& document, const QString& destin
         bool valid = !graded.pieces().isEmpty();
         for (qsizetype i = 0; i < graded.pieces().size(); ++i) {
             const auto geometry = opc::analyzePiece(graded, i);
+            if (document.isSizeCutPiece(i) && geometry.error == opc::ContourError::Empty)
+                continue;
             const bool closed = geometry.error == opc::ContourError::None;
             valid &= closed && !geometry.allowanceFailed;
             QJsonObject piece{{"name", graded.pieces()[i].name}, {"closedContour", closed},

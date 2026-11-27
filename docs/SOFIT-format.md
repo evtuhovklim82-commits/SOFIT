@@ -2,14 +2,14 @@
 
 SOFIT 4.0 opens older SOFIT projects and writes schema 14 with default production and product options. Product information and piece clearance use schema 15. A configured repeat or customized tech pack uses schema 16. Named seam repeat points, fabric flaws and finished pattern measurements use schema 17. A project contains the editable pattern and its production data. DXF carries exchange geometry and PDF carries print output. GRAFIS MDL support requires a separate analysis of actual MDL files.
 
-## Schemas 14–21
+## Schemas 14–23
 
 The file is a UTF-8 JSON object with these fields.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `format` | string | `SOFIT` |
-| `version` | integer | `14`, `15`, `16`, `17`, `18`, `19`, `20` or `21` |
+| `version` | integer | `14` through `23` |
 | `payload` | string | A serialized UTF-8 JSON project object, escaped as a JSON string |
 | `sha256` | string | Lowercase hexadecimal SHA-256 of the UTF-8 bytes of the decoded payload string |
 
@@ -22,11 +22,15 @@ weights still use the first-outlet percentage stored in `width`.
 
 Envelope 21 adds optional `bevelAtStart` and `bevelAtEnd` booleans on main-layer piece lines and curves. Each field addresses the corresponding endpoint of the stored edge. Omission inherits the piece setting. At a shared endpoint one explicit setting is sufficient. Conflicting overrides make the allowance invalid.
 
+Envelope 22 stores variable cuts in `sizeCutHistory`. Each step stores the source piece, ordered named guides, a count formula, panel identifiers and optional silhouette steps on those identifiers. The source contour stays editable. Panel slots persist across sizes and reopening, including slots absent at a particular size. Grading evaluates the count and geometry from the current size measurements. A saved fabric placement references the panel slot and size. Edits that would remove a panel from a size in which it is already placed require the placement to be removed first.
+
+Envelope 23 stores optional `gradedEdgeMarks` on main-layer piece lines and curves. Each size name maps to a pair of arrays containing the edge notches and symbols for that size. An empty array overrides the corresponding base marks with no marks. A size without an entry uses the base marks. Positions are arc-length fractions measured from the start of the edge and are recorded when the split or merge runs.
+
 A main-layer line or curve can store up to 100 `edgeSymbols` records, each an array of symbol type, edge arc-length fraction, symbol size in millimetres, inset in millimetres and a boolean selecting the cutting outline. The direction and position are evaluated on the graded edge. The symbol must fit inside its reference contour.
 
 The `pleat-with-tabs` modeling operation stores a straight fold guide and uses the existing width or width formula. Replay reflects each straight crossing seam into the unfolded insert and generates the three fold lines. It validates the resulting outline and allowance in every size.
 
-The optional `libraryInstances` array stores each tracked source name, source formula revision, source structure signature and installed formula signature. The `measurements`, `parameters`, `points` and `edges` objects map source identifiers to project identifiers. An explicit refresh keeps the project's bound measurements and applies formula changes to a compatible source structure. Changed local formulas, missing bindings and incompatible source structures produce an error before the document is changed. The optional `sourcePath` is relative to the containing project and uses forward slashes. It can refer to another directory on the same volume. Saving under a new name recalculates the relative path for the new location. Earlier records without this path still resolve the source name in the directory of the containing project.
+The optional `libraryInstances` array stores each tracked source name, source formula revision, source structure signature and installed formula signature. The `measurements`, `parameters`, `points` and `edges` objects map source identifiers to project identifiers. Refresh keeps the project's bound measurements and applies formula changes to a compatible source structure. Refresh can extend the identifier maps for new parameters and unassigned construction points or guides. Retained named edges can reconnect to mapped points when the resulting construction and all grades validate. An unambiguous rename can reuse an existing receiving identifier. The manual refresh command also accepts explicit old-to-new replacements. Removing an unassigned construction object or formula parameter requires checking every dependent formula and replaying construction history. The saved maps then refer to the new source identifiers. The manual refresh dialog also accepts an ordered split or merge written as `old = first + second` or `first + second = merged`. A refresh can replace multiple disjoint straight or tangent-continuous quadratic chains atomically. The receiving identifier of the first edge is retained. Seam sections, edge marks and repeat anchors are moved along the replacement chain. Anchored notches and symbols are remapped separately for every size present during the refresh. A fabric repeat anchor is remapped using its placement size. Incompatible allowances, marks at a new split vertex and unsupported procedure rewrites reject the whole refresh. A formula source with modeling history can be tracked. Its ordered steps and source bindings, seam links and manual grading rules are included in the structure signature. A formula update replays the installed steps and checks the retained seams and grading rules. Changed local formulas, missing bindings and incompatible source structures produce an error before the document is changed. The optional `sourcePath` is relative to the containing project and uses forward slashes. It can refer to another directory on the same volume. Saving under a new name recalculates the relative path for the new location. Earlier records without this path still resolve the source name in the directory of the containing project.
 
 Validate the digest before parsing the payload. Hash the decoded string verbatim, including any whitespace, without reserializing its JSON object. The digest detects accidental corruption. It does not authenticate the author. Readers limit the outer file to 64 MiB. Saving validates the serialized payload by replaying it through the same reader, then uses an atomic replacement in the destination directory. Direct-write fallback is disabled.
 
@@ -105,3 +109,5 @@ A manually placed drill is stored as a piece-assigned construction point using t
 A `spread`, `pleat` or `gather` modeling step can store `width` as a formula string in millimetres. A JSON number retains its earlier meaning. The formula uses the draft's measurements, parameters and point coordinates and is checked in the base and every measurement-graded size. The ordered list `guides` can contain up to 32 end-to-end named straight or quadratic segments for one cut. Earlier builds may reject projects using either extension.
 
 Linked sleeves and shaped stands can call `capwidth(rise, target)` to solve the horizontal span of a quadratic half-profile with a horizontal crown tangent. Curve chains use `atan2deg(y, x)` to derive tangent angles in degrees from their current geometry.
+
+Shaped stands with several linked neckline sections use `standarct(width, rise, length)` to locate a join by cumulative seam length. The parameter splits the same quadratic profile in every size and preserves its tangent at the join.

@@ -36,6 +36,7 @@ struct ContourEdit {
     PatternDocument document;
     QVector<qsizetype> removedEntities;
     std::optional<SpreadMotion> spreadMotion;
+    QStringList panelKeys;
 };
 
 struct ContourEditResult {
@@ -59,6 +60,13 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
 inline constexpr qsizetype maxCrossingGuides = 8;
 ContourEditResult cutCrossingGuides(const PatternDocument& document, qsizetype piece,
                                     const QVector<qsizetype>& guides);
+
+// Evaluate ordered formula guides in a single size. The formula returns the
+// number of guides to activate, starting from the beginning of the list.
+// The result contains independent panels and leaves the source project intact.
+ContourEditResult evaluateSizeCuts(const PatternDocument& document, qsizetype piece,
+                                   const QVector<QString>& guides, const QString& countFormula,
+                                   const QString& size);
 
 // Scale width about the chosen axis and length about the top of the piece.
 ContourEditResult shapeSilhouette(const PatternDocument& document, qsizetype piece,
