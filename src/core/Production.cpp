@@ -773,6 +773,153 @@ QVector<CuttingReportRow> cuttingKitRows(const PatternDocument& document, const 
     return rows;
 }
 
+CuttingSchedule scheduleCuttingOrder(const QMap<QString, QMap<QString, int>>& demand,
+                                     const QVector<OrderMarker>& markers,
+                                     const QVector<CuttingMachine>& machines,
+                                     const QVector<FabricRoll>& rolls,
+                                     const RollMarkerMeasure& measure) {
+    if (demand.isEmpty() || machines.isEmpty() || rolls.isEmpty())
+        return {};
+
+    auto remaining = demand;
+    int totalKits = 0;
+    for (const auto& sizes : demand) {
+        if (sizes.isEmpty())
+            return {};
+        for (const int quantity : sizes) {
+            if (quantity <= 0)
+                return {};
+            if (quantity > 24 - totalKits)
+                return {CuttingScheduleStatus::SearchLimit, {}};
+            totalKits += quantity;
+        }
+    }
+
+    for (const auto& machine : machines) {
+        if (!std::isfinite(machine.tableLengthMm) || machine.tableLengthMm <= 0
+            || machine.maximumLayers <= 0 || !std::isfinite(machine.spreadingRateMmPerMinute)
+            || machine.spreadingRateMmPerMinute <= 0)
+            return {};
+        int previousEnd = 0;
+        for (const auto& window : machine.availability) {
+            if (window.startMinute < previousEnd || window.endMinute <= window.startMinute)
+                return {};
+            previousEnd = window.endMinute;
+        }
+    }
+
+    QVector<double> rollOffsets(rolls.size(), 0);
+    for (const auto& roll : rolls) {
+        if (roll.material.isEmpty() || !std::isfinite(roll.availableLengthMm) || roll.availableLengthMm < 0)
+            return {};
+    }
+    for (const auto& marker : markers) {
+        if (!demand.contains(marker.material) || marker.kitsPerLayer.isEmpty()
+            || !std::isfinite(marker.lengthMm) || marker.lengthMm <= 0)
+            return {};
+        const auto sizes = demand.constFind(marker.material);
+        for (auto kit = marker.kitsPerLayer.cbegin(); kit != marker.kitsPerLayer.cend(); ++kit) {
+            if (!sizes->contains(kit.key()) || kit.value() <= 0)
+                return {};
+        }
+        QSet<qsizetype> seen;
+        for (const auto roll : marker.compatibleRolls) {
+            if (roll < 0 || roll >= rolls.size() || rolls[roll].material != marker.material || seen.contains(roll))
+                return {};
+            seen.insert(roll);
+        }
+    }
+
+    QVector<int> machineEnds(machines.size(), 0);
+    QVector<int> rollEnds(rolls.size(), 0);
+    QVector<ScheduledLay> current;
+    CuttingSchedule best{CuttingScheduleStatus::Infeasible, {}};
+    double bestConsumption = std::numeric_limits<double>::infinity();
+    int bestEnd = std::numeric_limits<int>::max();
+    int budget = 200000;
+    const auto search = [&](auto&& self, int kitsLeft, double consumption, int completion) -> void {
+        if (budget == 0)
+            return;
+        --budget;
+        if (consumption > bestConsumption
+            || (consumption == bestConsumption && completion >= bestEnd))
+            return;
+        if (kitsLeft == 0) {
+            best = {CuttingScheduleStatus::Optimal, current};
+            bestConsumption = consumption;
+            bestEnd = completion;
+            return;
+        }
+
+        // Enumerating lay order covers precedence on both the machine and the roll.
+        // For a fixed order the earliest feasible start leaves the most time for later lays.
+        for (qsizetype index = 0; index < markers.size() && budget > 0; ++index) {
+            const auto& marker = markers[index];
+            auto& sizes = remaining[marker.material];
+            int maximumLayers = kitsLeft;
+            int kitsPerLayer = 0;
+            for (auto kit = marker.kitsPerLayer.cbegin(); kit != marker.kitsPerLayer.cend(); ++kit) {
+                maximumLayers = std::min(maximumLayers, sizes[kit.key()] / kit.value());
+                if (maximumLayers == 0)
+                    break;
+                kitsPerLayer += kit.value();
+            }
+            for (qsizetype m = 0; m < machines.size() && maximumLayers > 0 && budget > 0; ++m) {
+                const auto& machine = machines[m];
+                const int previousEnd = machineEnds[m];
+                for (int layers = std::min(maximumLayers, machine.maximumLayers); layers > 0 && budget > 0; --layers) {
+                    for (const auto roll : marker.compatibleRolls) {
+                        if (budget == 0)
+                            break;
+                        const double startMm = rollOffsets[roll];
+                        const auto layerLength = measure ? measure(index, roll, startMm, layers)
+                                                         : std::optional<double>{marker.lengthMm};
+                        if (!layerLength || !std::isfinite(*layerLength) || *layerLength <= 0
+                            || *layerLength > machine.tableLengthMm)
+                            continue;
+                        const double length = *layerLength * layers;
+                        const double endMm = startMm + length;
+                        if (endMm <= startMm || endMm > rolls[roll].availableLengthMm)
+                            continue;
+                        const double duration = std::max(1.0, std::ceil(length / machine.spreadingRateMmPerMinute));
+                        const int previousRollEnd = rollEnds[roll];
+                        const int earliest = std::max(previousEnd, previousRollEnd);
+                        std::optional<CuttingWindow> slot;
+                        for (const auto& window : machine.availability) {
+                            const int start = std::max(earliest, window.startMinute);
+                            if (duration <= double(window.endMinute) - start) {
+                                slot = CuttingWindow{start, start + int(duration)};
+                                break;
+                            }
+                        }
+                        if (!slot)
+                            continue;
+                        rollOffsets[roll] = endMm;
+                        machineEnds[m] = slot->endMinute;
+                        rollEnds[roll] = slot->endMinute;
+                        for (auto kit = marker.kitsPerLayer.cbegin(); kit != marker.kitsPerLayer.cend(); ++kit)
+                            sizes[kit.key()] -= kit.value() * layers;
+                        current.append({index, m, roll, layers, slot->startMinute, slot->endMinute,
+                                        startMm, endMm, *layerLength});
+                        self(self, kitsLeft - kitsPerLayer * layers, consumption + length,
+                             std::max(completion, slot->endMinute));
+                        current.removeLast();
+                        for (auto kit = marker.kitsPerLayer.cbegin(); kit != marker.kitsPerLayer.cend(); ++kit)
+                            sizes[kit.key()] += kit.value() * layers;
+                        machineEnds[m] = previousEnd;
+                        rollEnds[roll] = previousRollEnd;
+                        rollOffsets[roll] = startMm;
+                    }
+                }
+            }
+        }
+    };
+    search(search, totalKits, 0, 0);
+    if (budget == 0)
+        return {CuttingScheduleStatus::SearchLimit, {}};
+    return best;
+}
+
 QVector<SizeLay> planSizeLays(const QMap<QString, int>& demand, int maximumLayers) {
     if (maximumLayers < 1 || maximumLayers > 10000)
         return {};

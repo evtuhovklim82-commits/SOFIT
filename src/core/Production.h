@@ -112,6 +112,62 @@ QVector<KitLay> minimumMaterialKitLays(const QMap<QString, int>& demand, int max
                                      int maximumKitsPerLayer,
                                      const std::function<std::optional<double>(const QMap<QString, int>&)>& markerLength);
 
+struct CuttingWindow {
+    int startMinute;
+    int endMinute;
+};
+
+struct CuttingMachine {
+    double tableLengthMm;
+    int maximumLayers;
+    double spreadingRateMmPerMinute;
+    QVector<CuttingWindow> availability;
+};
+
+struct FabricRoll {
+    QString material;
+    double availableLengthMm;
+};
+
+struct OrderMarker {
+    QString material;
+    QMap<QString, int> kitsPerLayer;
+    double lengthMm;
+    // Indices of rolls on which nesting has been verified for width and fabric constraints.
+    QVector<qsizetype> compatibleRolls;
+};
+
+struct ScheduledLay {
+    qsizetype marker;
+    qsizetype machine;
+    qsizetype roll;
+    int layers;
+    int startMinute;
+    int endMinute;
+    double rollStartMm;
+    double rollEndMm;
+    double layerLengthMm;
+};
+
+enum class CuttingScheduleStatus { Optimal, Infeasible, InvalidInput, SearchLimit };
+
+struct CuttingSchedule {
+    CuttingScheduleStatus status = CuttingScheduleStatus::InvalidInput;
+    QVector<ScheduledLay> lays;
+};
+
+// Measure a marker on the next portion of a roll with the given layer count.
+using RollMarkerMeasure = std::function<std::optional<double>(qsizetype marker, qsizetype roll,
+                                                              double startMm, int layers)>;
+
+// Cover every material and size exactly, minimizing fabric use then completion time.
+// A lay uses one roll and must fit in one machine availability window.
+CuttingSchedule scheduleCuttingOrder(const QMap<QString, QMap<QString, int>>& demand,
+                                     const QVector<OrderMarker>& markers,
+                                     const QVector<CuttingMachine>& machines,
+                                     const QVector<FabricRoll>& rolls,
+                                     const RollMarkerMeasure& measure = {});
+
 // Index each measured candidate by the bit mask of its indivisible assignments.
 // Missing or infeasible candidates have a non-finite length.
 inline constexpr int maxExactLayAssignments = 7;

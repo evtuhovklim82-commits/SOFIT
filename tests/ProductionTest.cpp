@@ -399,6 +399,13 @@ int main(int argc, char** argv) {
           && reopenedMarker.production().fabricFlaws == mixedOrder.fabricFlaws
           && cuttingReport(reopenedMarker, reopenedMarker.production()).canExport(120),
           "Save and reopen a mixed-model marker");
+    const double mixedLength = cuttingReport(reopenedMarker, reopenedMarker.production()).usage.length;
+    const auto mixedSchedule = scheduleCuttingOrder(
+        {{"Outer", {{"L", 2}}}}, {{"Outer", {{"L", 1}}, mixedLength, {0}}},
+        {{mixedLength, 2, mixedLength, {{0, 2}}}}, {{"Outer", 2 * mixedLength}});
+    check(mixedSchedule.status == CuttingScheduleStatus::Optimal && mixedSchedule.lays.size() == 1
+          && mixedSchedule.lays.front().layers == 2,
+          "Plan a reopened graded marker against table, roll and calendar constraints");
     const auto mixedDxf = temp.filePath("mixed.dxf");
     check(exportFabricDxf(mixedDxf, mixed, mixed.production(), dxfError)
           && exportFabricPdf(temp.filePath("mixed.pdf"), mixed, mixed.production(), {}, dxfError), qPrintable(dxfError));
@@ -550,6 +557,74 @@ int main(int argc, char** argv) {
     check(minimumMaterialKitLays(materialDemand, 2, 2, [](const auto& marker) -> std::optional<double> {
         return marker.contains("M") ? std::nullopt : std::optional<double>{42};
     }).isEmpty(), "Reject a demand containing a size with no feasible marker");
+
+    const QMap<QString, QMap<QString, int>> orderDemand{{"Facing", {{"M", 1}}},
+                                                       {"Outer", {{"M", 1}, {"L", 1}}}};
+    const QVector<OrderMarker> orderMarkers{
+        {"Outer", {{"M", 1}, {"L", 1}}, 60, {0}},
+        {"Outer", {{"M", 1}}, 35, {0, 1}},
+        {"Outer", {{"L", 1}}, 35, {0}},
+        {"Facing", {{"M", 1}}, 80, {2}},
+    };
+    QVector<CuttingMachine> machines{{100, 2, 10, {{0, 8}}},
+                                     {50, 2, 10, {{0, 4}, {10, 14}}}};
+    QVector<FabricRoll> rolls{{"Outer", 60}, {"Outer", 35}, {"Facing", 80}};
+    const auto scheduled = scheduleCuttingOrder(orderDemand, orderMarkers, machines, rolls);
+    check(scheduled.status == CuttingScheduleStatus::Optimal && scheduled.lays.size() == 3,
+          "Choose a different marker composition when the material optimum blocks another material");
+    QSet<qsizetype> scheduledRolls;
+    int outerCompletion = 0;
+    for (const auto& lay : scheduled.lays) {
+        scheduledRolls.insert(lay.roll);
+        if (lay.marker == 3) {
+            check(lay.machine == 0 && lay.startMinute == 0 && lay.endMinute == 8,
+                  "Reserve the wide table for the marker that requires it");
+        } else {
+            check(lay.machine == 1 && lay.layers == 1
+                  && ((lay.startMinute == 0 && lay.endMinute == 4)
+                      || (lay.startMinute == 10 && lay.endMinute == 14)),
+                  "Do not overlap jobs or cross a gap in machine availability");
+            outerCompletion = std::max(outerCompletion, lay.endMinute);
+        }
+    }
+    check(scheduledRolls.size() == 3 && outerCompletion == 14,
+          "Keep the sole compatible roll available for the restricted marker");
+
+    machines[0].availability[0].endMinute = 14;
+    const auto lowerConsumption = scheduleCuttingOrder(orderDemand, orderMarkers, machines, rolls);
+    check(lowerConsumption.status == CuttingScheduleStatus::Optimal && lowerConsumption.lays.size() == 2,
+          "Prefer the lower fabric consumption when the shared calendar can accommodate it");
+    rolls[2].availableLengthMm = 79;
+    check(scheduleCuttingOrder(orderDemand, orderMarkers, machines, rolls).status
+              == CuttingScheduleStatus::Infeasible,
+          "Reject an order atomically when a required roll lacks fabric");
+    machines[1].availability.append({13, 15});
+    check(scheduleCuttingOrder(orderDemand, orderMarkers, machines, rolls).status
+              == CuttingScheduleStatus::InvalidInput,
+          "Reject overlapping windows for a single machine");
+
+    const QVector<CuttingMachine> parallelMachines{{50, 1, 10, {{0, 4}}},
+                                                   {50, 1, 10, {{0, 4}}}};
+    const auto sharedRoll = scheduleCuttingOrder({{"Outer", {{"M", 2}}}},
+        {{"Outer", {{"M", 1}}, 40, {0}}}, parallelMachines, {{"Outer", 80}});
+    check(sharedRoll.status == CuttingScheduleStatus::Infeasible,
+          "Prevent the same physical roll from running on two machines at once");
+
+    const auto measuredSchedule = scheduleCuttingOrder(
+        {{"Outer", {{"M", 1}, {"L", 1}}}},
+        {{"Outer", {{"L", 1}}, 40, {0}}, {"Outer", {{"M", 1}}, 40, {0}}},
+        {{70, 1, 10, {{0, 12}}}}, {{"Outer", 105}},
+        [](qsizetype marker, qsizetype, double offset, int) -> std::optional<double> {
+            if (marker == 0)
+                return offset == 40 ? std::optional<double>{65} : std::nullopt;
+            return offset == 0 ? std::optional<double>{40} : std::nullopt;
+        });
+    check(measuredSchedule.status == CuttingScheduleStatus::Optimal && measuredSchedule.lays.size() == 2
+          && measuredSchedule.lays.front().marker == 1 && measuredSchedule.lays.front().rollStartMm == 0
+          && measuredSchedule.lays.front().rollEndMm == 40 && measuredSchedule.lays.back().rollStartMm == 40
+          && measuredSchedule.lays.back().rollEndMm == 105 && measuredSchedule.lays.back().layerLengthMm == 65
+          && measuredSchedule.lays.back().startMinute == 4 && measuredSchedule.lays.back().endMinute == 11,
+          "Re-evaluate layout and spreading time at the actual offset on the shared roll");
 
     auto duplicate = production;
     duplicate.rules.append(duplicate.rules.front());
