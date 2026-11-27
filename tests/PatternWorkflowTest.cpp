@@ -20,6 +20,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFileDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QFormLayout>
 #include <QGraphicsItem>
 #include <QGraphicsScene>
@@ -1050,6 +1053,96 @@ void testMaterialLay() {
 
 }
 
+void testJointOrder() {
+    QTemporaryDir directory;
+    check(directory.isValid(), "Create a joint order fixture");
+    const QDir root(directory.path());
+    opc::PatternDocument source;
+    source.pieces() = {{"Front"}};
+    source.insert(0, {opc::Shape::Rectangle, {}, {70, 40}, {}, 0});
+    source.production().sizes = {{"M", {}}};
+    const auto path = root.filePath("source.sofit");
+    check(source.save(path), "Save the joint order source");
+    MainWindow window;
+    window.show();
+    chooseFile(action(window, "&Open"), path);
+
+    int stage = 0;
+    QString savedOrder;
+    QTimer timer;
+    QObject::connect(&timer, &QTimer::timeout, [&] {
+        auto* modal = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+        if (!modal)
+            return;
+        if (auto* strategy = modal->findChild<QComboBox*>("orderPlanningStrategy")) {
+            if (stage != 0)
+                return;
+            const auto* table = modal->findChild<QTableWidget*>();
+            qobject_cast<QSpinBox*>(table->cellWidget(0, 1))->setValue(1);
+            qobject_cast<QSpinBox*>(table->cellWidget(1, 1))->setValue(2);
+            strategy->setCurrentIndex(4);
+            ++stage;
+            auto* accept = modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
+            QTimer::singleShot(0, accept, &QPushButton::click);
+        } else if (modal->findChild<QTableWidget*>("orderPlanningMaterials")) {
+            check(stage++ == 1, "Collect material assignments before scheduling");
+            modal->accept();
+        } else if (auto* machines = modal->findChild<QPlainTextEdit*>("jointOrderMachines")) {
+            check(stage++ == 2, "Collect resources for the same order");
+            machines->setPlainText("100;1;10;0-4 10-18");
+            modal->findChild<QPlainTextEdit*>("jointOrderRolls")->setPlainText(
+                QStringLiteral("Основной;100;120;90,55,5,10"));
+            modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        } else if (auto* schedule = modal->findChild<QTableWidget*>("cuttingOrderSchedule")) {
+            check((stage == 3 || stage == 7) && schedule->rowCount() == 3,
+                  "Preserve the schedule when opening the saved order");
+            check(schedule->item(1, 4)->text() == "10"
+                  && schedule->item(2, 5)->text() == "18",
+                  "Respect machine gaps and roll order");
+            ++stage;
+            modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+        } else if (auto* picker = qobject_cast<QFileDialog*>(modal)) {
+            check(stage == 4 || stage == 6 || stage == 8, "Choose the order input or output");
+            picker->selectFile(stage == 6 ? savedOrder : root.absolutePath());
+            ++stage;
+            modal->accept();
+        } else if (auto* message = qobject_cast<QMessageBox*>(modal)) {
+            if ((stage != 5 && stage != 9) || message->icon() != QMessageBox::Information)
+                std::cerr << stage << ": " << message->text().toStdString() << std::endl;
+            check((stage == 5 || stage == 9) && message->icon() == QMessageBox::Information,
+                  "Save and export the resource-constrained order");
+            ++stage;
+            timer.stop();
+            modal->accept();
+        }
+    });
+    timer.start(0);
+    action(window, QStringLiteral("Спланировать заказ по размерам…")).trigger();
+    const auto folders = root.entryList({"SOFIT-lay-*"}, QDir::Dirs);
+    check(stage == 6 && folders.size() == 1 && !window.isWindowModified(),
+          "Keep joint planning independent of the source project");
+    const QDir output(root.filePath(folders.front()));
+    savedOrder = output.filePath("order.sofit-order");
+    QFile manifest(savedOrder);
+    check(manifest.open(QIODevice::ReadOnly), "Read the joint schedule manifest");
+    const auto order = QJsonDocument::fromJson(manifest.readAll()).object();
+    const auto lays = order.value("lays").toArray();
+    check(order.value("version").toInt() == 2 && lays.size() == 3, "Write the scheduled order format");
+    const auto middle = lays[1].toObject().value("schedule").toObject();
+    check(middle.value("rollStartMm").toDouble() == 40 && middle.value("rollEndMm").toDouble() == 80
+          && output.exists("material-2.pdf") && output.exists("material-2.dxf"),
+          "Export the actual scheduled roll segment");
+    opc::PatternDocument marker;
+    check(marker.load(output.filePath("material-2.sofit"))
+          && marker.production().fabricFlaws == QVector<QRectF>{{90, 15, 5, 10}},
+          "Persist the defect at its layer-relative position");
+
+    timer.start(0);
+    action(window, QStringLiteral("Открыть производственный заказ…")).trigger();
+    check(stage == 10 && root.entryList({"SOFIT-lay-*"}, QDir::Dirs).size() == 2
+          && !window.isWindowModified(), "Reopen and re-export the saved schedule intact");
+}
+
 void testPlannedOrder(bool mixed = false, bool splitToFit = false, bool useCutModes = false, bool minimumMaterial = false,
                       bool multipleMaterials = false) {
     QTemporaryDir directory;
@@ -1267,6 +1360,7 @@ int main(int argc, char** argv) {
     testPlannedOrder(false, false, true);
     testPlannedOrder(false, false, false, true);
     testPlannedOrder(false, false, false, true, true);
+    testJointOrder();
     MainWindow window;
     window.show();
 
