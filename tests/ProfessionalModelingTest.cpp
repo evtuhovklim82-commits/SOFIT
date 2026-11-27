@@ -1520,16 +1520,21 @@ void checkPleatExtensions() {
     curved.production().sizes.append({"L", {{"width", 140}}});
     check(curved.appendContour(0, ContourOperation::PleatWithTabs, {namedEdge(curved, "fold")}, 0, &error,
                                "width / 5"), error);
-    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+    for (const auto& [size, width] : {std::pair{QString{}, 100.}, {QStringLiteral("L"), 140.}}) {
         const auto grade = gradedPattern(curved, size);
         const auto geometry = analyzePiece(grade, 0);
         const auto main = std::ranges::count(grade.entities(), Layer::Main, &Entity::layer);
         const auto curvedEdges = std::ranges::count(grade.entities(), Shape::Curve, &Entity::shape);
         const auto& middleFold = grade.entities().last();
-        check(geometry.error == ContourError::None && !geometry.allowanceFailed && main == 10 && curvedEdges == 2
+        const auto topFold = middleFold.a.y() < middleFold.b.y() ? middleFold.a : middleFold.b;
+        const auto source = QPointF(width / 2, width * 0.05 - 10);
+        const auto tangentHeight = source.y() - 0.2 * (topFold.x() - source.x());
+        check(near(topFold.y() - tangentHeight, (width * 0.2 + 40) / 100),
+              "Reflect the local quadratic curvature into the tab crest");
+        check(geometry.error == ContourError::None && !geometry.allowanceFailed && main == 10 && curvedEdges == 4
               && middleFold.layer == Layer::Construction && geometry.contour.contains(middleFold.a)
               && geometry.contour.contains(middleFold.b),
-              "Keep the two quadratic seam sections and put both tabs on the exact graded outline");
+              "Keep the quadratic seam sections and reflected quadratic tab on the exact graded outline");
     }
     roundTripAndExport(curved, "L");
 }

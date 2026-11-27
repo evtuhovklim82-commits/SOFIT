@@ -728,16 +728,32 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
                     return failure("The cut endpoints do not divide the contour into two boundaries.");
             }
             std::optional<QPointF> aTab, bTab;
+            QPointF aTabControl, bTabControl;
+            bool aTabCurved = false, bTabCurved = false;
             if (pleatTabs) {
                 const auto alongFold = cut / length(cut);
-                const auto tab = [&](QPointF end, QPointF before, QPointF after) -> std::optional<QPointF> {
+                const auto tab = [&](QPointF end, QPointF before, QPointF after, const Entity* edge,
+                                     QPointF& controlOffset, bool& curved) -> std::optional<QPointF> {
                     const auto across = QPointF::dotProduct(before, normal);
                     if (across >= -tolerance || length(after) <= tolerance
                         || std::abs(cross(before / length(before), after / length(after))) > tolerance
                         || QPointF::dotProduct(before, after) >= 0)
                         return {};
                     const auto slope = QPointF::dotProduct(before, alongFold) / across;
-                    return end + shift / 2 - alongFold * (slope * spreadMm / 2);
+                    const auto halfWidth = spreadMm / 2;
+                    controlOffset = shift / 4 - alongFold * (slope * halfWidth / 2);
+                    double rise = -slope * halfWidth;
+                    if (edge && edge->shape == Shape::Curve) {
+                        // Express the local seam curvature as a height over the spread axis.
+                        // Reflection across a crease reverses the slope and preserves curvature.
+                        const auto quadratic = (edge->a - edge->control) + (edge->b - edge->control);
+                        const auto height = QPointF::dotProduct(quadratic, alongFold - slope * normal);
+                        const auto parameter = halfWidth / (2 * across);
+                        const auto correction = height * parameter * parameter;
+                        rise += correction;
+                        curved = std::abs(correction) > tolerance;
+                    }
+                    return end + shift / 2 + alongFold * rise;
                 };
                 const auto startTangent = [](const Entity& edge) {
                     return (edge.shape == Shape::Curve ? edge.control : edge.b) - edge.a;
@@ -746,11 +762,13 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
                     return (edge.shape == Shape::Curve ? edge.control : edge.a) - edge.b;
                 };
                 if (curvedBoundary) {
-                    aTab = tab(a, startTangent(firstEdges.front()), endTangent(secondEdges.back()));
-                    bTab = tab(b, endTangent(firstEdges.back()), startTangent(secondEdges.front()));
+                    aTab = tab(a, startTangent(firstEdges.front()), endTangent(secondEdges.back()),
+                               &firstEdges.front(), aTabControl, aTabCurved);
+                    bTab = tab(b, endTangent(firstEdges.back()), startTangent(secondEdges.front()),
+                               &firstEdges.back(), bTabControl, bTabCurved);
                 } else {
-                    aTab = tab(a, first[1] - a, second[second.size() - 2] - a);
-                    bTab = tab(b, first[first.size() - 2] - b, second[1] - b);
+                    aTab = tab(a, first[1] - a, second[second.size() - 2] - a, nullptr, aTabControl, aTabCurved);
+                    bTab = tab(b, first[first.size() - 2] - b, second[1] - b, nullptr, bTabControl, bTabCurved);
                 }
                 if (!aTab || !bTab)
                     return failure("The guide ends must cross seam edges with a continuous tangent.");
@@ -783,15 +801,24 @@ ContourEditResult modelContour(const PatternDocument& document, qsizetype piece,
                     if (edge.shape == Shape::Curve)
                         edge.control += shift;
                 }
-                const auto connect = [&](QPointF end, const std::optional<QPointF>& crest) {
+                const auto connect = [&](QPointF end, const std::optional<QPointF>& crest,
+                                         QPointF controlOffset, bool curved, bool reverse) {
+                    if (crest && curved) {
+                        const auto start = firstEdges.last().b;
+                        const auto spreadOffset = reverse ? -shift / 2 : shift / 2;
+                        const auto heightOffset = controlOffset - shift / 4;
+                        firstEdges.append({Shape::Curve, start, *crest, start + spreadOffset / 2 + heightOffset});
+                        firstEdges.append({Shape::Curve, *crest, end, end - spreadOffset / 2 + heightOffset});
+                        return;
+                    }
                     if (crest)
                         firstEdges.append({Shape::Line, firstEdges.last().b, *crest});
                     firstEdges.append({Shape::Line, firstEdges.last().b, end});
                 };
-                connect(secondEdges.front().a, bTab);
+                connect(secondEdges.front().a, bTab, bTabControl, bTabCurved, false);
                 firstEdges += secondEdges;
                 if (aTab)
-                    connect(firstEdges.front().a, aTab);
+                    connect(firstEdges.front().a, aTab, aTabControl, aTabCurved, true);
                 secondEdges.clear();
             }
             // The inserted strip folds in two equally deep layers. Its seam
