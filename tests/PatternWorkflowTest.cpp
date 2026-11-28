@@ -371,6 +371,7 @@ void testLibraryChainWorkflow() {
     target.production().sizes = {{"L", {{"w", 120}}}};
     const auto edge = std::ranges::find(target.entities(), "right", &opc::Entity::draftName);
     auto marked = *edge;
+    marked.seamAllowanceMm = 3;
     marked.seamNotches = {0.4};
     marked.seamSymbols = {{opc::PieceSymbol::Cross, 0.4, 3, 6, false}};
     target.replace(edge - target.entities().begin(), marked);
@@ -425,6 +426,48 @@ void testLibraryChainWorkflow() {
     check(loaded.load(originalPath) && loaded.libraryInstances().front().edges == ids && splitMarks(loaded)
           && opc::analyzePiece(opc::gradedPattern(loaded, "L"), 0).error == opc::ContourError::None,
           "Redo restores the same split identifiers and a closed graded contour");
+
+    opc::SeamLink partial;
+    partial.first = {ids.value("tail")};
+    partial.second = {"left"};
+    partial.notchPairs = 1;
+    partial.toleranceMm = 100;
+    check(loaded.addSeamLink(partial, &error), qPrintable(error));
+    const auto partialPath = projects.filePath("partial.sofit");
+    const auto mergedPath = projects.filePath("merged.sofit");
+    check(loaded.save(partialPath) && source.save(mergedPath), "Save the partial seam and source without its split landmark");
+    check(window.openProject(partialPath, &error), qPrintable(error));
+    runDialog<QInputDialog>(action(window, update), [&](QInputDialog& instance) {
+        QTimer::singleShot(0, [&] {
+            auto* file = qobject_cast<QFileDialog*>(QApplication::activeModalWidget());
+            check(file, "Open the merged source");
+            file->selectFile(mergedPath);
+            QTimer::singleShot(0, [] {
+                auto* mapping = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                check(mapping && mapping->findChild<QPlainTextEdit*>(), "Request an explicit merge");
+                mapping->findChild<QPlainTextEdit*>()->setPlainText("head + tail = right");
+                mapping->accept();
+            });
+            static_cast<QDialog*>(file)->accept();
+        });
+        instance.accept();
+    });
+    const auto checkMerged = [&] {
+        action(window, "&Save").trigger();
+        check(loaded.load(partialPath) && loaded.seamLinks().size() == 1
+              && loaded.seamLinks().front().first == QVector<QString>{"right"}
+              && loaded.seamLinks().front().firstSpan.value("L").first == 15.0 / 80
+              && opc::gradedPattern(loaded, "L").inspectSeamLinks().checks.front().firstMm == 65
+              && std::ranges::find(loaded.entities(), "right", &opc::Entity::draftName)->seamAllowanceMm == 3,
+              "Save the partial sewing interval and preserve the graded length with no split point");
+    };
+    checkMerged();
+    action(window, undoText).trigger();
+    action(window, "&Save").trigger();
+    check(loaded.load(partialPath) && loaded.seamLinks().front() == partial && splitMarks(loaded),
+          "Undo restores the previous seam binding and graded marks");
+    action(window, QStringLiteral("Redo Обновление экземпляра конструкции")).trigger();
+    checkMerged();
 }
 
 void testSizeCutWorkflow() {

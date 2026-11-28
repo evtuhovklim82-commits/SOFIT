@@ -16,6 +16,13 @@ bool validLink(const SeamLink& link) {
         || (link.allowanceMm && (!std::isfinite(*link.allowanceMm) || *link.allowanceMm < 0))
         || link.toleranceMm < 0 || link.notchPairs < 0 || link.notchPairs > 20)
         return false;
+    for (const auto* spans : {&link.firstSpan, &link.secondSpan}) {
+        if (!spans->isEmpty() && !spans->contains(QString{}))
+            return false;
+        for (const auto& [start, end] : *spans)
+            if (!(start >= 0 && start < end && end <= 1))
+                return false;
+    }
     QSet<QString> names;
     for (const auto* section : {&link.first, &link.second}) {
         for (const auto& name : *section) {
@@ -77,14 +84,19 @@ SeamLinkReport PatternDocument::inspectSeamLinks() const {
             check.error = QStringLiteral("A linked seam edge is missing or the sewing chain changed.");
             continue;
         }
-        check.firstMm = first->lengthMm;
-        check.secondMm = second->lengthMm;
+        const auto spanFor = [&](const auto& spans) {
+            return spans.value(projectedSize_, spans.value(QString{}, {0., 1.}));
+        };
+        const auto aSpan = spanFor(link.firstSpan);
+        const auto bSpan = spanFor(link.secondSpan);
+        check.firstMm = first->lengthMm * (aSpan.second - aSpan.first);
+        check.secondMm = second->lengthMm * (bSpan.second - bSpan.first);
         check.withinTolerance = std::abs(check.secondMm - check.firstMm - link.targetEaseMm) <= link.toleranceMm;
         QVector<std::pair<qsizetype, double>> positions;
         for (int i = 1; i <= link.notchPairs; ++i) {
             const auto fraction = static_cast<double>(i) / (link.notchPairs + 1);
-            const auto a = first->notchAt(fraction);
-            const auto b = second->notchAt(fraction);
+            const auto a = first->notchAt(std::lerp(aSpan.first, aSpan.second, fraction));
+            const auto b = second->notchAt(std::lerp(bSpan.first, bSpan.second, fraction));
             if (!a || !b) {
                 check.error = QStringLiteral("A linked notch falls on a seam junction. Adjust the notch count or the seam.");
                 break;

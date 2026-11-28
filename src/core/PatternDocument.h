@@ -109,6 +109,7 @@ struct SeamLink {
     int notchPairs = 0;
     std::optional<double> allowanceMm;
     QString gradedLengthMeasurement;
+    QMap<QString, QPair<double, double>> firstSpan, secondSpan; // Arc-length intervals in sewing direction, by size.
     bool operator==(const SeamLink&) const = default;
 };
 
@@ -226,6 +227,7 @@ public:
     bool load(const QString& path, QString* error = nullptr);
 
 private:
+    QString projectedSize_;
     static QJsonArray saveSeamLinks(const QVector<SeamLink>& seamLinks);
     static QJsonArray saveModelingHistory(const QVector<ModelingStep>& history);
     QString libraryStructureDigest() const;

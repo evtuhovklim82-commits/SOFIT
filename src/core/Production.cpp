@@ -126,6 +126,7 @@ PatternDocument uncutGradedPattern(const PatternDocument& document, const QStrin
         PatternDocument graded;
         graded.pieces() = document.pieces();
         graded.seamLinks_ = document.seamLinks_;
+        graded.projectedSize_ = size;
         for (auto& piece : graded.pieces())
             piece.size = size;
         for (auto layer : {Layer::Main, Layer::Construction, Layer::Allowance})

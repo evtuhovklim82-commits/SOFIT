@@ -192,6 +192,16 @@ QJsonArray PatternDocument::saveSeamLinks(const QVector<SeamLink>& seamLinks) {
             record.insert("allowance", *link.allowanceMm);
         if (!link.gradedLengthMeasurement.isEmpty())
             record.insert("gradedLengthMeasurement", link.gradedLengthMeasurement);
+        const auto saveSpans = [&](const QString& key, const auto& spans) {
+            if (spans.isEmpty())
+                return;
+            QJsonObject ranges;
+            for (auto it = spans.cbegin(); it != spans.cend(); ++it)
+                ranges.insert(it.key(), QJsonArray{it->first, it->second});
+            record.insert(key, ranges);
+        };
+        saveSpans("firstSpan", link.firstSpan);
+        saveSpans("secondSpan", link.secondSpan);
         links.append(record);
     }
     return links;
@@ -964,6 +974,22 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, const QD
                     return fail(QStringLiteral("Invalid graded seam measurement"));
                 link.gradedLengthMeasurement = record.value("gradedLengthMeasurement").toString();
             }
+            const auto readSpans = [&](const QString& key, auto& spans) {
+                if (!record.contains(key))
+                    return true;
+                if (!record.value(key).isObject())
+                    return false;
+                const auto ranges = record.value(key).toObject();
+                for (auto it = ranges.constBegin(); it != ranges.constEnd(); ++it) {
+                    const auto span = it.value().toArray();
+                    if (span.size() != 2 || !span[0].isDouble() || !span[1].isDouble())
+                        return false;
+                    spans.insert(it.key(), {span[0].toDouble(), span[1].toDouble()});
+                }
+                return true;
+            };
+            if (!readSpans("firstSpan", link.firstSpan) || !readSpans("secondSpan", link.secondSpan))
+                return fail(QStringLiteral("Invalid partial seam interval"));
             if (!loaded.addSeamLink(std::move(link), error))
                 return false;
         }

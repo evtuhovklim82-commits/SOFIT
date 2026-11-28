@@ -1369,6 +1369,35 @@ void checkTrackedConstruction() {
           "The dependency follows the changed chain geometry, including its added segment");
     roundTripAndExport(curvedInstance, "L");
     const auto tailName = curvedInstance.libraryInstances().front().edges.value("curve_tail");
+    auto partialSeam = curvedInstance;
+    SeamLink partialLink;
+    partialLink.first = {tailName};
+    partialLink.second = {"pocket_bottom"};
+    partialLink.reverseFirst = true;
+    partialLink.notchPairs = 1;
+    partialLink.toleranceMm = 100;
+    auto partialTailIndex = namedEdge(partialSeam, tailName);
+    auto partialTail = partialSeam.entities()[partialTailIndex];
+    partialTail.seamSymbols = {{PieceSymbol::Cross, 0.8}};
+    partialTail.seamNotches = {0.75};
+    partialSeam.replace(partialTailIndex, partialTail);
+    check(partialSeam.addSeamLink(partialLink, &error), error);
+    check(partialSeam.updateLibraryConstruction(0, curvedSource, &error, {}, {},
+          {{"right", {"curve_head", "curve_tail"}}}), error);
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto grade = gradedPattern(partialSeam, size, nullptr, GradeEdgeNames::Preserve);
+        const auto partial = grade.inspectSeamLinks();
+        const auto rightIndex = namedEdge(grade, "right");
+        const auto& right = grade.entities()[rightIndex];
+        check(partial.checks.size() == 2 && partial.checks.back().error.isEmpty()
+              && near(partial.checks.back().firstMm, *seamLength(right) / 2)
+              && std::ranges::any_of(partial.notches.value(rightIndex), [](double value) { return near(value, 0.75); })
+              && right.seamSymbols.size() == 1 && near(right.seamSymbols.front().fraction, 0.9)
+              && right.seamNotches.size() == 1 && near(right.seamNotches.front(), 0.875),
+              "Preserve a reversed partial seam, its matched notch and manufacturing marks after deleting split landmarks");
+    }
+    roundTripAndExport(partialSeam, "L");
+
     auto withPartial = curvedInstance.parametricDraft();
     withPartial.parameters.append({"tail_share", tailName + ".len"});
     check(curvedInstance.setParametricDraft(std::move(withPartial), &error), error);

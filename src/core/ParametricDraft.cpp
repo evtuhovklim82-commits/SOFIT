@@ -1937,9 +1937,52 @@ bool PatternDocument::updateLibraryConstruction(qsizetype index, const PatternDo
             if (consumesChain && (step.contour || !step.rotationPivot.isEmpty() || !collapseSplit(step.objects, merge.targetEdges, false)))
                 return fail(QStringLiteral("A receiving procedure cannot be mapped to the merged edge."));
         }
+        const auto migrateSection = [&](auto& names, auto& spans, bool reversed, const auto& sharedWidth) {
+            if (collapseSplit(names, merge.targetEdges, true))
+                return true;
+            const auto position = merge.targetEdges.indexOf(names.front());
+            const auto last = merge.targetEdges.indexOf(names.back());
+            const auto direction = reversed ? -1 : 1;
+            if (position < 0 || last < 0 || last - position != direction * (names.size() - 1))
+                return false;
+            for (qsizetype i = 0; i < names.size(); ++i)
+                if (names[i] != merge.targetEdges[position + direction * i])
+                    return false;
+            const auto lower = std::min(position, last);
+            const auto upper = std::max(position, last);
+            // A single edge can only retain one cutting allowance.
+            if (sharedWidth) {
+                const auto widths = inspectSeamLinks().allowances;
+                for (const auto& name : merge.targetEdges) {
+                    const auto edge = std::ranges::find(entities_, name, &Entity::draftName);
+                    const auto index = edge - entities_.begin();
+                    if (widths.value(index, edge->seamAllowanceMm.value_or(pieces_[edge->piece].allowanceMm))
+                        != *sharedWidth)
+                        return false;
+                }
+            }
+            QStringList sizes{QString{}};
+            for (const auto& size : production_.sizes)
+                sizes.append(size.name);
+            auto migrated = spans;
+            for (const auto& size : sizes) {
+                const auto graded = gradedPattern(*this, size, nullptr, GradeEdgeNames::Preserve);
+                const auto ends = chainEnds(graded, merge.targetEdges);
+                if (!ends)
+                    return false;
+                const double start = reversed ? 1 - (*ends)[upper + 1] : (*ends)[lower];
+                const double end = reversed ? 1 - (*ends)[lower] : (*ends)[upper + 1];
+                const auto before = spans.value(size, spans.value(QString{}, {0., 1.}));
+                migrated.insert(size, {std::lerp(start, end, before.first), std::lerp(start, end, before.second)});
+            }
+            names = {merge.targetEdges.front()};
+            spans = std::move(migrated);
+            return true;
+        };
         for (auto& seam : candidate.seamLinks_) {
-            if (!collapseSplit(seam.first, merge.targetEdges, true) || !collapseSplit(seam.second, merge.targetEdges, true))
-                return fail(QStringLiteral("A receiving seam refers to only part of the merged chain."));
+            if (!migrateSection(seam.first, seam.firstSpan, seam.reverseFirst, seam.allowanceMm)
+                || !migrateSection(seam.second, seam.secondSpan, seam.reverseSecond, seam.allowanceMm))
+                return fail(QStringLiteral("A partial receiving seam cannot be mapped to the merged chain."));
         }
         *head = std::move(merged);
     }
