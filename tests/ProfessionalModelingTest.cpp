@@ -1272,10 +1272,10 @@ void checkTrackedConstruction() {
     curvedInstance.production().sizes = {{"L", {{"width", 120}, {"height", 125}}}};
     const ParametricDraft accessoryDraft{
         {}, {},
-        {{"PocketA", "400", "0"}, {"PocketB", "470", "0"}, {"PocketC", "455", "50"},
-         {"PocketD", "400", "60"}, {"PocketControl", "430", "14"}},
+        {{"PocketA", "400", "0"}, {"PocketB", "435", "0"}, {"PocketC", "455", "50"},
+         {"PocketD", "400", "60"}, {"PocketControl", "418", "-14"}, {"PocketBottomControl", "430", "75"}},
         {{"pocket_opening", "PocketA", "PocketB", "PocketControl"},
-         {"pocket_side", "PocketB", "PocketC", {}}, {"pocket_bottom", "PocketC", "PocketD", {}},
+         {"pocket_side", "PocketB", "PocketC", {}}, {"pocket_bottom", "PocketC", "PocketD", "PocketBottomControl"},
          {"pocket_return", "PocketD", "PocketA", {}}}
     };
     auto accessory = curvedPanel(accessoryDraft);
@@ -1288,6 +1288,23 @@ void checkTrackedConstruction() {
     fitting.targetEaseMm = 2;
     fitting.notchPairs = 2;
     fitting.toleranceMm = 0.01;
+    auto reshaped = curvedInstance;
+    reshaped.production().sizes.front().measurements["width"] = 90;
+    const auto originalSide = reshaped.entities()[namedEdge(reshaped, "pocket_side")];
+    auto secondFit = fitting;
+    secondFit.first = {"bottom"};
+    secondFit.second = {"pocket_bottom"};
+    check(reshaped.fitFormulaPieceToSeam(fitting, &error, true)
+          && reshaped.fitFormulaPieceToSeam(secondFit, &error, true), error);
+    const auto fixedSide = reshaped.entities()[namedEdge(reshaped, "pocket_side")];
+    check(fixedSide.a == originalSide.a && fixedSide.b == originalSide.b,
+          "Fit two chains independently without moving the receiving endpoints or scaling the side");
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto result = gradedPattern(reshaped, size).inspectSeamLinks();
+        check(result.checks.size() == 2 && std::ranges::all_of(result.checks, &SeamLinkCheck::withinTolerance),
+              "Both reshaped sewing chains match in each size");
+    }
+    roundTripAndExport(reshaped, "L");
     check(curvedInstance.fitFormulaPieceToSeam(fitting, &error), error);
     const auto verifyFit = [&](const PatternDocument& pattern) {
         for (const auto& size : {QString{}, QStringLiteral("L")}) {

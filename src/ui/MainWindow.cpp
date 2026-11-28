@@ -1927,9 +1927,10 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
     reverse->setObjectName("reverseSeamCorrespondence");
     reverse->setChecked(reverseSecond);
     form->addRow(reverse);
-    auto* fit = new QCheckBox(tr("Fit formula piece B to seam A"), &dialog);
-    fit->setToolTip(tr("Scale the editable contour of a collar or pocket uniformly about its sewing start in every size."));
-    form->addRow(fit);
+    auto* fit = new QComboBox(&dialog);
+    fit->addItems({tr("Use existing shapes"), tr("Scale formula piece B"), tr("Reshape one curve on B")});
+    fit->setToolTip(tr("Fit the receiving pattern in every size. Reshaping preserves the curve endpoints and the rest of the contour."));
+    form->addRow(tr("Fit to seam A"), fit);
     auto* summary = new QLabel(&dialog);
     summary->setWordWrap(true);
     form->addRow(summary);
@@ -2068,8 +2069,8 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
             relation.allowanceMm = linkedWidth->value();
         auto updated = doc_;
         QString error;
-        const bool fitted = fit->isChecked();
-        const bool saved = fitted ? updated.fitFormulaPieceToSeam(std::move(relation), &error)
+        const bool fitted = fit->currentIndex() != 0;
+        const bool saved = fitted ? updated.fitFormulaPieceToSeam(std::move(relation), &error, fit->currentIndex() == 2)
                                   : updated.addSeamLink(std::move(relation), &error);
         if (!saved) {
             QMessageBox::warning(&dialog, title, error);

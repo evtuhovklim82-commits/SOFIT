@@ -216,7 +216,7 @@ public:
     bool removeLastModelingStep(QString* error = nullptr);
     const QVector<SeamLink>& seamLinks() const { return seamLinks_; }
     bool addSeamLink(SeamLink link, QString* error = nullptr);
-    bool fitFormulaPieceToSeam(SeamLink link, QString* error = nullptr);
+    bool fitFormulaPieceToSeam(SeamLink link, QString* error = nullptr, bool reshapeCurve = false);
     bool editSeamLink(qsizetype index, SeamLink link, QString* error = nullptr);
     bool removeSeamLink(qsizetype index);
     SeamLinkReport inspectSeamLinks() const;

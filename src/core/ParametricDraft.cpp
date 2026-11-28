@@ -114,6 +114,8 @@ private:
                 return tangentControl(name, depth + 1);
             if (name == u"quadlen" && take(u'('))
                 return quadraticLength(depth + 1);
+            if (name == u"archheight" && take(u'('))
+                return archHeight(depth + 1);
             if (name == u"capcontrol" && take(u'('))
                 return capControl(depth + 1);
             if (name == u"capwidth" && take(u'('))
@@ -266,6 +268,32 @@ private:
         if (!length)
             fail(QStringLiteral("Cannot measure the quadratic curve"));
         return *length;
+    }
+
+    double archHeight(int depth) {
+        const auto chord = expression(depth);
+        if (!take(u','))
+            fail(QStringLiteral("Expected ',' after arch chord length"));
+        const auto target = expression(depth);
+        if (!take(u')'))
+            fail(QStringLiteral("Expected ')'"));
+        if (!evaluating_)
+            return 0;
+        if (chord <= 0 || target < chord - 1e-8)
+            fail(QStringLiteral("A sewing curve cannot be shorter than the distance between its endpoints"));
+        double low = 0;
+        double high = target * 2;
+        for (int i = 0; i < 36; ++i) {
+            const double height = (low + high) / 2;
+            const auto length = seamLength({Shape::Curve, {}, {chord, 0}, {chord / 2, height}});
+            if (!length)
+                fail(QStringLiteral("Cannot measure the fitted curve"));
+            if (*length < target)
+                low = height;
+            else
+                high = height;
+        }
+        return (low + high) / 2;
     }
 
     double capControl(int depth) {
@@ -825,7 +853,7 @@ QString rewriteFormula(const QString& formula, const NameMap& scalarNames, const
         const auto coordinate = match.captured(2);
         const bool function = coordinate.isEmpty()
             && (isNumericFunction(name) || isTangentFunction(name) || name == u"iflt" || name == u"quadlen"
-                || name == u"positive" || name == u"capcontrol" || name == u"capwidth" || name == u"standarct")
+                || name == u"positive" || name == u"archheight" || name == u"capcontrol" || name == u"capwidth" || name == u"standarct")
             && QStringView(formula).sliced(end).trimmed().startsWith(u'(');
         if (name.isEmpty() || function)
             result += match.captured();
@@ -1350,7 +1378,7 @@ bool PatternDocument::smoothCurveChain(const QVector<qsizetype>& indices, double
     return true;
 }
 
-bool PatternDocument::fitFormulaPieceToSeam(SeamLink link, QString* error) {
+bool PatternDocument::fitFormulaPieceToSeam(SeamLink link, QString* error, bool reshapeCurve) {
     const auto fail = [&](const QString& message) {
         if (error)
             *error = message;
@@ -1429,46 +1457,71 @@ bool PatternDocument::fitFormulaPieceToSeam(SeamLink link, QString* error) {
         prefix = QStringLiteral("fitted_seam_%1_").arg(++serial);
     } while (std::ranges::any_of(occupied, [&](const auto& name) { return name.startsWith(prefix); }));
 
-    const auto anchorEdge = std::ranges::find(draft_.edges, link.second.front(), &DraftEdge::name);
-    const auto anchor = link.reverseSecond ? anchorEdge->end : anchorEdge->start;
-    const auto scale = prefix + "scale";
-    draft.parameters.append({prefix + "source", sourceLength});
-    QStringList rawLengths;
-    for (const auto& name : link.second) {
-        const auto edge = std::ranges::find(draft_.edges, name, &DraftEdge::name);
-        rawLengths.append(edge->control.isEmpty()
-            ? QStringLiteral("hypot(%2.x - %1.x, %2.y - %1.y)").arg(edge->start, edge->end)
-            : QStringLiteral("quadlen(%1.x, %1.y, %2.x, %2.y, %3.x, %3.y)")
-                .arg(edge->start, edge->control, edge->end));
-    }
-    draft.parameters.append({prefix + "design", rawLengths.join(QStringLiteral(" + "))});
-    draft.parameters.append({scale, QStringLiteral("positive(%1source + (%2)) / positive(%1design)")
-        .arg(prefix, QString::number(link.targetEaseMm, 'g', 17))});
-    QHash<QString, QString> transformed;
-    const auto fitPoint = [&](const QString& raw) -> QString {
-        if (raw.isEmpty())
-            return {};
-        if (transformed.contains(raw))
-            return transformed.value(raw);
-        const auto name = prefix + QString::number(transformed.size() + 1);
-        const auto coordinate = [&](const QString& axis) {
-            return QStringLiteral("%1.%2 + (%3.%2 - %1.%2) * %4").arg(anchor, axis, raw, scale);
-        };
-        draft.points.append({name, coordinate(QStringLiteral("x")), coordinate(QStringLiteral("y"))});
-        transformed.insert(raw, name);
-        return name;
-    };
-    for (auto& edge : draft.edges) {
-        if (!targetNames.contains(edge.name))
-            continue;
-        edge.start = fitPoint(edge.start);
-        edge.end = fitPoint(edge.end);
-        edge.control = fitPoint(edge.control);
-    }
     auto candidate = *this;
-    for (auto& item : candidate.entities_) {
-        if (item.piece == target && item.shape == Shape::Point)
-            item.draftName = fitPoint(item.draftName);
+    draft.parameters.append({prefix + "source", sourceLength});
+    if (reshapeCurve) {
+        if (link.second.size() != 1 || second->shape != Shape::Curve)
+            return fail(QStringLiteral("Curve fitting needs one quadratic receiving edge."));
+        auto edge = std::ranges::find(draft.edges, link.second.front(), &DraftEdge::name);
+        const auto start = edge->start;
+        const auto end = edge->end;
+        const auto rawControl = edge->control;
+        const auto chord = prefix + "chord";
+        const auto rise = prefix + "rise";
+        const auto side = prefix + "side";
+        const auto dx = prefix + "dx";
+        const auto dy = prefix + "dy";
+        draft.parameters += {{dx, end + ".x - " + start + ".x"},
+                             {dy, end + ".y - " + start + ".y"},
+                             {chord, QStringLiteral("positive(hypot(%1, %2))").arg(dx, dy)},
+                             {rise, QStringLiteral("archheight(%1, %2source + (%3))")
+                                 .arg(chord, prefix, QString::number(link.targetEaseMm, 'g', 17))},
+                             {side, QStringLiteral("iflt(%1 * (%2.y - %3.y) - %4 * (%2.x - %3.x), 0, -1, 1)")
+                                 .arg(dx, rawControl, start, dy)}};
+        edge->control = prefix + "control";
+        draft.points.append({edge->control,
+            QStringLiteral("(%1.x + %2.x) / 2 - %3 * %4 * %5 / %6").arg(start, end, dy, rise, side, chord),
+            QStringLiteral("(%1.y + %2.y) / 2 + %3 * %4 * %5 / %6").arg(start, end, dx, rise, side, chord)});
+    } else {
+        const auto anchorEdge = std::ranges::find(draft_.edges, link.second.front(), &DraftEdge::name);
+        const auto anchor = link.reverseSecond ? anchorEdge->end : anchorEdge->start;
+        const auto scale = prefix + "scale";
+        QStringList rawLengths;
+        for (const auto& name : link.second) {
+            const auto edge = std::ranges::find(draft_.edges, name, &DraftEdge::name);
+            rawLengths.append(edge->control.isEmpty()
+                ? QStringLiteral("hypot(%2.x - %1.x, %2.y - %1.y)").arg(edge->start, edge->end)
+                : QStringLiteral("quadlen(%1.x, %1.y, %2.x, %2.y, %3.x, %3.y)")
+                    .arg(edge->start, edge->control, edge->end));
+        }
+        draft.parameters.append({prefix + "design", rawLengths.join(QStringLiteral(" + "))});
+        draft.parameters.append({scale, QStringLiteral("positive(%1source + (%2)) / positive(%1design)")
+            .arg(prefix, QString::number(link.targetEaseMm, 'g', 17))});
+        QHash<QString, QString> transformed;
+        const auto fitPoint = [&](const QString& raw) -> QString {
+            if (raw.isEmpty())
+                return {};
+            if (transformed.contains(raw))
+                return transformed.value(raw);
+            const auto name = prefix + QString::number(transformed.size() + 1);
+            const auto coordinate = [&](const QString& axis) {
+                return QStringLiteral("%1.%2 + (%3.%2 - %1.%2) * %4").arg(anchor, axis, raw, scale);
+            };
+            draft.points.append({name, coordinate(QStringLiteral("x")), coordinate(QStringLiteral("y"))});
+            transformed.insert(raw, name);
+            return name;
+        };
+        for (auto& edge : draft.edges) {
+            if (!targetNames.contains(edge.name))
+                continue;
+            edge.start = fitPoint(edge.start);
+            edge.end = fitPoint(edge.end);
+            edge.control = fitPoint(edge.control);
+        }
+        for (auto& item : candidate.entities_) {
+            if (item.piece == target && item.shape == Shape::Point)
+                item.draftName = fitPoint(item.draftName);
+        }
     }
     if (!candidate.setParametricDraft(std::move(draft), error)
         || !candidate.addSeamLink(std::move(link), error))
