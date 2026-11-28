@@ -1461,11 +1461,13 @@ bool PatternDocument::fitFormulaPieceToSeam(SeamLink link, QString* error, bool 
     auto candidate = *this;
     draft.parameters.append({prefix + "source", sourceLength});
     if (reshapeCurve) {
-        QStringList chords;
+        QStringList chords, fixedLengths;
         for (const auto& name : link.second) {
             auto edge = std::ranges::find(draft.edges, name, &DraftEdge::name);
-            if (edge->control.isEmpty())
-                return fail(QStringLiteral("Reshaping needs quadratic receiving edges."));
+            if (edge->control.isEmpty()) {
+                fixedLengths.append(name + ".len");
+                continue;
+            }
             const auto stem = prefix + QString::number(chords.size() + 1) + "_";
             chords.append(stem + "chord");
             const auto start = edge->start;
@@ -1479,7 +1481,7 @@ bool PatternDocument::fitFormulaPieceToSeam(SeamLink link, QString* error, bool 
             draft.parameters += {{dx, end + ".x - " + start + ".x"},
                                  {dy, end + ".y - " + start + ".y"},
                                  {chord, QStringLiteral("positive(hypot(%1, %2))").arg(dx, dy)},
-                                 {rise, QStringLiteral("archheight(%1, (%2source + (%3)) * %1 / %2chords)")
+                                 {rise, QStringLiteral("archheight(%1, (%2source + (%3) - %2fixed) * %1 / %2chords)")
                                      .arg(chord, prefix, QString::number(link.targetEaseMm, 'g', 17))},
                                  {side, QStringLiteral("iflt(%1 * (%2.y - %3.y) - %4 * (%2.x - %3.x), 0, -1, 1)")
                                      .arg(dx, rawControl, start, dy)}};
@@ -1488,7 +1490,11 @@ bool PatternDocument::fitFormulaPieceToSeam(SeamLink link, QString* error, bool 
                 QStringLiteral("(%1.x + %2.x) / 2 - %3 * %4 * %5 / %6").arg(start, end, dy, rise, side, chord),
                 QStringLiteral("(%1.y + %2.y) / 2 + %3 * %4 * %5 / %6").arg(start, end, dx, rise, side, chord)});
         }
+        if (chords.isEmpty())
+            return fail(QStringLiteral("Reshaping needs at least one quadratic receiving edge."));
         draft.parameters.append({prefix + "chords", chords.join(QStringLiteral(" + "))});
+        draft.parameters.append({prefix + "fixed", fixedLengths.isEmpty() ? QStringLiteral("0")
+                                                        : fixedLengths.join(QStringLiteral(" + "))});
     } else {
         const auto anchorEdge = std::ranges::find(draft_.edges, link.second.front(), &DraftEdge::name);
         const auto anchor = link.reverseSecond ? anchorEdge->end : anchorEdge->start;

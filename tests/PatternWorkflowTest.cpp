@@ -1053,7 +1053,7 @@ void testMaterialLay() {
 
 }
 
-void testJointOrder() {
+void testJointOrder(bool reproject = false) {
     QTemporaryDir directory;
     check(directory.isValid(), "Create a joint order fixture");
     const QDir root(directory.path());
@@ -1089,15 +1089,16 @@ void testJointOrder() {
             modal->accept();
         } else if (auto* machines = modal->findChild<QPlainTextEdit*>("jointOrderMachines")) {
             check(stage++ == 2, "Collect resources for the same order");
-            machines->setPlainText("100;1;10;0-4 10-18");
+            machines->setPlainText(reproject ? "100;1;10;0-9 15-23" : "100;1;10;0-4 10-18");
             modal->findChild<QPlainTextEdit*>("jointOrderRolls")->setPlainText(
-                QStringLiteral("Основной;100;120;0,55,10,10"));
+                reproject ? QStringLiteral("Основной;100;165;0,35,100,10")
+                          : QStringLiteral("Основной;100;120;0,55,10,10"));
             modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
         } else if (auto* schedule = modal->findChild<QTableWidget*>("cuttingOrderSchedule")) {
             check((stage == 3 || stage == 7) && schedule->rowCount() == 3,
                   "Preserve the schedule when opening the saved order");
-            check(schedule->item(1, 4)->text() == "10"
-                  && schedule->item(2, 5)->text() == "18",
+            check(schedule->item(1, 4)->text() == (reproject ? "15" : "10")
+                  && schedule->item(2, 5)->text() == (reproject ? "23" : "18"),
                   "Respect machine gaps and roll order");
             ++stage;
             modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
@@ -1129,14 +1130,25 @@ void testJointOrder() {
     const auto lays = order.value("lays").toArray();
     check(order.value("version").toInt() == 2 && lays.size() == 3, "Write the scheduled order format");
     const auto middle = lays[1].toObject().value("schedule").toObject();
-    check(middle.value("rollStartMm").toDouble() == 40 && middle.value("rollEndMm").toDouble() == 80
+    check(middle.value("rollStartMm").toDouble() == (reproject ? 85 : 40)
+          && middle.value("rollEndMm").toDouble() == (reproject ? 125 : 80)
           && output.exists("material-2.pdf") && output.exists("material-2.dxf"),
           "Export the actual scheduled roll segment");
     opc::PatternDocument marker;
-    check(marker.load(output.filePath("material-2.sofit"))
-          && marker.production().fabricFlaws == QVector<QRectF>{{0, 15, 10, 10}}
-          && marker.production().placements.front().position.x() >= 10,
-          "Persist the defect at its layer-relative position");
+    if (reproject) {
+        const auto first = lays[0].toObject().value("schedule").toObject();
+        const auto last = lays[2].toObject().value("schedule").toObject();
+        check(first.value("layerLengthMm").toDouble() == 85 && last.value("rollEndMm").toDouble() == 165
+              && marker.load(output.filePath("material-1.sofit"))
+              && marker.production().fabricFlaws == QVector<QRectF>{{0, 35, 100, 10}}
+              && marker.production().placements.front().position.y() == 45,
+              "Repeat projection after initial length 40 clips a defect, then after length 80 overlaps its trailing 5 mm");
+    } else {
+        check(marker.load(output.filePath("material-2.sofit"))
+              && marker.production().fabricFlaws == QVector<QRectF>{{0, 15, 10, 10}}
+              && marker.production().placements.front().position.x() >= 10,
+              "Persist the defect at its layer-relative position");
+    }
 
     timer.start(0);
     action(window, QStringLiteral("Открыть производственный заказ…")).trigger();
@@ -1362,6 +1374,7 @@ int main(int argc, char** argv) {
     testPlannedOrder(false, false, false, true);
     testPlannedOrder(false, false, false, true, true);
     testJointOrder();
+    testJointOrder(true);
     MainWindow window;
     window.show();
 

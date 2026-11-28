@@ -1326,6 +1326,19 @@ void checkTrackedConstruction() {
               "Fit two receiving curves as one chain with a fixed shared endpoint");
     }
     roundTripAndExport(multi, "L");
+    auto mixed = curvedPanel(curvedDraft);
+    check(mixed.insertConstruction(accessory, &error), error);
+    mixed.production().sizes = multi.production().sizes;
+    const auto fixed = mixed.entities()[namedEdge(mixed, "pocket_side")];
+    check(mixed.fitFormulaPieceToSeam(multiLink, &error, true), error);
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto grade = gradedPattern(mixed, size);
+        const auto& line = grade.entities()[namedEdge(grade, "pocket_side")];
+        check(grade.inspectSeamLinks().checks.front().withinTolerance && line.shape == Shape::Line
+              && line.a == fixed.a && line.b == fixed.b,
+              "Fit the curved member of a mixed sewing chain, leaving its straight member fixed");
+    }
+    roundTripAndExport(mixed, "L");
 
     check(curvedInstance.fitFormulaPieceToSeam(fitting, &error), error);
     const auto verifyFit = [&](const PatternDocument& pattern) {
