@@ -2256,17 +2256,17 @@ bool PatternDocument::refreshLibraryDependencies(const QString& projectPath, QSt
 }
 
 bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) {
-    QVector<Entity> base, original;
+    QVector<Entity> base;
     const auto evaluate = [&] {
         try {
-            original = bindDraftGeometry(DraftEvaluation(draft).geometry(draft));
-            base = original;
+            base = bindDraftGeometry(DraftEvaluation(draft).geometry(draft));
         } catch (const EvaluationError& failure) {
             if (error)
                 *error = failure.message;
             return false;
         }
-        return replayModeling(base, production_, draft, error);
+        return validateDraftSizes(draft, base, production_, error)
+            && replayModeling(base, production_, draft, error);
     };
     if (!evaluate())
         return false;
@@ -2291,9 +2291,6 @@ bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) 
         if (changed && !evaluate())
             return false;
     }
-    if (!validateDraftSizes(draft, original, production_, error))
-        return false;
-
     if (!seamLinks_.isEmpty() || !sizeCuts_.isEmpty()) {
         auto candidate = *this;
         candidate.entities_ = base;
