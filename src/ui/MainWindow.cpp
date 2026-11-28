@@ -1928,7 +1928,7 @@ void MainWindow::matchSeams(const QVector<qsizetype>& indices, bool reverseSecon
     reverse->setChecked(reverseSecond);
     form->addRow(reverse);
     auto* fit = new QComboBox(&dialog);
-    fit->addItems({tr("Use existing shapes"), tr("Scale formula piece B"), tr("Reshape one curve on B")});
+    fit->addItems({tr("Use existing shapes"), tr("Scale formula piece B"), tr("Reshape curves on B")});
     fit->setToolTip(tr("Fit the receiving pattern in every size. Reshaping preserves the curve endpoints and the rest of the contour."));
     form->addRow(tr("Fit to seam A"), fit);
     auto* summary = new QLabel(&dialog);

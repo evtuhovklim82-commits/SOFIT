@@ -110,77 +110,99 @@ PatternDocument uncutGradedPattern(const PatternDocument& document, const QStrin
         return document;
     }
 
-    QHash<QString, Entity> formulaObjects;
-    const auto target = std::ranges::find(document.production().sizes, size, &PatternSize::name);
-    if (target != document.production().sizes.cend()) {
-        const auto evaluated = document.evaluateSizeDraft(*target);
-        if (!evaluated)
-            return {};
-        for (const auto& entity : *evaluated)
-            formulaObjects.insert(entity.draftName, entity);
-    }
-
-    PatternDocument graded;
-    graded.pieces() = document.pieces();
-    graded.seamLinks_ = document.seamLinks_;
-    for (auto& piece : graded.pieces())
-        piece.size = size;
-    for (auto layer : {Layer::Main, Layer::Construction, Layer::Allowance})
-        graded.setLayerVisible(layer, document.layerVisible(layer));
-
-    QVector<QVector<const GradeRule*>> rules(document.pieces().size());
-    for (const auto& rule : document.production().rules) {
-        if (rule.size == size && rule.piece >= 0 && rule.piece < rules.size())
-            rules[rule.piece].append(&rule);
-    }
-    for (qsizetype index = 0; index < document.entities().size(); ++index) {
-        const auto& base = document.entities()[index];
-        auto entity = base;
-        const auto marks = base.gradedMarks.constFind(size);
-        if (marks != base.gradedMarks.cend()) {
-            entity.seamNotches = marks->notches;
-            entity.seamSymbols = marks->symbols;
+    const auto baseSize = std::ranges::find(document.production().sizes, size, &PatternSize::name);
+    const auto project = [&](const PatternSize* target) -> PatternDocument {
+        if (sourceIndices)
+            sourceIndices->clear();
+        QHash<QString, Entity> formulaObjects;
+        if (target) {
+            const auto evaluated = document.evaluateSizeDraft(*target);
+            if (!evaluated)
+                return {};
+            for (const auto& entity : *evaluated)
+                formulaObjects.insert(entity.draftName, entity);
         }
-        entity.gradedMarks.clear();
-        const auto computed = formulaObjects.constFind(base.draftName);
-        if (computed != formulaObjects.cend()) {
-            entity.a = computed->a;
-            entity.b = computed->b;
-            entity.control = computed->control;
+
+        PatternDocument graded;
+        graded.pieces() = document.pieces();
+        graded.seamLinks_ = document.seamLinks_;
+        for (auto& piece : graded.pieces())
+            piece.size = size;
+        for (auto layer : {Layer::Main, Layer::Construction, Layer::Allowance})
+            graded.setLayerVisible(layer, document.layerVisible(layer));
+
+        QVector<QVector<const GradeRule*>> rules(document.pieces().size());
+        for (const auto& rule : document.production().rules) {
+            if (rule.size == size && rule.piece >= 0 && rule.piece < rules.size())
+                rules[rule.piece].append(&rule);
         }
-        if (edgeNames == GradeEdgeNames::ForSeamLinks && graded.seamLinks().isEmpty())
-            entity.draftName.clear();
-        const auto append = [&](const Entity& gradedEntity) {
-            graded.insert(graded.entities().size(), gradedEntity);
-            if (sourceIndices)
-                sourceIndices->append(index);
-        };
-        const auto shift = [&](QPointF basePoint, QPointF point) {
-            if (entity.piece >= 0 && entity.piece < rules.size()) {
-                for (const auto* rule : rules[entity.piece]) {
-                    if (samePoint(rule->point, basePoint))
-                        return point + rule->offset;
+        for (qsizetype index = 0; index < document.entities().size(); ++index) {
+            const auto& base = document.entities()[index];
+            auto entity = base;
+            const auto marks = base.gradedMarks.constFind(size);
+            if (marks != base.gradedMarks.cend()) {
+                entity.seamNotches = marks->notches;
+                entity.seamSymbols = marks->symbols;
+            }
+            entity.gradedMarks.clear();
+            const auto computed = formulaObjects.constFind(base.draftName);
+            if (computed != formulaObjects.cend()) {
+                entity.a = computed->a;
+                entity.b = computed->b;
+                entity.control = computed->control;
+            }
+            if (edgeNames == GradeEdgeNames::ForSeamLinks && graded.seamLinks().isEmpty())
+                entity.draftName.clear();
+            const auto append = [&](const Entity& gradedEntity) {
+                graded.insert(graded.entities().size(), gradedEntity);
+                if (sourceIndices)
+                    sourceIndices->append(index);
+            };
+            const auto shift = [&](QPointF basePoint, QPointF point) {
+                if (entity.piece >= 0 && entity.piece < rules.size()) {
+                    for (const auto* rule : rules[entity.piece]) {
+                        if (samePoint(rule->point, basePoint))
+                            return point + rule->offset;
+                    }
+                }
+                return point;
+            };
+            if (entity.shape == Shape::Rectangle) {
+                auto points = entityPoints(entity);
+                auto moved = points;
+                std::ranges::transform(points, moved.begin(), [&](QPointF point) { return shift(point, point); });
+                if (!std::ranges::equal(moved, points, samePoint)) {
+                    for (int i = 0; i < 4; ++i)
+                        append({Shape::Line, moved[i], moved[(i + 1) % 4], {}, entity.piece, entity.layer});
+                    continue;
                 }
             }
-            return point;
-        };
-        if (entity.shape == Shape::Rectangle) {
-            auto points = entityPoints(entity);
-            auto moved = points;
-            std::ranges::transform(points, moved.begin(), [&](QPointF point) { return shift(point, point); });
-            if (!std::ranges::equal(moved, points, samePoint)) {
-                for (int i = 0; i < 4; ++i)
-                    append({Shape::Line, moved[i], moved[(i + 1) % 4], {}, entity.piece, entity.layer});
-                continue;
-            }
+            entity.a = shift(base.a, entity.a);
+            entity.b = entity.shape == Shape::Point ? entity.a : shift(base.b, entity.b);
+            if (entity.shape == Shape::Curve)
+                entity.control = shift(base.control, entity.control);
+            append(entity);
         }
-        entity.a = shift(base.a, entity.a);
-        entity.b = entity.shape == Shape::Point ? entity.a : shift(base.b, entity.b);
-        if (entity.shape == Shape::Curve)
-            entity.control = shift(base.control, entity.control);
-        append(entity);
+        return graded;
+    };
+    if (baseSize == document.production().sizes.cend())
+        return project(nullptr);
+    auto graded = project(&*baseSize);
+    if (std::ranges::none_of(document.seamLinks_, [](const auto& link) { return !link.gradedLengthMeasurement.isEmpty(); }))
+        return graded;
+    auto measuredSize = *baseSize;
+    const auto measured = graded.inspectSeamLinks().checks;
+    if (measured.size() != document.seamLinks_.size())
+        return {};
+    for (qsizetype i = 0; i < measured.size(); ++i) {
+        const auto& name = document.seamLinks_[i].gradedLengthMeasurement;
+        if (name.isEmpty())
+            continue;
+        if (!(measured[i].firstMm > 0))
+            return {};
+        measuredSize.measurements.insert(name, measured[i].firstMm);
     }
-    return graded;
+    return project(&measuredSize);
 }
 
 bool appendMarkerModel(PatternDocument& destination, const PatternDocument& source,

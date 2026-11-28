@@ -1193,6 +1193,7 @@ bool PatternDocument::insertConstruction(const PatternDocument& source, QString*
     for (auto seam : source.seamLinks_) {
         mapObjects(seam.first);
         mapObjects(seam.second);
+        seam.gradedLengthMeasurement = scalarNames.value(seam.gradedLengthMeasurement, seam.gradedLengthMeasurement);
         candidate.seamLinks_.append(std::move(seam));
     }
 
@@ -1460,28 +1461,34 @@ bool PatternDocument::fitFormulaPieceToSeam(SeamLink link, QString* error, bool 
     auto candidate = *this;
     draft.parameters.append({prefix + "source", sourceLength});
     if (reshapeCurve) {
-        if (link.second.size() != 1 || second->shape != Shape::Curve)
-            return fail(QStringLiteral("Curve fitting needs one quadratic receiving edge."));
-        auto edge = std::ranges::find(draft.edges, link.second.front(), &DraftEdge::name);
-        const auto start = edge->start;
-        const auto end = edge->end;
-        const auto rawControl = edge->control;
-        const auto chord = prefix + "chord";
-        const auto rise = prefix + "rise";
-        const auto side = prefix + "side";
-        const auto dx = prefix + "dx";
-        const auto dy = prefix + "dy";
-        draft.parameters += {{dx, end + ".x - " + start + ".x"},
-                             {dy, end + ".y - " + start + ".y"},
-                             {chord, QStringLiteral("positive(hypot(%1, %2))").arg(dx, dy)},
-                             {rise, QStringLiteral("archheight(%1, %2source + (%3))")
-                                 .arg(chord, prefix, QString::number(link.targetEaseMm, 'g', 17))},
-                             {side, QStringLiteral("iflt(%1 * (%2.y - %3.y) - %4 * (%2.x - %3.x), 0, -1, 1)")
-                                 .arg(dx, rawControl, start, dy)}};
-        edge->control = prefix + "control";
-        draft.points.append({edge->control,
-            QStringLiteral("(%1.x + %2.x) / 2 - %3 * %4 * %5 / %6").arg(start, end, dy, rise, side, chord),
-            QStringLiteral("(%1.y + %2.y) / 2 + %3 * %4 * %5 / %6").arg(start, end, dx, rise, side, chord)});
+        QStringList chords;
+        for (const auto& name : link.second) {
+            auto edge = std::ranges::find(draft.edges, name, &DraftEdge::name);
+            if (edge->control.isEmpty())
+                return fail(QStringLiteral("Reshaping needs quadratic receiving edges."));
+            const auto stem = prefix + QString::number(chords.size() + 1) + "_";
+            chords.append(stem + "chord");
+            const auto start = edge->start;
+            const auto end = edge->end;
+            const auto rawControl = edge->control;
+            const auto chord = stem + "chord";
+            const auto rise = stem + "rise";
+            const auto side = stem + "side";
+            const auto dx = stem + "dx";
+            const auto dy = stem + "dy";
+            draft.parameters += {{dx, end + ".x - " + start + ".x"},
+                                 {dy, end + ".y - " + start + ".y"},
+                                 {chord, QStringLiteral("positive(hypot(%1, %2))").arg(dx, dy)},
+                                 {rise, QStringLiteral("archheight(%1, (%2source + (%3)) * %1 / %2chords)")
+                                     .arg(chord, prefix, QString::number(link.targetEaseMm, 'g', 17))},
+                                 {side, QStringLiteral("iflt(%1 * (%2.y - %3.y) - %4 * (%2.x - %3.x), 0, -1, 1)")
+                                     .arg(dx, rawControl, start, dy)}};
+            edge->control = stem + "control";
+            draft.points.append({edge->control,
+                QStringLiteral("(%1.x + %2.x) / 2 - %3 * %4 * %5 / %6").arg(start, end, dy, rise, side, chord),
+                QStringLiteral("(%1.y + %2.y) / 2 + %3 * %4 * %5 / %6").arg(start, end, dx, rise, side, chord)});
+        }
+        draft.parameters.append({prefix + "chords", chords.join(QStringLiteral(" + "))});
     } else {
         const auto anchorEdge = std::ranges::find(draft_.edges, link.second.front(), &DraftEdge::name);
         const auto anchor = link.reverseSecond ? anchorEdge->end : anchorEdge->start;
@@ -2029,14 +2036,38 @@ bool PatternDocument::updateLibraryConstruction(qsizetype index, const PatternDo
             std::ranges::reverse(lengths);
             const QRegularExpression chain(QStringLiteral(R"(\(\s*(?:%1|%2)\s*\))")
                 .arg(forward, lengths.join(separator)));
-            const auto matches = formula.split(chain);
+            auto remainder = formula.split(chain);
+            QStringList sectionLengths;
             for (const auto& name : merge.targetEdges) {
-                const QRegularExpression partial(QStringLiteral(R"(\b%1\.len\b)")
-                    .arg(QRegularExpression::escape(name)));
-                if (std::ranges::any_of(matches, [&](const auto& part) { return part.contains(partial); }))
-                    return false;
+                const auto edge = std::ranges::find(draft_.edges, name, &DraftEdge::name);
+                const auto keptPoint = [&](const QString& point) {
+                    return std::ranges::find(draft.points, point, &DraftPoint::name) != draft.points.end();
+                };
+                if (edge == draft_.edges.end() || !keptPoint(edge->start) || !keptPoint(edge->end)
+                    || (!edge->control.isEmpty() && !keptPoint(edge->control))) {
+                    sectionLengths.clear();
+                    break;
+                }
+                sectionLengths.append(edge->control.isEmpty()
+                    ? QStringLiteral("hypot(%2.x - %1.x, %2.y - %1.y)").arg(edge->start, edge->end)
+                    : QStringLiteral("quadlen(%1.x, %1.y, %2.x, %2.y, %3.x, %3.y)")
+                        .arg(edge->start, edge->control, edge->end));
             }
-            formula = matches.join(merge.targetEdges.front() + ".len");
+            for (qsizetype i = 0; i < merge.targetEdges.size(); ++i) {
+                const QRegularExpression partial(QStringLiteral(R"(\b%1\.len\b)")
+                    .arg(QRegularExpression::escape(merge.targetEdges[i])));
+                for (auto& part : remainder) {
+                    if (!part.contains(partial))
+                        continue;
+                    if (sectionLengths.isEmpty())
+                        return false;
+                    // Stage substitutions so the surviving edge reference is not remapped again.
+                    part.replace(partial, QStringLiteral("(%%MERGED%% * %1 / positive(%2))")
+                        .arg(sectionLengths[i], sectionLengths.join(QStringLiteral(" + "))));
+                }
+            }
+            formula = remainder.join(merge.targetEdges.front() + ".len");
+            formula.replace(QStringLiteral("%%MERGED%%"), merge.targetEdges.front() + ".len");
         }
         return true;
     };
@@ -2225,18 +2256,42 @@ bool PatternDocument::refreshLibraryDependencies(const QString& projectPath, QSt
 }
 
 bool PatternDocument::setParametricDraft(ParametricDraft draft, QString* error) {
-    QVector<Entity> generated;
-    try {
-        generated = DraftEvaluation(draft).geometry(draft);
-    } catch (const EvaluationError& failure) {
-        if (error)
-            *error = failure.message;
+    QVector<Entity> base, original;
+    const auto evaluate = [&] {
+        try {
+            original = bindDraftGeometry(DraftEvaluation(draft).geometry(draft));
+            base = original;
+        } catch (const EvaluationError& failure) {
+            if (error)
+                *error = failure.message;
+            return false;
+        }
+        return replayModeling(base, production_, draft, error);
+    };
+    if (!evaluate())
         return false;
+    if (std::ranges::any_of(seamLinks_, [](const auto& link) { return !link.gradedLengthMeasurement.isEmpty(); })) {
+        auto measuring = *this;
+        measuring.entities_ = base;
+        const auto checks = measuring.inspectSeamLinks().checks;
+        bool changed = false;
+        for (qsizetype i = 0; i < seamLinks_.size(); ++i) {
+            const auto& name = seamLinks_[i].gradedLengthMeasurement;
+            if (name.isEmpty())
+                continue;
+            const auto measurement = std::ranges::find(draft.measurements, name, &Measurement::name);
+            if (measurement == draft.measurements.end() || !(checks[i].firstMm > 0)) {
+                if (error)
+                    *error = QStringLiteral("The driving sewing chain could not be measured.");
+                return false;
+            }
+            changed |= measurement->mm != checks[i].firstMm;
+            measurement->mm = checks[i].firstMm;
+        }
+        if (changed && !evaluate())
+            return false;
     }
-
-    auto base = bindDraftGeometry(std::move(generated));
-    if (!validateDraftSizes(draft, base, production_, error)
-        || !replayModeling(base, production_, draft, error))
+    if (!validateDraftSizes(draft, original, production_, error))
         return false;
 
     if (!seamLinks_.isEmpty() || !sizeCuts_.isEmpty()) {

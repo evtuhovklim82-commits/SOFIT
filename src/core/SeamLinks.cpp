@@ -138,6 +138,12 @@ bool PatternDocument::validateSeamLinks(QString* error) const {
                     *error = QStringLiteral("%1 · Seam link %2: %3").arg(size).arg(i + 1).arg(report.checks[i].error);
                 return false;
             }
+            if (!seamLinks_[i].gradedLengthMeasurement.isEmpty() && !report.checks[i].withinTolerance) {
+                if (error)
+                    *error = QStringLiteral("%1 · Seam link %2: the fitted curve no longer matches its driving chain.")
+                        .arg(size).arg(i + 1);
+                return false;
+            }
         }
         // Validate against the actual cutting contour, including the shared widths.
         for (qsizetype piece = 0; piece < pattern.pieces().size(); ++piece) {
@@ -166,6 +172,15 @@ bool PatternDocument::addSeamLink(SeamLink link, QString* error) {
     if (!validLink(link) || seamLinks_.contains(link)) {
         if (error)
             *error = QStringLiteral("A seam link needs distinct named edges and valid settings and must be unique.");
+        return false;
+    }
+    if (!link.gradedLengthMeasurement.isEmpty()
+        && (std::ranges::find(draft_.measurements, link.gradedLengthMeasurement, &Measurement::name) == draft_.measurements.end()
+            || std::ranges::any_of(seamLinks_, [&](const auto& previous) {
+                return previous.gradedLengthMeasurement == link.gradedLengthMeasurement;
+            }))) {
+        if (error)
+            *error = QStringLiteral("A graded seam needs its own existing draft measurement.");
         return false;
     }
     auto candidate = *this;

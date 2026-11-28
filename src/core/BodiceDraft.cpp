@@ -433,9 +433,11 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
                 edge.reversed = !edge.reversed;
         }
         const auto piece = document.entities()[section.edges.front().index].piece;
-        if (piece < 0 || analyzePiece(document, piece).error != ContourError::None
-            || std::ranges::any_of(document.production().rules, [piece](const auto& rule) { return rule.piece == piece; }))
-            return fail(QStringLiteral("Each armhole must belong to a closed piece with measurement-based grading."));
+        const bool pointGraded = std::ranges::any_of(document.production().rules,
+            [piece](const auto& rule) { return rule.piece == piece; });
+        if (piece < 0 || analyzePiece(document, piece).error != ContourError::None || (pointGraded && !m.twoPiece))
+            return fail(QStringLiteral("Each armhole must belong to a closed piece. Point grading needs the two-piece mode."));
+        bool measureProjected = pointGraded;
         SeamLink link;
         link.reverseFirst = section.edges.front().reversed;
         link.targetEaseMm = ease;
@@ -462,10 +464,19 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
                 entity.draftName = id;
                 candidate.replace(entry.index, entity);
             } else if (!definitions.contains(entity.draftName)) {
-                return fail(QStringLiteral("The selected modeled output has no original formula definition."));
+                if (!m.twoPiece || !entity.draftName.startsWith(u'@'))
+                    return fail(QStringLiteral("The selected output cannot be tracked across sizes."));
+                measureProjected = true;
             }
             terms.append(entity.draftName + ".len");
             link.first.append(entity.draftName);
+        }
+        if (measureProjected) {
+            if (!document.production().useDraftMeasurements && !document.production().sizes.isEmpty())
+                return fail(QStringLiteral("Enable formula evaluation to combine fitted sleeves with point grading."));
+            link.gradedLengthMeasurement = prefix + side + "_source_length";
+            draft.measurements.append({link.gradedLengthMeasurement, section.lengthMm});
+            terms = {link.gradedLengthMeasurement};
         }
         draft.parameters.append({prefix + side + "_width", QStringLiteral("capwidth(%1rise, (%2) + %3)")
             .arg(prefix, terms.join(QStringLiteral(" + ")), QString::number(ease, 'g', 17))});

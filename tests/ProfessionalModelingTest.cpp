@@ -1305,6 +1305,28 @@ void checkTrackedConstruction() {
               "Both reshaped sewing chains match in each size");
     }
     roundTripAndExport(reshaped, "L");
+
+    auto multiDraft = accessoryDraft;
+    multiDraft.points.append({"PocketSideControl", "460", "25"});
+    multiDraft.edges[1].control = "PocketSideControl";
+    auto multiAccessory = curvedPanel(multiDraft);
+    auto multi = curvedPanel(curvedDraft);
+    check(multi.insertConstruction(multiAccessory, &error), error);
+    SeamLink multiLink;
+    multiLink.first = {"top", "right"};
+    multiLink.second = {"pocket_opening", "pocket_side"};
+    multiLink.toleranceMm = 0.01;
+    multi.production().sizes = {{"L", {{"width", 90}}}};
+    const auto junction = multi.entities()[namedEdge(multi, "pocket_side")].a;
+    check(multi.fitFormulaPieceToSeam(multiLink, &error, true), error);
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto grade = gradedPattern(multi, size);
+        check(grade.inspectSeamLinks().checks.front().withinTolerance
+              && grade.entities()[namedEdge(grade, "pocket_side")].a == junction,
+              "Fit two receiving curves as one chain with a fixed shared endpoint");
+    }
+    roundTripAndExport(multi, "L");
+
     check(curvedInstance.fitFormulaPieceToSeam(fitting, &error), error);
     const auto verifyFit = [&](const PatternDocument& pattern) {
         for (const auto& size : {QString{}, QStringLiteral("L")}) {
@@ -1333,8 +1355,21 @@ void checkTrackedConstruction() {
     check(gradeAfterSplit.inspectSeamLinks().checks.front().firstMm > originalLength,
           "The dependency follows the changed chain geometry, including its added segment");
     roundTripAndExport(curvedInstance, "L");
-    check(curvedInstance.updateLibraryConstruction(0, curvedSource, &error, {}, {},
+    const auto tailName = curvedInstance.libraryInstances().front().edges.value("curve_tail");
+    auto withPartial = curvedInstance.parametricDraft();
+    withPartial.parameters.append({"tail_share", tailName + ".len"});
+    check(curvedInstance.setParametricDraft(std::move(withPartial), &error), error);
+    auto mergedDraft = curvedDraft;
+    mergedDraft.points += subdivided.points.sliced(curvedDraft.points.size());
+    const auto mergedWithLandmarks = curvedPanel(mergedDraft);
+    check(curvedInstance.updateLibraryConstruction(0, mergedWithLandmarks, &error, {}, {},
           {{"right", {"curve_head", "curve_tail"}}}), error);
+    for (const auto& size : {QString{}, QStringLiteral("L")}) {
+        const auto partLength = curvedInstance.evaluateSizeFormula(size, "tail_share", &error);
+        const auto wholeLength = curvedInstance.evaluateSizeFormula(size, "right.len", &error);
+        check(partLength && wholeLength && near(*partLength, *wholeLength / 2),
+              "A downstream formula follows one half of a merged curve in every size");
+    }
     check(curvedInstance.entities()[namedEdge(curvedInstance, "right")].shape == Shape::Curve
           && analyzePiece(gradedPattern(curvedInstance, "L"), 0).error == ContourError::None,
           "Replay a tangent-continuous quadratic split and merge across sizes");
@@ -1509,12 +1544,18 @@ void checkLinkedSleeve() {
     };
     const auto importedFront = armhole(0, 160);
     const auto importedBack = armhole(200, 185);
+    imported.production().sizes.append({"Manual"});
+    imported.production().rules.append({"Manual", 0, {35, 80}, {10, 14}});
     check(addLinkedSleeve(imported, importedFront, importedBack, {500, 85, 170, 4, 6, 1, true},
                           false, false, &error), error);
     const auto importedChecks = imported.inspectSeamLinks().checks;
     check(importedChecks.size() == 4 && std::ranges::all_of(importedChecks, &SeamLinkCheck::withinTolerance),
           "Draft matched sleeve panels from nonparametric quadratic and straight armhole sections");
-    roundTripAndExport(imported);
+    const auto manualChecks = gradedPattern(imported, "Manual").inspectSeamLinks().checks;
+    check(manualChecks.size() == 4 && std::ranges::all_of(manualChecks, &SeamLinkCheck::withinTolerance)
+          && !near(importedChecks.front().firstMm, manualChecks.front().firstMm),
+          "Fit the cap after applying actual point grading on a multi-edge armhole");
+    roundTripAndExport(imported, "Manual");
 }
 
 void checkLinkedNeckStand() {
@@ -1614,6 +1655,32 @@ void checkPleatExtensions() {
               "Reflect the inserted strip profile at the centre fold in each size");
     }
     roundTripAndExport(pattern, "L");
+
+    auto sleeveSource = pattern;
+    check(sleeveSource.insertConstruction(pattern, &error), error);
+    const auto gradedSource = gradedPattern(sleeveSource, "L", nullptr, GradeEdgeNames::Preserve);
+    const auto chooseOutput = [&](qsizetype piece) {
+        for (qsizetype i = 0; i < sleeveSource.entities().size(); ++i) {
+            const auto& edge = sleeveSource.entities()[i];
+            if (edge.piece != piece || edge.layer != Layer::Main || !edge.draftName.startsWith(u'@'))
+                continue;
+            const auto gradeIndex = namedEdge(gradedSource, edge.draftName);
+            const auto baseLength = seamLength(edge);
+            const auto gradeLength = seamLength(gradedSource.entities()[gradeIndex]);
+            if (baseLength && gradeLength && *baseLength > 40 && std::abs(*baseLength - *gradeLength) > 1)
+                return i;
+        }
+        return qsizetype{-1};
+    };
+    const auto frontOutput = chooseOutput(0);
+    const auto backOutput = chooseOutput(1);
+    check(frontOutput >= 0 && backOutput >= 0, "Find graded edges generated by both pleat procedures");
+    check(addLinkedSleeve(sleeveSource, {frontOutput}, {backOutput}, {350, 25, 100, 3, 5, 1, true},
+                          false, false, &error), error);
+    const auto fittedOutput = gradedPattern(sleeveSource, "L").inspectSeamLinks();
+    check(fittedOutput.checks.size() == 4 && std::ranges::all_of(fittedOutput.checks, &SeamLinkCheck::withinTolerance),
+          "Fit both cap panels to replayed procedural output before grading and export");
+    roundTripAndExport(sleeveSource, "L");
 
     auto bowed = draft;
     bowed.points.append({"Cap", "width / 2", "-20"});

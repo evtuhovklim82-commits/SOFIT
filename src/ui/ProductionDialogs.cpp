@@ -2758,20 +2758,26 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
                 const auto existing = segmentLayouts.constFind(key);
                 if (existing != segmentLayouts.cend())
                     return *existing ? std::optional{(**existing).length} : std::nullopt;
-                // Re-nest against the defects folded onto this layer. A new length
-                // changes that projection, so validate again before accepting it.
-                const auto arranged = opc::arrangeFabric(document, data);
-                if (arranged.optimizedLengthMm) {
+                // Changing layer length changes which defects coincide across layers.
+                // Retry distinct projections and validate the resulting geometry before saving it.
+                QSet<double> tried{layout.length};
+                for (int attempt = 0; attempt < 5; ++attempt) {
+                    const auto arranged = opc::arrangeFabric(document, data);
+                    if (!arranged.optimizedLengthMm)
+                        break;
                     const auto length = *arranged.optimizedLengthMm;
-                    if (offset + length * layers <= resources->rolls[roll].availableLengthMm
-                        && (repeat <= 0 || layers == 1 || std::abs(std::remainder(length, repeat)) <= 1e-6)) {
-                        data.placements = arranged.placements;
-                        data.fabricFlaws = foldFlaws(roll, offset, length, layers);
-                        if (opc::cuttingReport(document, data).canExport(data.fabricWidth)) {
-                            segmentLayouts.insert(key, RollLayout{std::move(data), length});
-                            return length;
-                        }
+                    if (offset + length * layers > resources->rolls[roll].availableLengthMm
+                        || (repeat > 0 && layers > 1 && std::abs(std::remainder(length, repeat)) > 1e-6))
+                        break;
+                    data.placements = arranged.placements;
+                    data.fabricFlaws = foldFlaws(roll, offset, length, layers);
+                    if (opc::cuttingReport(document, data).canExport(data.fabricWidth)) {
+                        segmentLayouts.insert(key, RollLayout{std::move(data), length});
+                        return length;
                     }
+                    if (tried.contains(length))
+                        break;
+                    tried.insert(length);
                 }
                 segmentLayouts.insert(key, std::nullopt);
                 return std::nullopt;

@@ -108,6 +108,7 @@ struct SeamLink {
     double toleranceMm = 1;
     int notchPairs = 0;
     std::optional<double> allowanceMm;
+    QString gradedLengthMeasurement;
     bool operator==(const SeamLink&) const = default;
 };
 

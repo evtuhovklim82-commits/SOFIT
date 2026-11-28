@@ -190,6 +190,8 @@ QJsonArray PatternDocument::saveSeamLinks(const QVector<SeamLink>& seamLinks) {
         };
         if (link.allowanceMm)
             record.insert("allowance", *link.allowanceMm);
+        if (!link.gradedLengthMeasurement.isEmpty())
+            record.insert("gradedLengthMeasurement", link.gradedLengthMeasurement);
         links.append(record);
     }
     return links;
@@ -956,6 +958,11 @@ bool PatternDocument::loadPayload(const QJsonObject& root, bool native, const QD
                 if (!record.value("allowance").isDouble())
                     return fail(QStringLiteral("Invalid shared seam allowance"));
                 link.allowanceMm = record.value("allowance").toDouble();
+            }
+            if (record.contains("gradedLengthMeasurement")) {
+                if (!record.value("gradedLengthMeasurement").isString())
+                    return fail(QStringLiteral("Invalid graded seam measurement"));
+                link.gradedLengthMeasurement = record.value("gradedLengthMeasurement").toString();
             }
             if (!loaded.addSeamLink(std::move(link), error))
                 return false;
