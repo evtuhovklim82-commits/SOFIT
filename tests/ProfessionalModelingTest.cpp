@@ -1477,6 +1477,27 @@ void checkLinkedSleeve() {
         check(near(*seamLength(frontHem) + *seamLength(backHem), 240), "Keep the requested finished hem circumference");
     }
     roundTripAndExport(*panels, "L");
+
+    PatternDocument imported;
+    const auto armhole = [&](double x, double depth) {
+        const auto piece = imported.pieces().size();
+        imported.pieces().append({"Imported bodice", 5});
+        const auto start = imported.entities().size();
+        const QPointF a(x, 0), b(x + 35, depth / 2), c(x + 85, depth), d(x, depth);
+        imported.insert(start, {Shape::Curve, a, b, {x + 40, 0}, piece});
+        imported.insert(start + 1, {Shape::Line, b, c, {}, piece});
+        imported.insert(start + 2, {Shape::Line, c, d, {}, piece});
+        imported.insert(start + 3, {Shape::Line, d, a, {}, piece});
+        return QVector<qsizetype>{start, start + 1};
+    };
+    const auto importedFront = armhole(0, 160);
+    const auto importedBack = armhole(200, 185);
+    check(addLinkedSleeve(imported, importedFront, importedBack, {500, 85, 170, 4, 6, 1, true},
+                          false, false, &error), error);
+    const auto importedChecks = imported.inspectSeamLinks().checks;
+    check(importedChecks.size() == 4 && std::ranges::all_of(importedChecks, &SeamLinkCheck::withinTolerance),
+          "Draft matched sleeve panels from nonparametric quadratic and straight armhole sections");
+    roundTripAndExport(imported);
 }
 
 void checkLinkedNeckStand() {

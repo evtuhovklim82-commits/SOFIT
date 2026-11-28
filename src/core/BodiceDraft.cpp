@@ -395,11 +395,11 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
           && m.backEaseMm >= 0 && m.backEaseMm <= 200 && m.notchPairs >= 0 && m.notchPairs <= 20))
         return fail(QStringLiteral("Check the sleeve length, cap height, hem width, ease and notch count."));
     if (front.size() > 16 || back.size() > 16)
-        return fail(QStringLiteral("Select up to 16 formula edges for each armhole."));
+        return fail(QStringLiteral("Select up to 16 edges for each armhole."));
     auto frontSeam = measureSeamSection(document, front);
     auto backSeam = measureSeamSection(document, back);
     if (!frontSeam || !backSeam || std::ranges::any_of(front, [&](qsizetype index) { return back.contains(index); }))
-        return fail(QStringLiteral("Select distinct open formula chains for the front and back armholes."));
+        return fail(QStringLiteral("Select distinct open chains for the front and back armholes."));
 
     auto draft = document.parametricDraft();
     QSet<QString> occupied;
@@ -423,6 +423,7 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
 
     draft.measurements += {{prefix + "length", m.lengthMm}, {prefix + "rise", m.capRiseMm},
                           {prefix + "hem", m.hemWidthMm}};
+    auto candidate = document;
     QVector<SeamLink> links;
     for (auto [section, reverse, side, ease] : {std::tuple{*frontSeam, reverseFront, QString("front"), m.frontEaseMm},
                                               {*backSeam, reverseBack, QString("back"), m.backEaseMm}}) {
@@ -443,10 +444,26 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
         link.second = {prefix + side + "_cap"};
         QStringList terms;
         for (const auto& entry : section.edges) {
-            const auto& entity = document.entities()[entry.index];
-            const auto definition = definitions.constFind(entity.draftName);
-            if (definition == definitions.cend())
-                return fail(QStringLiteral("Every armhole edge must have an original formula definition."));
+            auto entity = document.entities()[entry.index];
+            if (entity.draftName.isEmpty()) {
+                if (!m.twoPiece)
+                    return fail(QStringLiteral("Every armhole edge must have an original formula definition."));
+                const auto id = prefix + side + QStringLiteral("_source_%1").arg(terms.size() + 1);
+                const auto addPoint = [&](const QString& suffix, QPointF point) {
+                    const auto name = id + suffix;
+                    draft.points.append({name, QString::number(point.x(), 'g', 17),
+                                               QString::number(point.y(), 'g', 17)});
+                    return name;
+                };
+                const auto start = addPoint("_start", entity.a);
+                const auto end = addPoint("_end", entity.b);
+                const auto control = entity.shape == Shape::Curve ? addPoint("_control", entity.control) : QString{};
+                draft.edges.append({id, start, end, control});
+                entity.draftName = id;
+                candidate.replace(entry.index, entity);
+            } else if (!definitions.contains(entity.draftName)) {
+                return fail(QStringLiteral("The selected modeled output has no original formula definition."));
+            }
             terms.append(entity.draftName + ".len");
             link.first.append(entity.draftName);
         }
@@ -469,7 +486,6 @@ bool addLinkedSleeve(PatternDocument& document, const QVector<qsizetype>& front,
     const auto point = [&](const QString& name, const QString& x, const QString& y) {
         draft.points.append({prefix + name, x, y});
     };
-    auto candidate = document;
     const auto firstPiece = candidate.pieces().size();
     const auto installPiece = [&](const QString& name, const QVector<DraftEdge>& edges) {
         const auto piece = candidate.pieces().size();

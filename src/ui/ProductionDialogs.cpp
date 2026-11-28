@@ -2736,6 +2736,9 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
                 }
                 return local;
             };
+            // The search and the saved order must use the same placements for a roll segment.
+            using Segment = std::tuple<qsizetype, qsizetype, double, int>;
+            QMap<Segment, std::optional<RollLayout>> segmentLayouts;
             const auto measure = [&](qsizetype index, qsizetype roll, double offset, int layers)
                 -> std::optional<double> {
                 const auto& layout = layouts[index];
@@ -2749,9 +2752,29 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
                     return layout.length;
                 auto data = layout.data;
                 data.fabricFlaws = flaws;
-                if (!opc::cuttingReport(document, data).canExport(data.fabricWidth))
-                    return std::nullopt;
-                return layout.length;
+                if (opc::cuttingReport(document, data).canExport(data.fabricWidth))
+                    return layout.length;
+                const Segment key{index, roll, offset, layers};
+                const auto existing = segmentLayouts.constFind(key);
+                if (existing != segmentLayouts.cend())
+                    return *existing ? std::optional{(**existing).length} : std::nullopt;
+                // Re-nest against the defects folded onto this layer. A new length
+                // changes that projection, so validate again before accepting it.
+                const auto arranged = opc::arrangeFabric(document, data);
+                if (arranged.optimizedLengthMm) {
+                    const auto length = *arranged.optimizedLengthMm;
+                    if (offset + length * layers <= resources->rolls[roll].availableLengthMm
+                        && (repeat <= 0 || layers == 1 || std::abs(std::remainder(length, repeat)) <= 1e-6)) {
+                        data.placements = arranged.placements;
+                        data.fabricFlaws = foldFlaws(roll, offset, length, layers);
+                        if (opc::cuttingReport(document, data).canExport(data.fabricWidth)) {
+                            segmentLayouts.insert(key, RollLayout{std::move(data), length});
+                            return length;
+                        }
+                    }
+                }
+                segmentLayouts.insert(key, std::nullopt);
+                return std::nullopt;
             };
             const auto schedule = opc::scheduleCuttingOrder(jointDemand, markers, resources->machines,
                                                             resources->rolls, measure);
@@ -2768,7 +2791,8 @@ void planMaterialOrder(QWidget* parent, const opc::PatternDocument& document) {
                 const LayKey key{markers[lay.marker].material, number};
                 auto project = document;
                 auto& data = project.production();
-                data = layouts[lay.marker].data;
+                const auto alternative = segmentLayouts.constFind({lay.marker, lay.roll, lay.rollStartMm, lay.layers});
+                data = alternative != segmentLayouts.cend() && *alternative ? (**alternative).data : layouts[lay.marker].data;
                 data.fabricFlaws = foldFlaws(lay.roll, lay.rollStartMm, lay.layerLengthMm, lay.layers);
                 candidate.production().placements.append(data.placements);
                 for (qsizetype i = 0; i < data.placements.size(); ++i)

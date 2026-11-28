@@ -822,7 +822,7 @@ MainWindow::MainWindow() : view_(new PatternView(&scene_, this)) {
         for (const auto index : selectedObjects())
             byPiece[doc_.entities()[index].piece].append(index);
         if (byPiece.size() != 2 || byPiece.firstKey() < 0) {
-            QMessageBox::information(this, title, tr("Select a continuous chain of formula edges on each of two armhole pieces."));
+            QMessageBox::information(this, title, tr("Select a continuous chain on each of two armhole pieces."));
             return;
         }
         QDialog dialog(this);

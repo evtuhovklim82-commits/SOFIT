@@ -1091,7 +1091,7 @@ void testJointOrder() {
             check(stage++ == 2, "Collect resources for the same order");
             machines->setPlainText("100;1;10;0-4 10-18");
             modal->findChild<QPlainTextEdit*>("jointOrderRolls")->setPlainText(
-                QStringLiteral("Основной;100;120;90,55,5,10"));
+                QStringLiteral("Основной;100;120;0,55,10,10"));
             modal->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
         } else if (auto* schedule = modal->findChild<QTableWidget*>("cuttingOrderSchedule")) {
             check((stage == 3 || stage == 7) && schedule->rowCount() == 3,
@@ -1134,7 +1134,8 @@ void testJointOrder() {
           "Export the actual scheduled roll segment");
     opc::PatternDocument marker;
     check(marker.load(output.filePath("material-2.sofit"))
-          && marker.production().fabricFlaws == QVector<QRectF>{{90, 15, 5, 10}},
+          && marker.production().fabricFlaws == QVector<QRectF>{{0, 15, 10, 10}}
+          && marker.production().placements.front().position.x() >= 10,
           "Persist the defect at its layer-relative position");
 
     timer.start(0);
